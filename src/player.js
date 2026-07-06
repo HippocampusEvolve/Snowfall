@@ -6,13 +6,21 @@ const WALK_SPEED = 3.0;
 const RUN_SPEED = 5.9;
 const BOUNDS = 72;
 
+const GRAV = 24; // гравитация, м/с²
+const STEP_UP = 0.55; // высота шага вверх (ступеньки/склон)
+const STEP_DOWN = 0.45; // прилипание к полу при спуске (иначе прыжки на бугорках)
+const FALL_PROBE = 4.0; // как глубоко ищем пол под ногами (дно ямы)
+
 // Игрок от первого лица: WASD + Shift-бег, head bob, шаги по дистанции.
+// Вертикаль — не привязка к heightmap, а гравитация + опора на воксельный SDF:
+// можно провалиться в вырытую яму и зайти в пещеру (через Digger.surfaceBelow).
 export class Player {
-  constructor(camera, domElement, terrain, onStep, obstacles = []) {
+  constructor(camera, domElement, terrain, onStep, obstacles = [], digger = null) {
     this.camera = camera;
     this.terrain = terrain;
     this.onStep = onStep;
     this.obstacles = obstacles;
+    this.digger = digger;
     this.controls = new PointerLockControls(camera, domElement);
 
     this.keys = new Set();
@@ -37,7 +45,11 @@ export class Player {
     // debug-режим (?debug): без pointer lock, поворот стрелками
     this.debug = new URLSearchParams(location.search).has('debug');
 
-    camera.position.set(0, terrain.getHeight(0, 0) + EYE, 0);
+    // вертикальное состояние: Y ступней, скорость падения, на земле ли
+    this.footY = terrain.getHeight(0, 0);
+    this.vy = 0;
+    this.grounded = true;
+    camera.position.set(0, this.footY + EYE, 0);
 
     addEventListener('keydown', (e) => this.keys.add(e.code));
     addEventListener('keyup', (e) => this.keys.delete(e.code));
@@ -120,8 +132,54 @@ export class Player {
     const bobY = Math.sin(this.bobT * 2.0) * this.bobAmt;
     const bobX = Math.cos(this.bobT) * this.bobAmt * 0.55;
 
-    const groundH = this.terrain.getHeight(cam.position.x, cam.position.z);
-    cam.position.y = groundH + EYE + bobY;
+    // --- вертикаль: гравитация + опора на воксельный SDF (ямы, пещеры) ---
+    const dig = this.digger;
+
+    // выталкивание корпуса из стен: сэмплим плотность на нескольких высотах над
+    // ступнёй; если внутри грунта — ньютоновский шаг наружу по горизонт. градиенту
+    if (dig && dig.edits.size > 0) {
+      const e = 0.15;
+      for (let s = 0; s < 3; s++) {
+        const by = this.footY + 0.5 + s * 0.6; // грудь/плечи/голова: 0.5, 1.1, 1.7
+        for (let it = 0; it < 2; it++) {
+          const f = dig.densityAt(cam.position.x, by, cam.position.z);
+          if (f <= 0) break; // снаружи грунта — стены нет
+          const dfx =
+            (dig.densityAt(cam.position.x + e, by, cam.position.z) -
+              dig.densityAt(cam.position.x - e, by, cam.position.z)) / (2 * e);
+          const dfz =
+            (dig.densityAt(cam.position.x, by, cam.position.z + e) -
+              dig.densityAt(cam.position.x, by, cam.position.z - e)) / (2 * e);
+          const g2 = dfx * dfx + dfz * dfz;
+          if (g2 < 1e-6) break;
+          let d = f / g2; // ньютон: |смещение| = f/|∇f|
+          const len = Math.abs(d) * Math.sqrt(g2);
+          if (len > 0.4) d *= 0.4 / len; // ограничиваем скачок за кадр
+          cam.position.x = THREE.MathUtils.clamp(cam.position.x - dfx * d, -BOUNDS, BOUNDS);
+          cam.position.z = THREE.MathUtils.clamp(cam.position.z - dfz * d, -BOUNDS, BOUNDS);
+        }
+      }
+    }
+
+    // опора под ногами: ближайший грунт в окне [footY-FALL_PROBE, footY+STEP_UP]
+    const ground = dig
+      ? dig.surfaceBelow(cam.position.x, cam.position.z, this.footY + STEP_UP, this.footY - FALL_PROBE)
+      : this.terrain.getHeight(cam.position.x, cam.position.z);
+
+    const wasGrounded = this.grounded;
+    this.vy -= GRAV * dt;
+    let nextY = this.footY + this.vy * dt;
+    this.grounded = false;
+    if (ground !== null) {
+      if (nextY <= ground + 0.02) {
+        nextY = ground; this.vy = 0; this.grounded = true; // приземлились / стоим
+      } else if (wasGrounded && ground >= nextY - STEP_DOWN) {
+        nextY = ground; this.vy = 0; this.grounded = true; // прилипаем при спуске
+      }
+    }
+    this.footY = nextY;
+
+    cam.position.y = this.footY + EYE + bobY;
     // лёгкое покачивание вбок
     cam.position.addScaledVector(this._right, bobX * 0.4);
 

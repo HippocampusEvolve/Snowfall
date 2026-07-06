@@ -15,6 +15,16 @@ const REPEAT = 34; // повторов текстуры снега на весь
 const HUV_SCALE = ((HN - 1) / HN).toFixed(8);
 const HUV_OFF = (0.5 / HN).toFixed(8);
 
+// дефолтная (пустая) coverage-маска: пока не копаем — ничего не вырезаем
+let DEFAULT_CUT = null;
+function defaultCutTex() {
+  if (!DEFAULT_CUT) {
+    DEFAULT_CUT = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
+    DEFAULT_CUT.needsUpdate = true;
+  }
+  return DEFAULT_CUT;
+}
+
 export function loadSnowTextures(maxAnisotropy) {
   const tl = new THREE.TextureLoader();
   const setup = (t, srgb) => {
@@ -45,6 +55,10 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
   const uniforms = {
     uTrail: { value: footprints.texture },
     uTrailArea: { value: footprints.area },
+    // coverage-маска воксельного копания (Digger): дырку под мешем вырезаем discard'ом
+    uCut: { value: defaultCutTex() },
+    uCutArea: { value: WORLD },
+    uCutOn: { value: 0 },
   };
   if (mode === 'base') {
     // прямоугольник, накрытый патчем: minX, minZ, maxX, maxZ
@@ -143,9 +157,19 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
       float trailAt(vec2 uv) {
         if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
         return texture2D(uTrail, uv).r;
-      }`;
+      }
+      uniform sampler2D uCut;
+      uniform float uCutArea;
+      uniform float uCutOn;`;
     if (mode === 'base') fsCommon += '\nuniform vec4 uPatchRect;';
     shader.fragmentShader = shader.fragmentShader.replace('#include <common>', fsCommon);
+
+    // дырка под воксельным мешем копания (для обоих режимов снега)
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <clipping_planes_fragment>',
+      `if (uCutOn > 0.5 && texture2D(uCut, vec2(vWp.x, vWp.z) / uCutArea + 0.5).r > 0.5) discard;
+      #include <clipping_planes_fragment>`
+    );
 
     if (mode === 'base') {
       // дырка под деформируемым патчем

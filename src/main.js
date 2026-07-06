@@ -6,6 +6,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Terrain } from './terrain.js';
 import { SnowPatch } from './snowpatch.js';
+import { Digger } from './digger.js';
 import { Footprints } from './footprints.js';
 import { Sky } from './sky.js';
 import { Snowfall } from './snowfall.js';
@@ -65,6 +66,9 @@ scene.add(terrain.mesh);
 const snowPatch = new SnowPatch(footprints, terrain);
 scene.add(snowPatch.mesh);
 
+// воксельное копание (Digger): реальный 3D-объём — ямы, тоннели, пещеры
+const digger = new Digger(scene, terrain, snowPatch);
+
 const sky = new Sky(moonDir);
 scene.add(sky.group);
 
@@ -97,11 +101,15 @@ const player = new Player(
     footprints.stamp(fx, fz, dir, side);
     audio.footstep(running);
   },
-  trees.obstacles
+  trees.obstacles,
+  digger
 );
 
 const breath = new Breath(scene, camera, (exertion) => audio.breath(exertion));
 const stats = new Stats();
+
+// debug (?debug): доступ к системам из консоли — удобно щупать копание
+if (player.debug) window.__snow = { scene, camera, renderer, terrain, snowPatch, digger, player };
 
 // ---------- постобработка ----------
 const composer = new EffectComposer(renderer);
@@ -135,6 +143,19 @@ player.controls.addEventListener('lock', () => {
 });
 player.controls.addEventListener('unlock', () => {
   if (!stats.dead) menu.classList.remove('hidden');
+});
+
+// копание: ЛКМ — копать (убрать грунт), ПКМ — намыть (добавить); E/Q — то же с клавиш
+renderer.domElement.addEventListener('mousedown', (e) => {
+  if (!player.locked) return;
+  if (e.button === 0) digger.editFromCamera(camera, -1);
+  else if (e.button === 2) digger.editFromCamera(camera, +1);
+});
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+addEventListener('keydown', (e) => {
+  if (!player.locked) return;
+  if (e.code === 'KeyE') digger.editFromCamera(camera, -1);
+  else if (e.code === 'KeyQ') digger.editFromCamera(camera, +1);
 });
 
 // прелоадер: пара кадров на прогрев шейдеров + проталина у костра
