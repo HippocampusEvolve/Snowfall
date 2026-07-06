@@ -52,7 +52,8 @@ moonLight.shadow.bias = -0.0006;
 scene.add(moonLight);
 scene.add(moonLight.target);
 
-const hemi = new THREE.HemisphereLight(0x203258, 0x0b0e18, 0.55);
+// нижний цвет — отскок лунного света от снега: подсвечивает низ ветвей
+const hemi = new THREE.HemisphereLight(0x223560, 0x1b2742, 0.7);
 scene.add(hemi);
 
 // ---------- мир ----------
