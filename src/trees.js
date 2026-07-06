@@ -39,24 +39,57 @@ function prepareVariant(fbx) {
     p.geo.computeBoundingBox();
     box.union(p.geo.boundingBox);
   }
-  // некоторые FBX экспортированы с осью Z вверх — определяем по габаритам
-  const ySize = box.max.y - box.min.y;
-  const zSize = box.max.z - box.min.z;
-  // FBX этого пака экспортированы с осью Z вверх
-  const zUp = zSize > ySize;
-  const height = Math.max(zUp ? zSize : ySize, 1e-3);
-  const cx = (box.min.x + box.max.x) / 2;
-  const pre = new THREE.Matrix4().makeScale(1 / height, 1 / height, 1 / height);
-  if (zUp) {
-    const cy = (box.min.y + box.max.y) / 2;
-    pre
-      .multiply(new THREE.Matrix4().makeRotationX(-Math.PI / 2))
-      .multiply(new THREE.Matrix4().makeTranslation(-cx, -cy, -box.min.z));
-  } else {
-    const cz = (box.min.z + box.max.z) / 2;
-    pre.multiply(new THREE.Matrix4().makeTranslation(-cx, -box.min.y, -cz));
-  }
+
+  // Ось «вверх» определяем по стволу (группа Bark/Trunk): ствол всегда
+  // вытянут вдоль вертикали, в отличие от кроны, которая бывает шире высоты.
+  const probe = boxOfGroup(parts, /bark|trunk/i) || box;
+  const ext = new THREE.Vector3();
+  probe.getSize(ext);
+  const upAxis = ext.z >= ext.x && ext.z >= ext.y ? 'z' : ext.x > ext.y ? 'x' : 'y';
+
+  const R =
+    upAxis === 'z'
+      ? new THREE.Matrix4().makeRotationX(-Math.PI / 2)
+      : upAxis === 'x'
+        ? new THREE.Matrix4().makeRotationZ(Math.PI / 2)
+        : new THREE.Matrix4();
+  const rb = box.clone().applyMatrix4(R);
+  const height = Math.max(rb.max.y - rb.min.y, 1e-3);
+  const pre = new THREE.Matrix4()
+    .makeScale(1 / height, 1 / height, 1 / height)
+    .multiply(
+      new THREE.Matrix4().makeTranslation(
+        -(rb.min.x + rb.max.x) / 2,
+        -rb.min.y,
+        -(rb.min.z + rb.max.z) / 2
+      )
+    )
+    .multiply(R);
   return { parts, pre };
+}
+
+// bbox вершин, принадлежащих группам с материалом, чьё имя матчит re
+function boxOfGroup(parts, re) {
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  let found = false;
+  for (const p of parts) {
+    const groups = p.geo.groups?.length
+      ? p.geo.groups
+      : [{ start: 0, count: Infinity, materialIndex: 0 }];
+    const idx = p.geo.index;
+    const pos = p.geo.attributes.position;
+    for (const g of groups) {
+      if (!re.test(p.matNames[g.materialIndex] || '')) continue;
+      const end = Math.min(g.start + g.count, idx ? idx.count : pos.count);
+      for (let i = g.start; i < end; i++) {
+        v.fromBufferAttribute(pos, idx ? idx.getX(i) : i);
+        box.expandByPoint(v);
+        found = true;
+      }
+    }
+  }
+  return found ? box : null;
 }
 
 const isFoliage = (name) => /leaf|leaves|needle|pine(?!.*bark)|green/i.test(name);
@@ -72,11 +105,11 @@ export async function createTrees(terrain, count = 170, rockCount = 45) {
   ]);
 
   const foliageMat = snowTint(
-    new THREE.MeshStandardMaterial({ color: 0x0e1d17, roughness: 0.98 }),
-    '0.42, 0.48, 0.6',
+    new THREE.MeshStandardMaterial({ color: 0x1a3226, roughness: 0.95 }),
+    '0.45, 0.51, 0.63',
     0.6
   );
-  const barkMat = new THREE.MeshStandardMaterial({ color: 0x231910, roughness: 1.0 });
+  const barkMat = new THREE.MeshStandardMaterial({ color: 0x332414, roughness: 1.0 });
   const rockMat = snowTint(
     new THREE.MeshStandardMaterial({ color: 0x272e3c, roughness: 0.95 }),
     '0.55, 0.6, 0.72',
