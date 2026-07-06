@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SNOWFALL</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>❄️</text></svg>" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #04060c; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; color: #cfd8ea; }
+    canvas { display: block; }
+
+    #vignette {
+      position: fixed; inset: 0; pointer-events: none; z-index: 5;
+      background: radial-gradient(ellipse at center, transparent 52%, rgba(2, 4, 12, 0.62) 100%);
+    }
+
+    #menu {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: rgba(3, 5, 12, 0.55);
+      backdrop-filter: blur(6px);
+      transition: opacity 0.6s ease;
+    }
+    #menu.hidden { opacity: 0; pointer-events: none; }
+
+    #menu h1 {
+      font-size: clamp(3rem, 9vw, 6.5rem);
+      font-weight: 200;
+      letter-spacing: 0.55em;
+      margin-left: 0.55em; /* компенсация letter-spacing */
+      color: #e8eefb;
+      text-shadow: 0 0 40px rgba(140, 170, 255, 0.35);
+    }
+    #menu .sub {
+      margin-top: 0.6rem;
+      font-size: 0.95rem;
+      letter-spacing: 0.45em;
+      margin-left: 0.45em;
+      text-transform: uppercase;
+      color: #7d8db0;
+    }
+    #play {
+      margin-top: 3.2rem;
+      padding: 0.9rem 3.4rem;
+      font-size: 1rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: #dfe8fa;
+      background: transparent;
+      border: 1px solid rgba(160, 185, 235, 0.45);
+      border-radius: 2px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
+    #play:hover {
+      background: rgba(150, 180, 240, 0.12);
+      border-color: rgba(190, 210, 250, 0.8);
+      box-shadow: 0 0 30px rgba(120, 155, 230, 0.25);
+    }
+    #menu .controls {
+      margin-top: 2.6rem;
+      font-size: 0.8rem;
+      letter-spacing: 0.18em;
+      color: #62719a;
+    }
+
+    #hud {
+      position: fixed; right: 24px; bottom: 20px; z-index: 6;
+      font-size: 0.75rem; letter-spacing: 0.2em; color: rgba(160, 178, 214, 0.55);
+      pointer-events: none;
+      transition: opacity 2s ease;
+    }
+    #hud.faded { opacity: 0; }
+
+    /* --- статы выживания --- */
+    #stats {
+      position: fixed; left: 24px; bottom: 20px; z-index: 6;
+      pointer-events: none; opacity: 0; transition: opacity 1.2s ease;
+    }
+    #stats.show { opacity: 1; }
+    #stats .row { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+    #stats .cap {
+      font-size: 0.6rem; letter-spacing: 0.28em; color: #5d6c92; width: 64px;
+    }
+    #stats .bar {
+      width: 130px; height: 3px; border-radius: 2px; overflow: hidden;
+      background: rgba(140, 160, 200, 0.16);
+    }
+    #stats .fill {
+      height: 100%; width: 100%;
+      background: linear-gradient(90deg, #8fb5ff, #dce8ff);
+      transition: width 0.35s ease;
+    }
+    #stats .fill.low { background: linear-gradient(90deg, #ff8f5e, #ffcf9e); }
+    #tempText {
+      font-size: 0.85rem; letter-spacing: 0.08em; color: #a9bde0;
+      width: 2.8em; text-align: right;
+    }
+
+    /* --- изморозь при замерзании --- */
+    #frost {
+      position: fixed; inset: 0; z-index: 7; pointer-events: none;
+      opacity: 0; transition: opacity 1.5s ease;
+      background:
+        radial-gradient(ellipse at center, transparent 30%, rgba(165, 195, 250, 0.22) 68%, rgba(214, 230, 255, 0.6) 100%),
+        radial-gradient(ellipse at center, transparent 55%, rgba(230, 242, 255, 0.35) 100%);
+    }
+
+    /* --- смерть от холода --- */
+    #death {
+      position: fixed; inset: 0; z-index: 30;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: rgba(3, 4, 10, 0.92);
+      opacity: 0; pointer-events: none; transition: opacity 3.5s ease;
+    }
+    #death.show { opacity: 1; pointer-events: auto; }
+    #death h2 {
+      font-size: clamp(1.6rem, 4.5vw, 3rem); font-weight: 200;
+      letter-spacing: 0.5em; margin-left: 0.5em; color: #b9c9ea;
+    }
+    #death p { margin-top: 1rem; font-size: 0.8rem; letter-spacing: 0.3em; color: #55648c; }
+    #retry {
+      margin-top: 2.6rem; padding: 0.8rem 2.8rem;
+      font-size: 0.9rem; letter-spacing: 0.3em; text-transform: uppercase;
+      color: #dfe8fa; background: transparent;
+      border: 1px solid rgba(160, 185, 235, 0.45); border-radius: 2px; cursor: pointer;
+      transition: all 0.25s ease;
+    }
+    #retry:hover { background: rgba(150, 180, 240, 0.12); }
+
+    #loading {
+      position: fixed; inset: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: center;
+      background: #04060c;
+      font-size: 0.85rem; letter-spacing: 0.4em; color: #5c6a8f;
+      transition: opacity 0.5s ease;
+    }
+    #loading.hidden { opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="vignette"></div>
+
+  <div id="loading">СНЕГ ИДЁТ…</div>
+
+  <div id="menu" class="hidden">
+    <h1>SNOWFALL</h1>
+    <p class="sub">долгая тёмная ночь</p>
+    <button id="play">Войти в ночь</button>
+    <div class="controls">WASD — движение&nbsp;&nbsp;·&nbsp;&nbsp;SHIFT — бег&nbsp;&nbsp;·&nbsp;&nbsp;МЫШЬ — обзор&nbsp;&nbsp;·&nbsp;&nbsp;ESC — пауза</div>
+  </div>
+
+  <div id="hud">SHIFT — БЕГ</div>
+
+  <div id="frost"></div>
+
+  <div id="stats">
+    <div class="row">
+      <span id="tempText">-12°</span>
+      <div class="bar"><div id="warmthFill" class="fill"></div></div>
+      <span class="cap">ТЕПЛО</span>
+    </div>
+    <div class="row">
+      <span class="temp-spacer" style="width:2.8em"></span>
+      <div class="bar"><div id="staminaFill" class="fill"></div></div>
+      <span class="cap">СИЛЫ</span>
+    </div>
+  </div>
+
+  <div id="death">
+    <h2>ВЫ ЗАМЁРЗЛИ</h2>
+    <p>ночь оказалась длиннее вас</p>
+    <button id="retry">Ещё раз</button>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
