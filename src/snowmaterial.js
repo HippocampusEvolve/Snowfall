@@ -9,6 +9,7 @@ const WORLD = 400; // размер террейна, м
 const HN = 241; // разрешение heightmap (совпадает с сеткой террейна 240+1)
 const DEPTH = 0.14; // глубина полного следа, м
 const LIFT = 0.03; // патч чуть выше базового меша
+const REPEAT = 34; // повторов текстуры снега на весь террейн
 
 // выравнивание uv по центрам текселей heightmap
 const HUV_SCALE = ((HN - 1) / HN).toFixed(8);
@@ -18,7 +19,7 @@ export function loadSnowTextures(maxAnisotropy) {
   const tl = new THREE.TextureLoader();
   const setup = (t, srgb) => {
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.repeat.set(34, 34);
+    t.repeat.set(REPEAT, REPEAT);
     t.anisotropy = maxAnisotropy;
     if (srgb) t.colorSpace = THREE.SRGBColorSpace;
     return t;
@@ -80,6 +81,25 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
 
     if (mode === 'patch') {
       shader.vertexShader = shader.vertexShader
+        // патч движется за игроком — UV текстур должны быть мировыми,
+        // иначе текстура едет вместе с сеткой и не совпадает по масштабу
+        // с базовым террейном (у того uv 0..1 на 400 м × repeat)
+        .replace(
+          '#include <uv_vertex>',
+          `#include <uv_vertex>
+          {
+            vec2 wuv = (modelMatrix * vec4(position, 1.0)).xz * ${(REPEAT / WORLD).toFixed(8)};
+            #ifdef USE_MAP
+              vMapUv = wuv;
+            #endif
+            #ifdef USE_NORMALMAP
+              vNormalMapUv = wuv;
+            #endif
+            #ifdef USE_ROUGHNESSMAP
+              vRoughnessMapUv = wuv;
+            #endif
+          }`
+        )
         .replace(
           '#include <beginnormal_vertex>',
           `#include <beginnormal_vertex>

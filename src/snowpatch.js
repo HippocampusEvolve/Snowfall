@@ -6,7 +6,9 @@ import { createSnowMaterial, SNOW_CONST } from './snowmaterial.js';
 // базовый террейн под патчем вырезается (discard).
 const SIZE = 32;
 const SEGS = 256;
-const SNAP = 0.25; // шаг привязки, чтобы сетка не «плыла» по следам
+// привязка ровно к шагу вершин: узлы сетки всегда попадают в одни и те же
+// мировые точки — деформация не «плывёт» при движении
+const SNAP = SIZE / SEGS;
 const MARGIN = 0.45; // запас перекрытия с базовым террейном
 
 export class SnowPatch {
