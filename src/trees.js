@@ -1,81 +1,168 @@
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
-// Ели: инстансированные низкополигональные силуэты со снегом на верхних гранях.
-export function createTrees(terrain, count = 190) {
-  const group = new THREE.Group();
+// Лес из моделей Quaternius (CC0): 5 вариантов елей + 5 камней,
+// инстансинг, снег на верхних гранях через шейдер, круги коллизий.
 
-  // крона — ярусы конусов
-  const layers = [
-    [2.1, 3.0, 2.1],
-    [1.65, 2.7, 3.8],
-    [1.2, 2.4, 5.3],
-    [0.7, 2.0, 6.6],
-  ].map(([r, h, y]) => {
-    const c = new THREE.ConeGeometry(r, h, 7);
-    c.translate(0, y, 0);
-    return c;
-  });
-  const foliageGeo = mergeGeometries(layers);
+const PINES = ['PineTree_1', 'PineTree_2', 'PineTree_3', 'PineTree_4', 'PineTree_5'];
+const ROCKS = ['Rock_1', 'Rock_2', 'Rock_3', 'Rock_4', 'Rock_5'];
 
-  const trunkGeo = new THREE.CylinderGeometry(0.14, 0.24, 2.2, 6);
-  trunkGeo.translate(0, 1.1, 0);
-
-  const foliageMat = new THREE.MeshStandardMaterial({
-    color: 0x0e1a16,
-    roughness: 0.98,
-    metalness: 0.0,
-  });
-  // снег на ветках: подмешиваем холодный тон по мировой нормали вверх
-  foliageMat.onBeforeCompile = (shader) => {
+function snowTint(mat, tint, amount, threshold = 0.45) {
+  mat.onBeforeCompile = (shader) => {
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <normal_fragment_begin>',
       `#include <normal_fragment_begin>
       {
         vec3 wN = inverseTransformDirection(normal, viewMatrix);
-        float snowAmt = smoothstep(0.45, 0.9, wN.y);
-        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.48, 0.6), snowAmt * 0.55);
+        float snowAmt = smoothstep(${threshold.toFixed(2)}, 0.9, wN.y);
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(${tint}), snowAmt * ${amount.toFixed(2)});
       }`
     );
   };
+  mat.customProgramCacheKey = () => `snowtint-${tint}-${amount}`;
+  return mat;
+}
 
-  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x1d150e, roughness: 1.0 });
+// Собираем геометрии модели в root-пространстве + матрица нормализации
+// (низ на y=0, центр в нуле, высота = 1).
+function prepareVariant(fbx) {
+  fbx.updateMatrixWorld(true);
+  const parts = [];
+  fbx.traverse((child) => {
+    if (!child.isMesh) return;
+    const geo = child.geometry.clone().applyMatrix4(child.matrixWorld);
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    parts.push({ geo, matNames: mats.map((m) => m?.name || '') });
+  });
+  const box = new THREE.Box3();
+  for (const p of parts) {
+    p.geo.computeBoundingBox();
+    box.union(p.geo.boundingBox);
+  }
+  // некоторые FBX экспортированы с осью Z вверх — определяем по габаритам
+  const ySize = box.max.y - box.min.y;
+  const zSize = box.max.z - box.min.z;
+  // FBX этого пака экспортированы с осью Z вверх
+  const zUp = zSize > ySize;
+  const height = Math.max(zUp ? zSize : ySize, 1e-3);
+  const cx = (box.min.x + box.max.x) / 2;
+  const pre = new THREE.Matrix4().makeScale(1 / height, 1 / height, 1 / height);
+  if (zUp) {
+    const cy = (box.min.y + box.max.y) / 2;
+    pre
+      .multiply(new THREE.Matrix4().makeRotationX(-Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeTranslation(-cx, -cy, -box.min.z));
+  } else {
+    const cz = (box.min.z + box.max.z) / 2;
+    pre.multiply(new THREE.Matrix4().makeTranslation(-cx, -box.min.y, -cz));
+  }
+  return { parts, pre };
+}
 
-  const foliage = new THREE.InstancedMesh(foliageGeo, foliageMat, count);
-  const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
-  foliage.castShadow = true;
-  foliage.receiveShadow = true;
-  trunks.castShadow = true;
+const isFoliage = (name) => /leaf|leaves|needle|pine(?!.*bark)|green/i.test(name);
+
+export async function createTrees(terrain, count = 170, rockCount = 45) {
+  const group = new THREE.Group();
+  const obstacles = [];
+  const loader = new FBXLoader();
+
+  const [pines, rocks] = await Promise.all([
+    Promise.all(PINES.map((n) => loader.loadAsync(`/models/nature/${n}.fbx`).then(prepareVariant))),
+    Promise.all(ROCKS.map((n) => loader.loadAsync(`/models/nature/${n}.fbx`).then(prepareVariant))),
+  ]);
+
+  const foliageMat = snowTint(
+    new THREE.MeshStandardMaterial({ color: 0x0e1d17, roughness: 0.98 }),
+    '0.42, 0.48, 0.6',
+    0.6
+  );
+  const barkMat = new THREE.MeshStandardMaterial({ color: 0x231910, roughness: 1.0 });
+  const rockMat = snowTint(
+    new THREE.MeshStandardMaterial({ color: 0x272e3c, roughness: 0.95 }),
+    '0.55, 0.6, 0.72',
+    0.8,
+    0.3
+  );
+
+  // раскладываем позиции по вариантам
+  const placed = [];
+  const scatter = (n, rMin, rMax, minGap2) => {
+    const out = [];
+    let guard = 0;
+    while (out.length < n && guard++ < n * 40) {
+      const a = Math.random() * Math.PI * 2;
+      const r = rMin + Math.pow(Math.random(), 0.7) * (rMax - rMin);
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      if (placed.some((p) => (p[0] - x) ** 2 + (p[1] - z) ** 2 < minGap2)) continue;
+      placed.push([x, z]);
+      out.push([x, z]);
+    }
+    return out;
+  };
 
   const dummy = new THREE.Object3D();
-  const placed = [];
-  const obstacles = [];
-  let i = 0;
-  let guard = 0;
-  while (i < count && guard++ < count * 30) {
-    const a = Math.random() * Math.PI * 2;
-    const r = 14 + Math.pow(Math.random(), 0.7) * 126;
-    const x = Math.cos(a) * r;
-    const z = Math.sin(a) * r;
-    // не слишком плотно
-    if (placed.some((p) => (p[0] - x) ** 2 + (p[1] - z) ** 2 < 14)) continue;
-    placed.push([x, z]);
+  const inst = new THREE.Matrix4();
 
-    const s = 0.6 + Math.random() * 0.9;
-    obstacles.push({ x, z, r: 0.95 * s });
-    dummy.position.set(x, terrain.getHeight(x, z) - 0.15, z);
-    dummy.rotation.y = Math.random() * Math.PI * 2;
-    dummy.scale.set(s * (0.9 + Math.random() * 0.25), s * (0.85 + Math.random() * 0.45), s * (0.9 + Math.random() * 0.25));
-    dummy.updateMatrix();
-    foliage.setMatrixAt(i, dummy.matrix);
-    trunks.setMatrixAt(i, dummy.matrix);
-    i++;
-  }
-  foliage.count = i;
-  trunks.count = i;
-  foliage.instanceMatrix.needsUpdate = true;
-  trunks.instanceMatrix.needsUpdate = true;
+  const buildInstances = (variants, spots, opts) => {
+    // распределяем места по вариантам
+    const perVariant = variants.map(() => []);
+    spots.forEach((s, i) => perVariant[i % variants.length].push(s));
 
-  group.add(foliage, trunks);
-  return { group, obstacles };
+    variants.forEach((v, vi) => {
+      const list = perVariant[vi];
+      if (!list.length) return;
+      // если имена материалов не различают хвою и ствол — хвоей считаем
+      // самую «тяжёлую» часть (больше всего вершин)
+      const anyFoliage = v.parts.some((p) => p.matNames.some(isFoliage));
+      const heaviest = v.parts.reduce(
+        (a, b) => (b.geo.attributes.position.count > a.geo.attributes.position.count ? b : a),
+        v.parts[0]
+      );
+      const meshes = v.parts.map((p) => {
+        const mats = p.matNames.map((n) =>
+          opts.rock
+            ? rockMat
+            : (anyFoliage ? isFoliage(n) : p === heaviest)
+              ? foliageMat
+              : barkMat
+        );
+        const m = new THREE.InstancedMesh(p.geo, mats.length === 1 ? mats[0] : mats, list.length);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        return m;
+      });
+      list.forEach(([x, z], i) => {
+        const h = opts.height();
+        const s = h; // pre-матрица нормализует высоту к 1
+        dummy.position.set(x, terrain.getHeight(x, z) + opts.sink * s, z);
+        dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+        dummy.scale.set(s * (0.9 + Math.random() * 0.2), s, s * (0.9 + Math.random() * 0.2));
+        dummy.updateMatrix();
+        inst.multiplyMatrices(dummy.matrix, v.pre);
+        meshes.forEach((m) => m.setMatrixAt(i, inst));
+        if (opts.obstacleR) obstacles.push({ x, z, r: opts.obstacleR(s) });
+      });
+      meshes.forEach((m) => {
+        m.instanceMatrix.needsUpdate = true;
+        group.add(m);
+      });
+    });
+  };
+
+  buildInstances(pines, scatter(count, 13, 140, 16), {
+    height: () => 7 + Math.random() * 5.5,
+    sink: -0.02,
+    obstacleR: (s) => Math.max(0.45, s * 0.055),
+    rock: false,
+  });
+  buildInstances(rocks, scatter(rockCount, 10, 130, 6), {
+    height: () => 0.5 + Math.random() * 1.5,
+    sink: -0.12,
+    obstacleR: (s) => (s > 0.8 ? s * 0.5 : 0),
+    rock: true,
+  });
+
+  // нулевые радиусы не мешают
+  return { group, obstacles: obstacles.filter((o) => o.r > 0) };
 }

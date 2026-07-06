@@ -1,5 +1,6 @@
-// Процедурный звук на WebAudio: вой ветра и хруст снега под ногами.
+// Процедурный звук на WebAudio: вой ветра, хруст снега, костёр, дыхание.
 // Никаких внешних ассетов — всё синтезируется из шума.
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 export class GameAudio {
   constructor() {
     this.ctx = null;
@@ -22,6 +23,83 @@ export class GameAudio {
 
     this._buildWind();
     this._scheduleGust();
+    this._buildCampfire();
+  }
+
+  // ---------- костёр ----------
+  _buildCampfire() {
+    const ctx = this.ctx;
+    this.firePan = ctx.createStereoPanner();
+    this.fireBus = ctx.createGain();
+    this.fireBus.gain.value = 0;
+    this.fireBus.connect(this.firePan);
+    this.firePan.connect(this.master);
+
+    // шипение и низкий гул пламени
+    const hiss = ctx.createBufferSource();
+    hiss.buffer = this.noise;
+    hiss.loop = true;
+    const hlp = ctx.createBiquadFilter();
+    hlp.type = 'lowpass';
+    hlp.frequency.value = 480;
+    const hg = ctx.createGain();
+    hg.gain.value = 0.22;
+    const hLfo = ctx.createOscillator();
+    hLfo.frequency.value = 7.3;
+    const hLfoG = ctx.createGain();
+    hLfoG.gain.value = 0.06;
+    hLfo.connect(hLfoG);
+    hLfoG.connect(hg.gain);
+    hiss.connect(hlp);
+    hlp.connect(hg);
+    hg.connect(this.fireBus);
+    hiss.start();
+    hLfo.start();
+
+    const rumble = ctx.createBufferSource();
+    rumble.buffer = this.noise;
+    rumble.loop = true;
+    rumble.playbackRate.value = 0.5;
+    const rlp = ctx.createBiquadFilter();
+    rlp.type = 'lowpass';
+    rlp.frequency.value = 130;
+    const rg = ctx.createGain();
+    rg.gain.value = 0.35;
+    rumble.connect(rlp);
+    rlp.connect(rg);
+    rg.connect(this.fireBus);
+    rumble.start();
+
+    // треск — случайные щелчки
+    const crackle = () => {
+      if (!this.ctx) return;
+      const t = ctx.currentTime;
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise;
+      src.playbackRate.value = 1 + Math.random();
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 1200 + Math.random() * 2600;
+      const g = ctx.createGain();
+      const dur = 0.008 + Math.random() * 0.025;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.12 + Math.random() * 0.4, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.02);
+      src.connect(hp);
+      hp.connect(g);
+      g.connect(this.fireBus);
+      src.start(t, Math.random() * 1.5, dur + 0.05);
+      setTimeout(crackle, 60 + Math.random() * 320);
+    };
+    crackle();
+  }
+
+  // громкость/панорама костра по позиции игрока (звать каждый кадр)
+  updateCampfire(dist, pan) {
+    if (!this.ctx) return;
+    const vol = 0.75 / (1 + (dist / 3.2) ** 2);
+    this.fireBus.gain.setTargetAtTime(vol, this.ctx.currentTime, 0.12);
+    this.firePan.pan.setTargetAtTime(clamp(pan, -0.85, 0.85), this.ctx.currentTime, 0.12);
   }
 
   resume() {

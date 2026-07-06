@@ -5,6 +5,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Terrain } from './terrain.js';
+import { SnowPatch } from './snowpatch.js';
 import { Footprints } from './footprints.js';
 import { Sky } from './sky.js';
 import { Snowfall } from './snowfall.js';
@@ -12,6 +13,7 @@ import { createTrees } from './trees.js';
 import { createRidges } from './ridges.js';
 import { Aurora } from './aurora.js';
 import { Breath } from './breath.js';
+import { Campfire } from './campfire.js';
 import { Player } from './player.js';
 import { GameAudio } from './audio.js';
 import { Stats } from './stats.js';
@@ -58,21 +60,30 @@ const footprints = new Footprints(renderer, 160);
 const terrain = new Terrain(footprints, renderer.capabilities.getMaxAnisotropy());
 scene.add(terrain.mesh);
 
+// деформируемый снег вокруг игрока
+const snowPatch = new SnowPatch(footprints, terrain);
+scene.add(snowPatch.mesh);
+
 const sky = new Sky(moonDir);
 scene.add(sky.group);
 
 const ridges = createRidges();
 scene.add(ridges.group);
 
-// сияние — на противоположной от луны стороне неба
 const aurora = new Aurora(Math.atan2(-moonDir.x, -moonDir.z));
 scene.add(aurora.mesh);
 
 const snow = new Snowfall();
 scene.add(snow.points);
 
-const trees = createTrees(terrain);
+// лес и камни (модели Quaternius, CC0)
+const trees = await createTrees(terrain);
 scene.add(trees.group);
+
+// костёр — дом и очаг
+const FIRE = { x: 2.5, z: -9 };
+const campfire = new Campfire(scene, terrain, FIRE.x, FIRE.z);
+trees.obstacles.push({ x: FIRE.x, z: FIRE.z, r: 0.85 });
 
 // ---------- аудио, игрок, дыхание, статы ----------
 const audio = new GameAudio();
@@ -125,9 +136,10 @@ player.controls.addEventListener('unlock', () => {
   if (!stats.dead) menu.classList.remove('hidden');
 });
 
-// прелоадер: пара кадров на прогрев шейдеров
+// прелоадер: пара кадров на прогрев шейдеров + проталина у костра
 requestAnimationFrame(() => {
   composer.render();
+  footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
   loading.classList.add('hidden');
   if (player.debug) {
     statsEl.classList.add('show');
@@ -153,7 +165,10 @@ window.addEventListener('resize', () => {
 // ---------- цикл ----------
 const clock = new THREE.Clock();
 let fadeAcc = 0;
+let meltAcc = 0;
 let blizzard = 0; // 0..1 — сглаженная сила метели
+const _toFire = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
 
 function tick() {
   requestAnimationFrame(tick);
@@ -166,17 +181,32 @@ function tick() {
   for (const m of ridges.mats) m.opacity = 1 - blizzard * 0.8;
 
   player.update(dt);
+  snowPatch.update(camera.position);
   snow.update(dt, t, camera.position, audio.windLevel, blizzard);
   sky.update(t);
   aurora.update(t, blizzard);
   breath.update(dt, player.exertion, audio.windLevel);
-  stats.update(dt, blizzard, player);
+  campfire.update(dt, t, audio.windLevel);
 
-  // снег постепенно заметает следы
+  // тепло от костра + позиционный звук
+  _toFire.copy(campfire.position).sub(camera.position);
+  const fireDist = Math.hypot(_toFire.x, _toFire.z);
+  const heat = THREE.MathUtils.clamp(1 - (fireDist - 1.2) / 3.5, 0, 1);
+  _camRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  const pan = fireDist > 0.3 ? (_toFire.x * _camRight.x + _toFire.z * _camRight.z) / fireDist : 0;
+  audio.updateCampfire(fireDist, pan);
+  stats.update(dt, blizzard, player, heat);
+
+  // снег постепенно заметает следы, но у костра — вечная проталина
   fadeAcc += dt;
   if (fadeAcc > 0.25) {
     fadeAcc = 0;
     footprints.fade();
+  }
+  meltAcc += dt;
+  if (meltAcc > 3) {
+    meltAcc = 0;
+    footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 0.08);
   }
 
   composer.render();

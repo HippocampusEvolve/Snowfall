@@ -67,6 +67,33 @@ export class Footprints {
     );
     this.scene.add(this.quad);
 
+    // круглый штамп (проталина у костра и т.п.)
+    const cc = document.createElement('canvas');
+    cc.width = cc.height = 128;
+    const cctx = cc.getContext('2d');
+    const cg = cctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    cg.addColorStop(0, 'rgba(255,255,255,1)');
+    cg.addColorStop(0.35, 'rgba(255,255,255,0.9)');
+    cg.addColorStop(0.55, 'rgba(255,255,255,0.62)');
+    cg.addColorStop(0.75, 'rgba(255,255,255,0.3)');
+    cg.addColorStop(0.9, 'rgba(255,255,255,0.1)');
+    cg.addColorStop(1, 'rgba(255,255,255,0)');
+    cctx.fillStyle = cg;
+    cctx.fillRect(0, 0, 128, 128);
+    this.circleQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: new THREE.CanvasTexture(cc),
+        transparent: true,
+        opacity: 1,
+        blending: THREE.AdditiveBlending,
+        depthTest: false,
+        depthWrite: false,
+      })
+    );
+    this.circleQuad.visible = false;
+    this.scene.add(this.circleQuad);
+
     // затухание — «снег заметает следы» (умножение буфера на коэффициент)
     this.fadeQuad = new THREE.Mesh(
       new THREE.PlaneGeometry(area, area),
@@ -119,8 +146,21 @@ export class Footprints {
     this._render();
   }
 
+  // круглая проталина (x, z — мир; radius — м; strength — 0..1 за штамп)
+  stampCircle(x, z, radius, strength = 1) {
+    this.circleQuad.position.set(x, -z, 0);
+    this.circleQuad.scale.set(radius * 2, radius * 2, 1);
+    this.circleQuad.material.opacity = strength;
+    this.circleQuad.visible = true;
+    this.quad.visible = false;
+    this.fadeQuad.visible = false;
+    this._render();
+    this.circleQuad.visible = false;
+  }
+
   fade() {
     this.quad.visible = false;
+    this.circleQuad.visible = false;
     this.fadeQuad.visible = true;
     this._render();
     this.fadeQuad.visible = false;
