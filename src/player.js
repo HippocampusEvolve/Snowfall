@@ -7,6 +7,7 @@ const RUN_SPEED = 5.9;
 const BOUNDS = 72;
 
 const GRAV = 24; // гравитация, м/с²
+const JUMP_SPEED = 6.3; // начальная скорость прыжка (≈0.8 м над землёй)
 const STEP_UP = 0.55; // высота шага вверх (ступеньки/склон)
 const STEP_DOWN = 0.45; // прилипание к полу при спуске (иначе прыжки на бугорках)
 const FALL_PROBE = 4.0; // как глубоко ищем пол под ногами (дно ямы)
@@ -15,12 +16,15 @@ const FALL_PROBE = 4.0; // как глубоко ищем пол под нога
 // Вертикаль — не привязка к heightmap, а гравитация + опора на воксельный SDF:
 // можно провалиться в вырытую яму и зайти в пещеру (через Digger.surfaceBelow).
 export class Player {
-  constructor(camera, domElement, terrain, onStep, obstacles = [], digger = null) {
+  constructor(camera, domElement, terrain, onStep, obstacles = [], digger = null, getFloor = null, onLand = null) {
     this.camera = camera;
     this.terrain = terrain;
     this.onStep = onStep;
     this.obstacles = obstacles;
     this.digger = digger;
+    this.getFloor = getFloor; // (x,z) -> Y деревянного пола (домик/крыльцо) или null
+    this.onLand = onLand; // (x,z,surface,impact) — приземление после прыжка/падения
+    this.surface = 'snow'; // на чём стоим: 'snow' | 'wood'
     this.controls = new PointerLockControls(camera, domElement);
 
     this.keys = new Set();
@@ -49,9 +53,13 @@ export class Player {
     this.footY = terrain.getHeight(0, 0);
     this.vy = 0;
     this.grounded = true;
+    this._jumpHeld = false; // фронт нажатия пробела (один прыжок на нажатие)
     camera.position.set(0, this.footY + EYE, 0);
 
-    addEventListener('keydown', (e) => this.keys.add(e.code));
+    addEventListener('keydown', (e) => {
+      if (e.code === 'Space') e.preventDefault(); // пробел не скроллит страницу
+      this.keys.add(e.code);
+    });
     addEventListener('keyup', (e) => this.keys.delete(e.code));
     addEventListener('blur', () => this.keys.clear());
   }
@@ -96,10 +104,23 @@ export class Player {
     cam.position.x = THREE.MathUtils.clamp(cam.position.x + this.vel.x * dt, -BOUNDS, BOUNDS);
     cam.position.z = THREE.MathUtils.clamp(cam.position.z + this.vel.z * dt, -BOUNDS, BOUNDS);
 
-    // коллизии со стволами елей — выталкивание из окружности
+    // коллизии: круги (стволы) и отрезки (стены домика) — выталкивание
     for (const o of this.obstacles) {
-      const dx = cam.position.x - o.x;
-      const dz = cam.position.z - o.z;
+      if (o.yMax !== undefined && this.footY > o.yMax) continue; // кромка крыльца — только снизу
+      let ox = o.x, oz = o.z;
+      if (o.x2 !== undefined) {
+        // отрезок: толкаемся от ближайшей его точки
+        const abx = o.x2 - o.x1, abz = o.z2 - o.z1;
+        const tt = THREE.MathUtils.clamp(
+          ((cam.position.x - o.x1) * abx + (cam.position.z - o.z1) * abz) /
+            (abx * abx + abz * abz || 1),
+          0, 1
+        );
+        ox = o.x1 + abx * tt;
+        oz = o.z1 + abz * tt;
+      }
+      const dx = cam.position.x - ox;
+      const dz = cam.position.z - oz;
       const R = o.r + 0.35;
       const d2 = dx * dx + dz * dz;
       if (d2 < R * R && d2 > 1e-8) {
@@ -162,22 +183,49 @@ export class Player {
     }
 
     // опора под ногами: ближайший грунт в окне [footY-FALL_PROBE, footY+STEP_UP]
-    const ground = dig
+    let ground = dig
       ? dig.surfaceBelow(cam.position.x, cam.position.z, this.footY + STEP_UP, this.footY - FALL_PROBE)
       : this.terrain.getHeight(cam.position.x, cam.position.z);
 
+    // деревянный пол домика/крыльца перекрывает грунт, если он выше и досягаем шагом
+    let onWood = false;
+    if (this.getFloor) {
+      const fl = this.getFloor(cam.position.x, cam.position.z);
+      if (fl !== null && this.footY >= fl - STEP_UP && (ground === null || fl >= ground)) {
+        ground = fl;
+        onWood = true;
+      }
+    }
+
+    // прыжок: пробел, только с опоры (истощённый — не прыгает)
+    const wasAirborne = !this.grounded;
+    const wantJump = this.keys.has('Space');
+    if (wantJump && !this._jumpHeld && this.grounded && this.locked && !this.exhausted) {
+      this.vy = JUMP_SPEED;
+      this.grounded = false;
+      this.stamina = Math.max(0, this.stamina - 0.06); // лёгкая цена за толчок
+    }
+    this._jumpHeld = wantJump;
+
     const wasGrounded = this.grounded;
     this.vy -= GRAV * dt;
+    const impactVy = this.vy; // вертикальная скорость к моменту касания
     let nextY = this.footY + this.vy * dt;
     this.grounded = false;
     if (ground !== null) {
       if (nextY <= ground + 0.02) {
         nextY = ground; this.vy = 0; this.grounded = true; // приземлились / стоим
-      } else if (wasGrounded && ground >= nextY - STEP_DOWN) {
+      } else if (wasGrounded && this.vy <= 0 && ground >= nextY - STEP_DOWN) {
         nextY = ground; this.vy = 0; this.grounded = true; // прилипаем при спуске
       }
     }
     this.footY = nextY;
+    this.surface = this.grounded && onWood ? 'wood' : 'snow';
+
+    // приземление после прыжка/падения — глухой удар (и след на снегу)
+    if (wasAirborne && this.grounded && impactVy < -3.2 && this.onLand) {
+      this.onLand(cam.position.x, cam.position.z, this.surface, impactVy);
+    }
 
     cam.position.y = this.footY + EYE + bobY;
     // лёгкое покачивание вбок
@@ -202,7 +250,7 @@ export class Player {
           cam.position.x + this._dir.x * 0.3 + this._right.x * this.side * 0.17;
         const fz =
           cam.position.z + this._dir.z * 0.3 + this._right.z * this.side * 0.17;
-        this.onStep(fx, fz, this._dir, this.side, running);
+        this.onStep(fx, fz, this._dir, this.side, running, this.surface);
       }
     } else {
       this.stride = Math.min(this.stride, 0.4);

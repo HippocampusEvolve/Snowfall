@@ -96,6 +96,7 @@ const [trees, cabin] = await Promise.all([
 scene.add(trees.group);
 scene.add(cabin.group);
 trees.obstacles.push(...cabin.obstacles);
+snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
 
 // костёр — очаг перед домом
 const FIRE = { x: 2.5, z: -9 };
@@ -109,19 +110,24 @@ const player = new Player(
   camera,
   renderer.domElement,
   terrain,
-  (fx, fz, dir, side, running) => {
-    footprints.stamp(fx, fz, dir, side);
-    audio.footstep(running);
+  (fx, fz, dir, side, running, surface) => {
+    if (surface === 'snow') footprints.stamp(fx, fz, dir, side); // на досках следов нет
+    audio.footstep(running, surface);
   },
   trees.obstacles,
-  digger
+  digger,
+  (fx, fz) => cabin.floorHeightAt(fx, fz),
+  (fx, fz, surface, impact) => {
+    if (surface === 'snow') footprints.stampCircle(fx, fz, 0.45, 0.85); // вмятина от приземления
+    audio.land(surface, Math.abs(impact));
+  }
 );
 
 const breath = new Breath(scene, camera, (exertion) => audio.breath(exertion));
 const stats = new Stats();
 
 // debug (?debug): доступ к системам из консоли — удобно щупать копание
-if (player.debug) window.__snow = { scene, camera, renderer, terrain, snowPatch, digger, player };
+if (player.debug) window.__snow = { scene, camera, renderer, terrain, snowPatch, digger, player, cabin };
 
 // ---------- постобработка ----------
 const composer = new EffectComposer(renderer);
@@ -168,6 +174,7 @@ addEventListener('keydown', (e) => {
   if (!player.locked) return;
   if (e.code === 'KeyE') digger.editFromCamera(camera, -1);
   else if (e.code === 'KeyQ') digger.editFromCamera(camera, +1);
+  else if (e.code === 'KeyF' && nearDoor) audio.door(cabin.toggleDoor());
 });
 
 // прелоадер: пара кадров на прогрев шейдеров + проталина у костра
@@ -201,6 +208,9 @@ const clock = new THREE.Clock();
 let fadeAcc = 0;
 let meltAcc = 0;
 let blizzard = 0; // 0..1 — сглаженная сила метели
+let nearDoor = false; // рядом с дверью — работает F
+let indoorK = 0; // 0..1 — сглаженное «мы в домике» (глушит ветер, греет)
+const promptEl = document.getElementById('prompt');
 const _toFire = new THREE.Vector3();
 const _camRight = new THREE.Vector3();
 
@@ -221,12 +231,24 @@ function tick() {
   aurora.update(t, blizzard);
   breath.update(dt, player.exertion, audio.windLevel);
   campfire.update(dt, t, audio.windLevel);
-  cabin.update(t);
+  cabin.update(t, dt);
+
+  // домик: подсказка у двери, глушение ветра внутри, тепло от печки
+  const doorDist = camera.position.distanceTo(cabin.doorCenter);
+  nearDoor = doorDist < 2.4;
+  promptEl.classList.toggle('show', nearDoor && player.locked);
+  if (nearDoor) promptEl.textContent = cabin.doorOpen ? 'F — закрыть дверь' : 'F — открыть дверь';
+  const inside = cabin.isInside(camera.position.x, camera.position.z);
+  indoorK += ((inside ? 1 : 0) - indoorK) * Math.min(1, dt * 2.5);
+  audio.setIndoor(indoorK);
+  const stoveDist = camera.position.distanceTo(cabin.stovePos);
+  const stoveHeat = THREE.MathUtils.clamp(1 - (stoveDist - 0.9) / 3.4, 0, 1);
+  const cabinHeat = indoorK * Math.max(0.45, stoveHeat * 0.95); // в доме тепло, у печки — жарко
 
   // тепло от костра + позиционный звук
   _toFire.copy(campfire.position).sub(camera.position);
   const fireDist = Math.hypot(_toFire.x, _toFire.z);
-  const heat = THREE.MathUtils.clamp(1 - (fireDist - 1.2) / 3.5, 0, 1);
+  const heat = Math.max(THREE.MathUtils.clamp(1 - (fireDist - 1.2) / 3.5, 0, 1), cabinHeat);
   _camRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
   const pan = fireDist > 0.3 ? (_toFire.x * _camRight.x + _toFire.z * _camRight.z) / fireDist : 0;
   audio.updateCampfire(fireDist, pan);

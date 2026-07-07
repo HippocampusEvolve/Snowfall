@@ -32,8 +32,13 @@ export class GameAudio {
     this.firePan = ctx.createStereoPanner();
     this.fireBus = ctx.createGain();
     this.fireBus.gain.value = 0;
+    // лоупас: костёр снаружи слышен из домика глухо
+    this.fireLP = ctx.createBiquadFilter();
+    this.fireLP.type = 'lowpass';
+    this.fireLP.frequency.value = 20000;
     this.fireBus.connect(this.firePan);
-    this.firePan.connect(this.master);
+    this.firePan.connect(this.fireLP);
+    this.fireLP.connect(this.master);
 
     // шипение и низкий гул пламени
     const hiss = ctx.createBufferSource();
@@ -106,15 +111,103 @@ export class GameAudio {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
   }
 
+  // k: 0..1 — насколько игрок «внутри» (стены глушат ветер и костёр)
+  setIndoor(k) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const f = 20000 * Math.pow(340 / 20000, clamp(k, 0, 1)); // экспоненциальный спад частоты среза
+    this.windLP.frequency.setTargetAtTime(f, t, 0.3);
+    this.fireLP.frequency.setTargetAtTime(f, t, 0.3);
+    this.windMaster.gain.setTargetAtTime(0.4 * (1 - 0.72 * k), t, 0.3);
+  }
+
+  // ---------- дверь: скрип петель + щеколда ----------
+  door(open) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.02;
+
+    const out = ctx.createGain();
+    out.gain.value = 0.55;
+    out.connect(this.master);
+
+    // щёлчок щеколды: при открытии — сразу, при закрытии — в конце хода
+    const ct = open ? t : t + 0.5;
+    const click = ctx.createBufferSource();
+    click.buffer = this.noise;
+    const cbp = ctx.createBiquadFilter();
+    cbp.type = 'bandpass';
+    cbp.frequency.value = 2400 + Math.random() * 600;
+    cbp.Q.value = 1.6;
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.0001, ct);
+    cg.gain.linearRampToValueAtTime(0.32, ct + 0.003);
+    cg.gain.exponentialRampToValueAtTime(0.0001, ct + 0.05);
+    click.connect(cbp);
+    cbp.connect(cg);
+    cg.connect(out);
+    click.start(ct, Math.random(), 0.08);
+
+    // скрип петель: пила с шаткой частотой через узкий полосовой фильтр
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    const f0 = 130 + Math.random() * 70;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.linearRampToValueAtTime(f0 * (open ? 1.6 : 0.7), t + 0.42);
+    const wob = ctx.createOscillator();
+    wob.frequency.value = 10 + Math.random() * 5;
+    const wg = ctx.createGain();
+    wg.gain.value = 16;
+    wob.connect(wg);
+    wg.connect(o.frequency);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 820 + Math.random() * 260;
+    bp.Q.value = 3.2;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.055, t + 0.09);
+    g.gain.setValueAtTime(0.055, t + 0.3);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.52);
+    o.connect(bp);
+    bp.connect(g);
+    g.connect(out);
+    o.start(t);
+    o.stop(t + 0.6);
+    wob.start(t);
+    wob.stop(t + 0.6);
+
+    // при закрытии — глухой стук полотна о косяк
+    if (!open) {
+      const th = ctx.createOscillator();
+      th.type = 'sine';
+      th.frequency.setValueAtTime(120, t + 0.48);
+      th.frequency.exponentialRampToValueAtTime(45, t + 0.56);
+      const tg = ctx.createGain();
+      tg.gain.setValueAtTime(0.0001, t + 0.48);
+      tg.gain.linearRampToValueAtTime(0.4, t + 0.487);
+      tg.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+      th.connect(tg);
+      tg.connect(out);
+      th.start(t + 0.48);
+      th.stop(t + 0.62);
+    }
+  }
+
   // ---------- ветер ----------
   _buildWind() {
     const ctx = this.ctx;
     this.windBus = ctx.createGain();
     this.windBus.gain.value = 0.5;
-    const windMaster = ctx.createGain();
+    const windMaster = (this.windMaster = ctx.createGain());
     windMaster.gain.value = 0.4;
+    // лоупас на выходе ветра: в домике стены глушат высокий свист
+    this.windLP = ctx.createBiquadFilter();
+    this.windLP.type = 'lowpass';
+    this.windLP.frequency.value = 20000;
     this.windBus.connect(windMaster);
-    windMaster.connect(this.master);
+    windMaster.connect(this.windLP);
+    this.windLP.connect(this.master);
 
     // слой: шум -> полосовой фильтр (LFO по частоте) -> гейн (LFO) -> панорама
     const layer = (freq, q, gain, pan, lfoRate, lfoDepth) => {
@@ -207,9 +300,10 @@ export class GameAudio {
     src.start(t, Math.random() * 1.2, 0.8);
   }
 
-  // ---------- хруст снега ----------
-  footstep(running) {
+  // ---------- шаги ----------
+  footstep(running, surface = 'snow') {
     if (!this.ctx) return;
+    if (surface === 'wood') return this._woodStep(running);
     const ctx = this.ctx;
     const t = ctx.currentTime + 0.005;
 
@@ -263,5 +357,117 @@ export class GameAudio {
     og.connect(out);
     o.start(t);
     o.stop(t + 0.15);
+  }
+
+  // стук подошвы по половицам: удар пятки + резонанс доски + редкий скрип
+  _woodStep(running) {
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.005;
+
+    const out = ctx.createGain();
+    out.gain.value = (running ? 0.5 : 0.34) * (0.85 + Math.random() * 0.3);
+    out.connect(this.master);
+
+    // глухой удар каблука
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(150 + Math.random() * 30, t);
+    o.frequency.exponentialRampToValueAtTime(52, t + 0.07);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t);
+    og.gain.linearRampToValueAtTime(running ? 0.5 : 0.36, t + 0.005);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+    o.connect(og);
+    og.connect(out);
+    o.start(t);
+    o.stop(t + 0.16);
+
+    // «стук» — короткий резонанс доски
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.playbackRate.value = 0.9 + Math.random() * 0.4;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 300 + Math.random() * 280;
+    bp.Q.value = 2.4;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.5, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(out);
+    src.start(t, Math.random() * 1.5, 0.12);
+
+    // изредка половица поскрипывает под весом
+    if (Math.random() < 0.16) {
+      const st = t + 0.05 + Math.random() * 0.05;
+      const so = ctx.createOscillator();
+      so.type = 'sawtooth';
+      const f0 = 90 + Math.random() * 60;
+      so.frequency.setValueAtTime(f0, st);
+      so.frequency.linearRampToValueAtTime(f0 * 1.35, st + 0.16);
+      const sbp = ctx.createBiquadFilter();
+      sbp.type = 'bandpass';
+      sbp.frequency.value = 700 + Math.random() * 300;
+      sbp.Q.value = 3.5;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(0.0001, st);
+      sg.gain.linearRampToValueAtTime(0.03, st + 0.05);
+      sg.gain.exponentialRampToValueAtTime(0.0001, st + 0.2);
+      so.connect(sbp);
+      sbp.connect(sg);
+      sg.connect(out);
+      so.start(st);
+      so.stop(st + 0.24);
+    }
+  }
+
+  // приземление после прыжка/падения: тяжёлый глухой удар обеих ног +
+  // хруст наста (или стук досок). strength ≈ скорость касания.
+  land(surface = 'snow', strength = 1) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.005;
+
+    const out = ctx.createGain();
+    out.gain.value = clamp(0.5 + strength * 0.09, 0.5, 1.0);
+    out.connect(this.master);
+
+    // низкий «бум» веса
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(surface === 'wood' ? 138 : 90, t);
+    o.frequency.exponentialRampToValueAtTime(33, t + 0.13);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t);
+    og.gain.linearRampToValueAtTime(0.55, t + 0.008);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.19);
+    o.connect(og);
+    og.connect(out);
+    o.start(t);
+    o.stop(t + 0.22);
+
+    // хруст/стук поверхности — короткая шумовая пачка
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.playbackRate.value = surface === 'wood' ? 1.0 : 0.7;
+    const filt = ctx.createBiquadFilter();
+    if (surface === 'wood') {
+      filt.type = 'bandpass';
+      filt.frequency.value = 320;
+      filt.Q.value = 2.0;
+    } else {
+      filt.type = 'lowpass';
+      filt.frequency.value = 1700;
+    }
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.5, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+    src.connect(filt);
+    filt.connect(g);
+    g.connect(out);
+    src.start(t, Math.random() * 1.5, 0.17);
   }
 }

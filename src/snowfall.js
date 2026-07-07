@@ -27,6 +27,9 @@ export class Snowfall {
       uCam: { value: new THREE.Vector3() },
       uBliz: { value: 0 },
       uPR: { value: Math.min(window.devicePixelRatio, 1.75) },
+      // домик: (x, z, cos, sin) и (полуразмеры, высота кровли) — под крышей снег гаснет
+      uCabin: { value: new THREE.Vector4(0, 0, 1, 0) },
+      uCabinExt: { value: new THREE.Vector3(0, 0, -1e3) },
     };
 
     const mat = new THREE.ShaderMaterial({
@@ -41,6 +44,8 @@ export class Snowfall {
         uniform vec2 uWindOff;
         uniform vec3 uCam;
         uniform float uPR;
+        uniform vec4 uCabin;
+        uniform vec3 uCabinExt;
         varying float vFade;
         void main() {
           vec3 box = vec3(${BOX.x.toFixed(1)}, ${BOX.y.toFixed(1)}, ${BOX.z.toFixed(1)});
@@ -55,6 +60,10 @@ export class Snowfall {
           float dist = max(-mv.z, 0.001);
           gl_PointSize = clamp((1.6 + aSeed * 2.6) * uPR * (16.0 / dist), 1.0, 10.0 * uPR);
           vFade = smoothstep(0.7, 2.5, dist) * (1.0 - smoothstep(26.0, 34.0, dist));
+          // под крышей домика снег не падает (поворот в локаль футпринта)
+          vec2 cd = wp.xz - uCabin.xy;
+          vec2 cl = vec2(cd.x * uCabin.z - cd.y * uCabin.w, cd.x * uCabin.w + cd.y * uCabin.z);
+          if (abs(cl.x) < uCabinExt.x && abs(cl.y) < uCabinExt.y && wp.y < uCabinExt.z) vFade = 0.0;
           gl_Position = projectionMatrix * mv;
         }
       `,
@@ -73,6 +82,12 @@ export class Snowfall {
     this.points = new THREE.Points(geo, mat);
     this.points.frustumCulled = false;
     this._wind = new THREE.Vector2(1.6, 0.5);
+  }
+
+  // футпринт крыши домика — в этой зоне ниже кровли снежинки гаснут
+  setCabinMask(m) {
+    this.uniforms.uCabin.value.set(m.x, m.z, m.cos, m.sin);
+    this.uniforms.uCabinExt.value.set(m.hx, m.hz, m.topY);
   }
 
   update(dt, t, camPos, windLevel, blizzard) {
