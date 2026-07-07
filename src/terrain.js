@@ -18,14 +18,19 @@ export class Terrain {
     }
     geo.computeVertexNormals();
 
-    // heightmap: та же сетка, что и вершины (241²), полуплавающая точность
+    // heightmap: та же сетка, что и вершины (241²), полуплавающая точность.
+    // Узлы кэшируем В ТОЧНОСТИ ТЕКСТУРЫ (half-float туда-обратно) — их читает
+    // getPatchHeight, и CPU-высота совпадает с тем, что видит шейдер патча
     const N = SNOW_CONST.HN;
     const data = new Uint16Array(N * N);
+    this.gridHalf = new Float32Array(N * N);
     for (let j = 0; j < N; j++) {
       const z = -size / 2 + (j * size) / seg;
       for (let i = 0; i < N; i++) {
         const x = -size / 2 + (i * size) / seg;
-        data[j * N + i] = THREE.DataUtils.toHalfFloat(this.getHeight(x, z));
+        const hf = THREE.DataUtils.toHalfFloat(this.getHeight(x, z));
+        data[j * N + i] = hf;
+        this.gridHalf[j * N + i] = THREE.DataUtils.fromHalfFloat(hf);
       }
     }
     this.heightTex = new THREE.DataTexture(data, N, N, THREE.RedFormat, THREE.HalfFloatType);
@@ -43,6 +48,25 @@ export class Terrain {
 
     this.mesh = new THREE.Mesh(geo, material);
     this.mesh.receiveShadow = true;
+  }
+
+  // Высота поверхности, которую РИСУЕТ деформируемый патч: билинейная
+  // интерполяция heightmap в той же полу-точности, что у текстуры uHeight
+  // (шейдер патча сэмплит её LinearFilter'ом — это ровно эта функция).
+  // Кромка воксельного меша копания пришивается именно к ней: совпадение
+  // с патчем вершина-в-вершину, без волоска на границах колонок. Меш террейна
+  // (треугольники) отличается от неё на «твист» до ~2 см внутри ячейки —
+  // этот стык вне патча прячет юбка копания.
+  getPatchHeight(x, z) {
+    const N = SNOW_CONST.HN, seg = N - 1, size = SNOW_CONST.WORLD;
+    const gx = THREE.MathUtils.clamp((x / size + 0.5) * seg, 0, seg - 1e-6);
+    const gz = THREE.MathUtils.clamp((z / size + 0.5) * seg, 0, seg - 1e-6);
+    const i = Math.floor(gx), j = Math.floor(gz);
+    const fx = gx - i, fz = gz - j;
+    const g = this.gridHalf;
+    const h00 = g[j * N + i], h10 = g[j * N + i + 1];
+    const h01 = g[(j + 1) * N + i], h11 = g[(j + 1) * N + i + 1];
+    return (h00 + (h10 - h00) * fx) * (1 - fz) + (h01 + (h11 - h01) * fx) * fz;
   }
 
   getHeight(x, z) {
