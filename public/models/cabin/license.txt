@@ -1,0 +1,11 @@
+Model Information:
+* title:	Scandinavian Log Cabin
+* source:	https://sketchfab.com/3d-models/scandinavian-log-cabin-e89718f746484189902162a91ae0b504
+* author:	rivetech (https://sketchfab.com/rivetech)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Scandinavian Log Cabin" (https://sketchfab.com/3d-models/scandinavian-log-cabin-e89718f746484189902162a91ae0b504) by rivetech (https://sketchfab.com/rivetech) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

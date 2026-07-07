@@ -1,8 +1,10 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { snowTint } from './snowtint.js';
 
-// Костёр: каменное костровище (Poly Haven, CC0), шейдерное пламя,
-// искры-угли, дым, мерцающий тёплый свет. Источник тепла для Stats.
+// Костёр: процедурное костровище — кольцо мятых камней, зола, поленья с
+// процедурной корой, тлеющие угли; шейдерное пламя, искры, дым, мерцающий
+// тёплый свет. Всё генерится кодом, без внешних моделей. Источник тепла для Stats.
 export class Campfire {
   constructor(scene, terrain, x, z) {
     this.position = new THREE.Vector3(x, terrain.getHeight(x, z), z);
@@ -12,30 +14,136 @@ export class Campfire {
 
     this.time = { value: 0 };
 
-    // ---- костровище ----
-    new GLTFLoader().load('/models/firepit/stone_fire_pit.gltf', (gltf) => {
-      const pit = gltf.scene;
-      pit.traverse((c) => {
-        if (c.isMesh) {
-          c.castShadow = true;
-          c.receiveShadow = true;
-        }
-      });
-      pit.position.y = -0.02;
-      this.group.add(pit);
-    });
+    // ---- костровище: кольцо мятых камней ----
+    const stoneGeos = [];
+    const sv = new THREE.Vector3();
+    const N_STONES = 11;
+    for (let i = 0; i < N_STONES; i++) {
+      const g = new THREE.IcosahedronGeometry(0.13 + ((i * 7) % 4) * 0.03, 1);
+      const seed = i * 17.31;
+      const pos = g.attributes.position;
+      for (let k = 0; k < pos.count; k++) {
+        sv.fromBufferAttribute(pos, k);
+        const n =
+          Math.sin(sv.x * 9.1 + seed) * Math.cos(sv.y * 7.7 + seed * 0.7) +
+          Math.sin(sv.z * 8.3 + seed * 1.3) * 0.7;
+        sv.multiplyScalar(1 + n * 0.12); // рваный колотый профиль
+        pos.setXYZ(k, sv.x, sv.y * 0.62, sv.z); // приплюснутые — лежат, а не парят
+      }
+      g.computeVertexNormals(); // фасеточные грани — колотый камень
+      const a = (i / N_STONES) * Math.PI * 2 + Math.sin(seed) * 0.16;
+      const rad = 0.52 + Math.sin(seed * 2.1) * 0.03;
+      g.applyMatrix4(
+        new THREE.Matrix4().compose(
+          new THREE.Vector3(Math.cos(a) * rad, 0.045, Math.sin(a) * rad),
+          new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(Math.sin(seed) * 0.4, seed, Math.cos(seed * 0.7) * 0.4)
+          ),
+          new THREE.Vector3(1, 1, 1)
+        )
+      );
+      stoneGeos.push(g);
+    }
+    // у огня снег на камнях тает — лишь лёгкий иней с наружной стороны
+    const stoneMat = snowTint(
+      new THREE.MeshStandardMaterial({ color: 0x262b36, roughness: 1 }),
+      '0.6, 0.65, 0.78',
+      0.18,
+      0.6
+    );
+    const stones = new THREE.Mesh(mergeGeometries(stoneGeos), stoneMat);
+    stones.castShadow = true;
+    stones.receiveShadow = true;
+    this.group.add(stones);
 
-    // ---- поленья ----
-    const logMat = new THREE.MeshStandardMaterial({ color: 0x1c120a, roughness: 1 });
+    // ---- зола под костром ----
+    const ash = new THREE.Mesh(
+      new THREE.CircleGeometry(0.44, 24).rotateX(-Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: 0x0d0a08, roughness: 1 })
+    );
+    ash.position.y = 0.02;
+    ash.receiveShadow = true;
+    this.group.add(ash);
+
+    // ---- поленья с процедурной корой ----
+    const barkCanvas = document.createElement('canvas');
+    barkCanvas.width = 128;
+    barkCanvas.height = 64;
+    const bctx = barkCanvas.getContext('2d');
+    bctx.fillStyle = '#180e08';
+    bctx.fillRect(0, 0, 128, 64);
+    for (let i = 0; i < 90; i++) {
+      const px = Math.random() * 128;
+      const light = Math.random() < 0.2;
+      bctx.strokeStyle = light
+        ? `rgba(66, 46, 28, ${0.2 + Math.random() * 0.25})`
+        : `rgba(6, 3, 1, ${0.3 + Math.random() * 0.35})`;
+      bctx.lineWidth = 0.5 + Math.random() * 1.8;
+      bctx.beginPath();
+      bctx.moveTo(px, 0);
+      bctx.bezierCurveTo(px + 3, 20, px - 3, 44, px + Math.random() * 4 - 2, 64);
+      bctx.stroke();
+    }
+    const barkTex = new THREE.CanvasTexture(barkCanvas);
+    barkTex.wrapS = barkTex.wrapT = THREE.RepeatWrapping;
+    barkTex.colorSpace = THREE.SRGBColorSpace;
+
+    const endCanvas = document.createElement('canvas');
+    endCanvas.width = endCanvas.height = 64;
+    const ectx = endCanvas.getContext('2d');
+    const eg = ectx.createRadialGradient(32, 32, 3, 32, 32, 32);
+    eg.addColorStop(0, '#8a6a42');
+    eg.addColorStop(0.75, '#5e422a');
+    eg.addColorStop(1, '#241610');
+    ectx.fillStyle = eg;
+    ectx.fillRect(0, 0, 64, 64);
+    ectx.strokeStyle = 'rgba(30, 16, 8, 0.5)';
+    for (let r = 6; r < 30; r += 5 + Math.random() * 3) {
+      ectx.beginPath();
+      ectx.arc(32, 32, r, 0, Math.PI * 2);
+      ectx.stroke();
+    }
+    const endTex = new THREE.CanvasTexture(endCanvas);
+    endTex.colorSpace = THREE.SRGBColorSpace;
+
+    const sideMat = new THREE.MeshStandardMaterial({
+      map: barkTex,
+      bumpMap: barkTex,
+      bumpScale: 0.012,
+      roughness: 0.95,
+    });
+    const charredMat = sideMat.clone();
+    charredMat.color.setHex(0x4a423c); // обгоревшие — присыпаны пеплом
+    const endMat = new THREE.MeshStandardMaterial({ map: endTex, roughness: 0.9 });
+    const logGeo = new THREE.CylinderGeometry(0.048, 0.058, 0.68, 10);
     for (let i = 0; i < 4; i++) {
-      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.65, 6), logMat);
+      const charred = i % 2 === 1;
+      const log = new THREE.Mesh(logGeo, [charred ? charredMat : sideMat, endMat, endMat]);
+      // шалашик
       const a = (i / 4) * Math.PI * 2 + 0.4;
       log.rotation.z = Math.PI / 2 - 0.35;
       log.rotation.y = a;
       log.position.y = 0.12;
       log.castShadow = true;
+      log.receiveShadow = true;
       this.group.add(log);
     }
+
+    // ---- тлеющие угли между поленьями ----
+    this.emberMat = new THREE.MeshStandardMaterial({
+      color: 0x140a05,
+      emissive: 0xff4a12,
+      emissiveIntensity: 2.2,
+      roughness: 1,
+    });
+    const emberGeos = [];
+    for (let i = 0; i < 4; i++) {
+      const g = new THREE.IcosahedronGeometry(0.028 + (i % 2) * 0.012, 1);
+      const a = i * 2.4 + 0.7;
+      g.translate(Math.cos(a) * 0.11, 0.045, Math.sin(a) * 0.11);
+      emberGeos.push(g);
+    }
+    this.group.add(new THREE.Mesh(mergeGeometries(emberGeos), this.emberMat));
 
     // ---- пламя: два скрещенных полотна с fbm-шейдером ----
     const flameMat = new THREE.ShaderMaterial({
@@ -206,6 +314,7 @@ export class Campfire {
     this.light.position.x = Math.sin(t * 7.7) * 0.04;
     this.light.position.z = Math.cos(t * 6.3) * 0.04;
     this.glow.material.opacity = 0.75 + 0.25 * fl;
+    this.emberMat.emissiveIntensity = 1.5 + fl * 1.3; // угли дышат вместе с пламенем
 
     // дым поднимается и сносится ветром
     for (const s of this.smoke) {

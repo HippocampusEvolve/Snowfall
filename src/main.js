@@ -11,6 +11,7 @@ import { Footprints } from './footprints.js';
 import { Sky } from './sky.js';
 import { Snowfall } from './snowfall.js';
 import { createTrees } from './trees.js';
+import { createCabin } from './cabin.js';
 import { createRidges } from './ridges.js';
 import { Aurora } from './aurora.js';
 import { Breath } from './breath.js';
@@ -53,8 +54,12 @@ moonLight.shadow.bias = -0.0006;
 scene.add(moonLight);
 scene.add(moonLight.target);
 
-// нижний цвет — отскок лунного света от снега: подсвечивает низ ветвей
-const hemi = new THREE.HemisphereLight(0x223560, 0x1b2742, 0.7);
+// нижний цвет — отскок лунного света от яркого снега. Поднят до насыщенной
+// лунной синевы: он заполняет грани, смотрящие вниз/вбок (низ кроны, теневой
+// к камере бок ствола), которые луна не достаёт вовсе, — без него ближнее
+// дерево проваливалось в плоский чёрный и выпадало из синей палитры мира.
+// Снег смотрит вверх и освещается ВЕРХНИМ цветом, поэтому его яркость не растёт.
+const hemi = new THREE.HemisphereLight(0x223560, 0x33517e, 0.9);
 scene.add(hemi);
 
 // ---------- мир ----------
@@ -67,7 +72,7 @@ const snowPatch = new SnowPatch(footprints, terrain);
 scene.add(snowPatch.mesh);
 
 // воксельное копание (Digger): реальный 3D-объём — ямы, тоннели, пещеры
-const digger = new Digger(scene, terrain, snowPatch);
+const digger = new Digger(scene, terrain, snowPatch, footprints);
 
 const sky = new Sky(moonDir);
 scene.add(sky.group);
@@ -81,11 +86,18 @@ scene.add(aurora.mesh);
 const snow = new Snowfall();
 scene.add(snow.points);
 
-// лес и камни (модели Quaternius, CC0)
-const trees = await createTrees(terrain);
+// домик с тёплыми окнами + лес (сосны LOLIPOP, камни Quaternius);
+// вокруг домика — поляна без деревьев
+const CABIN = { x: -4.5, z: -13, rotY: 0.95 };
+const [trees, cabin] = await Promise.all([
+  createTrees(terrain, 170, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }]),
+  createCabin(terrain, CABIN),
+]);
 scene.add(trees.group);
+scene.add(cabin.group);
+trees.obstacles.push(...cabin.obstacles);
 
-// костёр — дом и очаг
+// костёр — очаг перед домом
 const FIRE = { x: 2.5, z: -9 };
 const campfire = new Campfire(scene, terrain, FIRE.x, FIRE.z);
 trees.obstacles.push({ x: FIRE.x, z: FIRE.z, r: 0.85 });
@@ -209,6 +221,7 @@ function tick() {
   aurora.update(t, blizzard);
   breath.update(dt, player.exertion, audio.windLevel);
   campfire.update(dt, t, audio.windLevel);
+  cabin.update(t);
 
   // тепло от костра + позиционный звук
   _toFire.copy(campfire.position).sub(camera.position);
