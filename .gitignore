@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .playwright-mcp/
-*.jpeg
-*.png
+# скриншоты и логи тестов в корне (текстуры в public/ не задевать)
+/*.jpeg
+/*.png
 *.log
