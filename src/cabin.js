@@ -139,6 +139,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   // ---- интерьер: примитивы в локали gltf.scene, база — на реальном полу ----
   const interior = buildInterior(localFloorY);
   root.add(interior.group);
+  // реальные ассеты мебели (Poly Haven CC0) поверх примитивов, где есть модель
+  await loadInteriorProps(interior.group, localFloorY, interior.colliders);
   group.updateMatrixWorld(true);
 
   // ---- коллизия: стены-отрезки с дверным проёмом + столбы крыльца ----
@@ -330,6 +332,10 @@ function buildInterior(F) {
 
   const colliders = []; // {x,z,r} или {x1,z1,x2,z2,r} — в локали модели
 
+  // мебель складываем в `dest` (по умолчанию корень g). Для предметов, которые
+  // заменяет реальная модель (стол, сиденья, свеча), временно переключаем dest
+  // на именованную группу — потом её прячем, когда встанет скачанный ассет.
+  let dest = g;
   const mesh = (geo, mat, x, y, z, ry = 0, rz = 0) => {
     const m = new THREE.Mesh(geo, mat);
     m.position.set(x, y, z);
@@ -337,8 +343,15 @@ function buildInterior(F) {
     m.rotation.z = rz;
     m.castShadow = true;
     m.receiveShadow = true;
-    g.add(m);
+    dest.add(m);
     return m;
+  };
+  const groupNamed = (name) => {
+    const grp = new THREE.Group();
+    grp.name = name;
+    g.add(grp);
+    dest = grp;
+    return grp;
   };
 
   // ---- печка-буржуйка в дальнем левом углу ----
@@ -388,32 +401,39 @@ function buildInterior(F) {
   for (const [lx, ly, lz] of logs) mesh(logGeo, logMat, lx, F + ly, lz, 0, Math.PI / 2);
 
   // ---- стол у правого окна + свеча ----
+  // Каркас стола — в группе 'table' (её прячет модельный стол WoodenTable_02).
   const table = { x: 1.75, z: 1.35 };
+  const TABLE_TOP = F + 0.755; // верх столешницы (свеча стоит на нём)
+  groupNamed('table');
   mesh(new THREE.BoxGeometry(1.15, 0.07, 0.75), wood, table.x, F + 0.72, table.z);
   for (const [dx, dz] of [[-0.5, -0.3], [0.5, -0.3], [-0.5, 0.3], [0.5, 0.3]]) {
     mesh(new THREE.BoxGeometry(0.07, 0.72, 0.07), woodDark, table.x + dx, F + 0.36, table.z + dz);
   }
+  dest = g;
   colliders.push({ x: table.x, z: table.z, r: 0.6 });
-  // блюдце, свеча, огонёк
-  mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.02, 12), iron, table.x + 0.2, F + 0.765, table.z);
+  // блюдце, свеча, огонёк — в группе candleSet (её переставим на верх модели стола)
+  groupNamed('candleSet');
+  mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.02, 12), iron, table.x + 0.2, TABLE_TOP + 0.01, table.z);
   mesh(
     new THREE.CylinderGeometry(0.033, 0.036, 0.15, 10),
     new THREE.MeshStandardMaterial({ color: 0xf3e3c3, roughness: 0.5 }),
-    table.x + 0.2, F + 0.85, table.z
+    table.x + 0.2, TABLE_TOP + 0.095, table.z
   );
   const flameMat = new THREE.MeshStandardMaterial({
     color: 0xffe0a0,
     emissive: 0xffc86e,
     emissiveIntensity: 3.2,
   });
-  const flame = mesh(new THREE.ConeGeometry(0.02, 0.07, 8), flameMat, table.x + 0.2, F + 0.96, table.z);
+  const flame = mesh(new THREE.ConeGeometry(0.02, 0.07, 8), flameMat, table.x + 0.2, TABLE_TOP + 0.205, table.z);
   flame.castShadow = false;
   const candle = new THREE.PointLight(0xffc070, 1.15, 4, 2);
-  candle.position.set(table.x + 0.2, F + 1.02, table.z);
-  g.add(candle);
+  candle.position.set(table.x + 0.2, TABLE_TOP + 0.265, table.z);
+  dest.add(candle);
+  dest = g;
 
-  // ---- табуретки ----
-  for (const [sx, sz] of [[1.15, 0.7], [2.4, 0.85]]) {
+  // ---- табуретки (каждая в группе 'seatN' — её заменит модель стула) ----
+  [[1.15, 0.7], [2.4, 0.85]].forEach(([sx, sz], i) => {
+    groupNamed('seat' + i);
     mesh(new THREE.CylinderGeometry(0.19, 0.21, 0.055, 10), wood, sx, F + 0.45, sz);
     for (const a of [0.4, 2.5, 4.6]) {
       mesh(
@@ -421,8 +441,9 @@ function buildInterior(F) {
         sx + Math.cos(a) * 0.13, F + 0.22, sz + Math.sin(a) * 0.13
       );
     }
+    dest = g;
     colliders.push({ x: sx, z: sz, r: 0.24 });
-  }
+  });
 
   // ---- кровать вдоль правой стены, ближе к дальнему углу ----
   const bed = { x: 2.12, z: -1.5 };
@@ -515,6 +536,59 @@ function buildInterior(F) {
   }
 
   return { group: g, colliders, stove, update };
+}
+
+// Реальные ассеты мебели (Poly Haven, CC0, glTF 1k) поверх процедурного
+// интерьера. Модель ставим базой на пол (по её bbox), прячем процедурный
+// двойник (visible=false), добавляем коллайдер. Нет файла → тихо оставляем
+// примитив. Всё в локали интерьера g — метрическая Y-up, как процедурная мебель.
+async function loadInteriorProps(g, F, colliders) {
+  // Оставлены только модели, что по стилю и размеру ложатся в рустик-сруб:
+  // чугунок у печи и стопка книг на столе. Прочая мебель Poly Haven не подошла
+  // (стул — резной трон 2.4 м, «стол» — кубик 0.44 м, «бочка» — современная
+  // стальная бочка с наклейкой) — роль мебели держит процедурная (buildInterior).
+  // Загрузчик умеет `hide` (спрятать процедурный двойник) — заготовка под
+  // будущие рустик-модели, что пользователь скачает со Sketchfab.
+  const PROPS = [
+    // file — относительно /models/props/; x,z — якорь в локали; yaw — доворот;
+    // on — 'floor'(деф)|'table'; col — радиус коллайдера; scale — доп. масштаб;
+    // hide — имя процедурной группы-двойника ('table'|'seat0'|'seat1')
+    { file: 'brass_pot_01/brass_pot_01_1k.gltf', x: -1.15, z: -1.4, yaw: 1.0, col: 0.22 },
+    { file: 'book_encyclopedia_set_01/book_encyclopedia_set_01_1k.gltf', x: 1.6, z: 1.5, yaw: 0.6, on: 'table' },
+  ];
+  const loader = new GLTFLoader();
+  const box = new THREE.Box3();
+  const TOP0 = F + 0.755; // верх процедурной столешницы (свеча стоит здесь)
+  let tableTop = TOP0;
+  for (const p of PROPS) {
+    let gltf;
+    try {
+      gltf = await loader.loadAsync('/models/props/' + p.file);
+    } catch (e) {
+      continue; // файла нет — процедурный двойник остаётся на месте
+    }
+    const scene = gltf.scene;
+    scene.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    if (p.scale) scene.scale.multiplyScalar(p.scale);
+    scene.updateMatrixWorld(true);
+    box.setFromObject(scene);
+    const baseTo = p.on === 'table' ? tableTop : F;
+    const holder = new THREE.Group();
+    holder.position.set(p.x, baseTo - box.min.y, p.z); // база модели — на пол/стол
+    holder.rotation.y = p.yaw || 0;
+    holder.add(scene);
+    g.add(holder);
+    if (p.hide) {
+      const twin = g.getObjectByName(p.hide);
+      if (twin) twin.visible = false;
+    }
+    if (p.hide === 'table') {
+      tableTop = (F - box.min.y) + box.max.y; // верх модельного стола — под предметы
+      const cs = g.getObjectByName('candleSet');
+      if (cs) cs.position.y += tableTop - TOP0; // свечу переставляем на стол
+    }
+    if (p.col) colliders.push({ x: p.x, z: p.z, r: p.col });
+  }
 }
 
 // Процедурная текстура строганой доски: тёплая база, продольное волокно
