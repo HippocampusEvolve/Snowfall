@@ -166,14 +166,16 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     obstacles.push({ x: p.x, z: p.z, r: 0.14 });
   }
   // под настил не поднырнуть: кромки крыльца толкаются, только пока ноги
-  // у земли (yMax между снегом и настилом); на настиле — свободно
+  // у земли (y1 между снегом и настилом); на настиле — свободно
   const underMax = floorWorldY - 0.3;
   for (const seg of [
     wall(ROOM.x0, ROOM.z1, ROOM.x0, PORCH_Z1, 0.12), // левый край крыльца
-    wall(ROOM.x1, ROOM.z1, ROOM.x1, 3.85, 0.12), // правый край, не доходя до лестницы
+    // правый край — до z=3.55: концевые круги этого сегмента и фронтальной
+    // кромки с радиусом игрока перекрывались и пережимали устье лестницы
+    wall(ROOM.x1, ROOM.z1, ROOM.x1, 3.55, 0.12),
     wall(ROOM.x0, PORCH_Z1, ROOM.x1, PORCH_Z1, 0.12), // фронтальная кромка
   ]) {
-    seg.yMax = underMax;
+    seg.y1 = underMax;
   }
   // мебель: печка, стол, кровать (координаты — из buildInterior)
   for (const c of interior.colliders) {

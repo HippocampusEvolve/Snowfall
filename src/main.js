@@ -95,13 +95,17 @@ const [trees, cabin] = await Promise.all([
 ]);
 scene.add(trees.group);
 scene.add(cabin.group);
-trees.obstacles.push(...cabin.obstacles);
 snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
+
+// единый реестр коллайдеров мира (формат — см. collide.js): деревья, дом,
+// костёр; сюда же будущая стройка/мебель/враги. Динамические (дверь) живут
+// как разделяемые объекты — их поля мутируются владельцем на месте.
+const colliders = [...trees.obstacles, ...cabin.obstacles];
 
 // костёр — очаг перед домом
 const FIRE = { x: 2.5, z: -9 };
 const campfire = new Campfire(scene, terrain, FIRE.x, FIRE.z);
-trees.obstacles.push({ x: FIRE.x, z: FIRE.z, r: 0.85 });
+colliders.push({ x: FIRE.x, z: FIRE.z, r: 0.85 });
 
 // ---------- аудио, игрок, дыхание, статы ----------
 const audio = new GameAudio();
@@ -114,7 +118,7 @@ const player = new Player(
     if (surface === 'snow') footprints.stamp(fx, fz, dir, side); // на досках следов нет
     audio.footstep(running, surface);
   },
-  trees.obstacles,
+  colliders,
   digger,
   (fx, fz) => cabin.floorHeightAt(fx, fz),
   (fx, fz, surface, impact) => {
