@@ -36,15 +36,44 @@ const EDGE = [
   [0, 4], [1, 5], [2, 6], [3, 7],
 ];
 
-const key = (a, b, c) => `${a}|${b}|${c}`;
+// Ключ вокселя/чанка — SMI-число (упаковка умножением), не строка: editAt зовёт
+// Map.get до 8 раз на сэмпл, а физика игрока сэмплит SDF сотнями раз за кадр —
+// строковые ключи аллоцировали ~700 временных строк/кадр (GC-иголки) и дорого
+// хешировались. Домен: ix,iz ∈ [-1024, 1024), iy ∈ [-256, 256) — ±256 м по
+// горизонтали и ±64 м по вертикали при вокселе 0.25 м (мир 400 м → ±800, запас).
+// x — младшая ось: сосед по x = ключ+KX, по z = +KZ, по y = +KY, поэтому 8 углов
+// трилинейной ячейки — одна упаковка и семь сложений. Упаковывать ТОЛЬКО
+// умножением: сдвиг << переполнил бы int32 (максимум ключа = 2^31-1, ровно
+// потолок SMI); распаковка сдвигами безопасна — ключ неотрицателен.
+const KX = 1;
+const KZ = 2048; // = размер домена по x
+const KY = 2048 * 2048; // = размер домена по x·z
+const key = (ix, iy, iz) => ix + 1024 + (iz + 1024) * KZ + (iy + 256) * KY;
+const unX = (k) => (k & 2047) - 1024;
+const unZ = (k) => ((k >>> 11) & 2047) - 1024;
+const unY = (k) => (k >>> 22) - 256;
+// колонка (cx,cz) без вертикали: нижние биты ключа чанка (см. маску COLM)
+const COLM = KY - 1;
+const colKey = (cx, cz) => cx + 1024 + (cz + 1024) * KZ;
+
+// общий буфер сэмплов _remesh: размер фиксирован, заполняется целиком — незачем
+// выделять 20 КБ на каждый перестраиваемый чанк
+const FIELD = new Float32Array(S * S * S);
 
 export class Digger {
   constructor(scene, terrain, snowPatch, footprints) {
     this.terrain = terrain;
     this.terrainMesh = terrain.mesh;
+    this.footprints = footprints; // правка у поверхности стирает следы на ней
 
-    this.edits = new Map(); // "ix|iy|iz" -> накопленная дельта плотности
-    this.chunks = new Map(); // "cx|cy|cz" -> THREE.Mesh (только непустые)
+    this.edits = new Map(); // key(ix,iy,iz) -> накопленная дельта плотности
+    this.chunks = new Map(); // key(cx,cy,cz) -> THREE.Mesh (только непустые)
+    // colKey(cx,cz) -> {h, hMin, hMax} — кэш baseHeight по узлам колонки чанков.
+    // Рельеф статичен (копание живёт в edits, heightmap не меняется) → кэш вечный;
+    // повторные копки в тех же колонках не пересчитывают террейн вовсе (~1.2 КБ
+    // на колонку — раскоп в десятки колонок стоит копейки)
+    this._heightCache = new Map();
+    this.onChanged = null; // зовётся после перестройки мешей (main: перерисовать тени)
 
     this.group = new THREE.Group();
     scene.add(this.group);
@@ -64,7 +93,7 @@ export class Digger {
     // Геометрия — в _rebuildSkirt().
     this.skirt = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
     this.skirt.castShadow = this.skirt.receiveShadow = true;
-    this.skirt.frustumCulled = false;
+    this.skirt.visible = false; // включается в _rebuildSkirt; bbox считается там же
     this.group.add(this.skirt);
 
     // coverage-маска в плоскости XZ: где воксельный меш заменяет плоский террейн.
@@ -112,6 +141,28 @@ export class Digger {
     return (w > 0 ? hm + (this.terrain.getHeight(x, z) - hm) * w : hm) + SNOW_CONST.LIFT;
   }
 
+  // Высоты колонки чанков (cx,cz): baseHeight в S×S узлах + min/max, из кэша
+  // (см. _heightCache). h[z*S + x] — порядок обхода как в сэмплах _remesh.
+  _columnHeights(cx, cz) {
+    const ck = colKey(cx, cz);
+    let c = this._heightCache.get(ck);
+    if (c) return c;
+    const h = new Float32Array(S * S);
+    let hMin = Infinity, hMax = -Infinity;
+    let q = 0;
+    for (let z = 0; z <= VN; z++) {
+      for (let x = 0; x <= VN; x++) {
+        const v = this.baseHeight((cx * VN + x) * VS, (cz * VN + z) * VS);
+        h[q++] = v;
+        if (v < hMin) hMin = v;
+        if (v > hMax) hMax = v;
+      }
+    }
+    c = { h, hMin, hMax };
+    this._heightCache.set(ck, c);
+    return c;
+  }
+
   // плотность в воксельном узле: >0 — грунт, <0 — воздух. Нулевая изоповерхность
   // изначально совпадает с heightmap, поэтому воксельный меш стыкуется с террейном.
   density(ix, iy, iz) {
@@ -128,23 +179,26 @@ export class Digger {
     return this.baseHeight(x, z) - y + this.editAt(x, y, z);
   }
 
-  // трилинейная интерполяция накопленных правок в произвольной точке
+  // трилинейная интерполяция накопленных правок в произвольной точке.
+  // Горячий путь физики: ключ пакуется один раз, остальные 7 углов ячейки —
+  // сложением констант осей (x — младшая, см. key)
   editAt(x, y, z) {
     const E = this.edits;
     if (E.size === 0) return 0;
     const gx = x / VS, gy = y / VS, gz = z / VS;
     const ix = Math.floor(gx), iy = Math.floor(gy), iz = Math.floor(gz);
     const fx = gx - ix, fy = gy - iy, fz = gz - iz;
+    const k = key(ix, iy, iz);
     let e = 0;
     let v;
-    if ((v = E.get(key(ix, iy, iz)))) e += v * (1 - fx) * (1 - fy) * (1 - fz);
-    if ((v = E.get(key(ix + 1, iy, iz)))) e += v * fx * (1 - fy) * (1 - fz);
-    if ((v = E.get(key(ix, iy + 1, iz)))) e += v * (1 - fx) * fy * (1 - fz);
-    if ((v = E.get(key(ix + 1, iy + 1, iz)))) e += v * fx * fy * (1 - fz);
-    if ((v = E.get(key(ix, iy, iz + 1)))) e += v * (1 - fx) * (1 - fy) * fz;
-    if ((v = E.get(key(ix + 1, iy, iz + 1)))) e += v * fx * (1 - fy) * fz;
-    if ((v = E.get(key(ix, iy + 1, iz + 1)))) e += v * (1 - fx) * fy * fz;
-    if ((v = E.get(key(ix + 1, iy + 1, iz + 1)))) e += v * fx * fy * fz;
+    if ((v = E.get(k))) e += v * (1 - fx) * (1 - fy) * (1 - fz);
+    if ((v = E.get(k + KX))) e += v * fx * (1 - fy) * (1 - fz);
+    if ((v = E.get(k + KY))) e += v * (1 - fx) * fy * (1 - fz);
+    if ((v = E.get(k + KX + KY))) e += v * fx * fy * (1 - fz);
+    if ((v = E.get(k + KZ))) e += v * (1 - fx) * (1 - fy) * fz;
+    if ((v = E.get(k + KX + KZ))) e += v * fx * (1 - fy) * fz;
+    if ((v = E.get(k + KY + KZ))) e += v * (1 - fx) * fy * fz;
+    if ((v = E.get(k + KX + KY + KZ))) e += v * fx * fy * fz;
     return e;
   }
 
@@ -183,20 +237,70 @@ export class Digger {
       const z = iz * VS;
       for (let iy = jmin; iy <= jmax; iy++) {
         const y = iy * VS;
-        for (let ix = imin; ix <= imax; ix++) {
+        let k = key(imin, iy, iz); // вдоль x ключ растёт на KX=1
+        for (let ix = imin; ix <= imax; ix++, k++) {
           const x = ix * VS;
           const d = Math.hypot(x - center.x, y - center.y, z - center.z);
           if (d >= radius) continue;
           const t = THREE.MathUtils.clamp((radius - d) / span, 0, 1);
           const w = strength * (t * t * (3 - 2 * t)); // сглаженный профиль
           if (w <= 0) continue;
-          const k = key(ix, iy, iz);
           const v = THREE.MathUtils.clamp((this.edits.get(k) || 0) + sign * w, -CLAMP, CLAMP);
           this.edits.set(k, v);
         }
       }
     }
 
+    this._remeshRange(imin, imax, jmin, jmax, kmin, kmax);
+  }
+
+  // Копок лопатой: ориентированный по yaw бокс с РЕЗКИМ профилем спада —
+  // плоское дно, ровные стенки (marching cubes воспроизводит плоскость точно;
+  // «мыльность» старых ям давала сферическая кисть с плавным спадом, не сетка).
+  // half = {x, y, z} — полуразмеры бокса в его локальных осях; falloff — узкая
+  // кромка осыпания (м). Стыки соседних копков оставляют лёгкие гребни —
+  // это и есть следы штыка.
+  editBox(center, yaw, half, sign, strength = 2.4, falloff = 0.1) {
+    const cos = Math.cos(yaw);
+    const sin = Math.sin(yaw);
+    const ex = Math.abs(cos) * half.x + Math.abs(sin) * half.z + falloff;
+    const ey = half.y + falloff;
+    const ez = Math.abs(sin) * half.x + Math.abs(cos) * half.z + falloff;
+    const imin = Math.floor((center.x - ex) / VS);
+    const imax = Math.ceil((center.x + ex) / VS);
+    const jmin = Math.floor((center.y - ey) / VS);
+    const jmax = Math.ceil((center.y + ey) / VS);
+    const kmin = Math.floor((center.z - ez) / VS);
+    const kmax = Math.ceil((center.z + ez) / VS);
+
+    for (let iz = kmin; iz <= kmax; iz++) {
+      for (let iy = jmin; iy <= jmax; iy++) {
+        const dy = iy * VS - center.y;
+        let k = key(imin, iy, iz); // вдоль x ключ растёт на KX=1
+        for (let ix = imin; ix <= imax; ix++, k++) {
+          const dx = ix * VS - center.x;
+          const dz = iz * VS - center.z;
+          // локальные координаты бокса (поворот на -yaw)
+          const lx = cos * dx + sin * dz;
+          const lz = -sin * dx + cos * dz;
+          // расстояние Чебышёва до граней бокса: ≤0 внутри
+          const d = Math.max(
+            Math.abs(lx) - half.x,
+            Math.abs(dy) - half.y,
+            Math.abs(lz) - half.z
+          );
+          const w = strength * THREE.MathUtils.clamp(1 - d / falloff, 0, 1);
+          if (w <= 0) continue;
+          const v = THREE.MathUtils.clamp((this.edits.get(k) || 0) + sign * w, -CLAMP, CLAMP);
+          this.edits.set(k, v);
+        }
+      }
+    }
+    this._remeshRange(imin, imax, jmin, jmax, kmin, kmax);
+  }
+
+  // перестроить чанки, затронутые правкой в диапазоне воксельных индексов
+  _remeshRange(imin, imax, jmin, jmax, kmin, kmax) {
     // грязные чанки: диапазон индексов + нижний сосед по общей границе
     const cmin = (i) => {
       let c = Math.floor(i / VN);
@@ -210,14 +314,7 @@ export class Digger {
     const dirty = [];
     for (let cz = cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
       for (let cx = cmin(imin); cx <= Math.floor(imax / VN); cx++) {
-        let hMin = Infinity, hMax = -Infinity;
-        for (let z = 0; z <= VN; z++) {
-          for (let x = 0; x <= VN; x++) {
-            const h = this.baseHeight((cx * VN + x) * VS, (cz * VN + z) * VS);
-            if (h < hMin) hMin = h;
-            if (h > hMax) hMax = h;
-          }
-        }
+        const { hMin, hMax } = this._columnHeights(cx, cz);
         const jlo = Math.min(jmin, Math.floor(hMin / VS) - 1);
         const jhi = Math.max(jmax, Math.ceil(hMax / VS) + 1);
         for (let cy = cmin(jlo); cy <= Math.floor(jhi / VN); cy++) dirty.push([cx, cy, cz]);
@@ -227,6 +324,7 @@ export class Digger {
     let columnsChanged = false;
     for (const [cx, cy, cz] of dirty) columnsChanged = this._remesh(cx, cy, cz) || columnsChanged;
     if (columnsChanged) this._updateCoverage();
+    if (this.onChanged) this.onChanged();
   }
 
   // Marching Cubes одного чанка. Возвращает true, если набор колонок изменился.
@@ -234,14 +332,25 @@ export class Digger {
     const k = key(cx, cy, cz);
     const had = this.chunks.has(k);
 
-    // сэмплы плотности S³ (с перекрытием границ соседей)
-    const field = new Float32Array(S * S * S);
+    // Сэмплы плотности S³ (с перекрытием границ соседей). Развёрнутый density():
+    // базовая высота зависит только от колонки — берём из вечного кэша, а не
+    // пересчитываем на каждом из S³ узлов; ключ правки вдоль x — инкремент
+    const field = FIELD;
     const ox = cx * VN, oy = cy * VN, oz = cz * VN;
+    const colH = this._columnHeights(cx, cz).h;
+    const E = this.edits;
     let p = 0;
-    for (let z = 0; z < S; z++)
-      for (let y = 0; y < S; y++)
-        for (let x = 0; x < S; x++)
-          field[p++] = this.density(ox + x, oy + y, oz + z);
+    for (let z = 0; z < S; z++) {
+      const zRow = z * S;
+      for (let y = 0; y < S; y++) {
+        const yw = (oy + y) * VS;
+        let k = key(ox, oy + y, oz + z);
+        for (let x = 0; x < S; x++, k++) {
+          const e = E.get(k);
+          field[p++] = colH[zRow + x] - yw + (e || 0);
+        }
+      }
+    }
     const at = (x, y, z) => field[x + S * (y + S * z)];
 
     const pos = [];
@@ -322,6 +431,10 @@ export class Digger {
       }
     }
     geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    // позиции в мировых координатах, матрица меша единичная — сфера честная;
+    // считаем её здесь, чтобы чанк проходил frustum culling (камеры И теней),
+    // а не рисовался всегда, как раньше с frustumCulled=false
+    geo.computeBoundingSphere();
 
     if (old) {
       old.geometry.dispose();
@@ -329,7 +442,6 @@ export class Digger {
     } else {
       const mesh = new THREE.Mesh(geo, this.material);
       mesh.castShadow = mesh.receiveShadow = true;
-      mesh.frustumCulled = false;
       this.chunks.set(k, mesh);
       this.group.add(mesh);
     }
@@ -339,18 +451,14 @@ export class Digger {
   // перерисовываем coverage-маску по колонкам (cx,cz), где есть непустые чанки
   _updateCoverage() {
     const cols = new Set();
-    for (const k of this.chunks.keys()) {
-      const [cx, , cz] = k.split('|');
-      cols.add(`${cx}|${cz}`);
-    }
+    for (const k of this.chunks.keys()) cols.add(k & COLM); // нижние биты = colKey
     const RES = this.covCanvas.width; // 1 тексель = 1 колонка чанков
     const ctx = this.covCtx;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, RES, RES);
     ctx.fillStyle = '#fff';
     for (const c of cols) {
-      const [cx, cz] = c.split('|').map(Number);
-      ctx.fillRect(cx + RES / 2, cz + RES / 2, 1, 1);
+      ctx.fillRect(unX(c) + RES / 2, unZ(c) + RES / 2, 1, 1);
     }
     this.covTex.needsUpdate = true;
     this._rebuildSkirt(cols);
@@ -375,9 +483,9 @@ export class Digger {
       [0, 1, 0, 1, 1, 0, 0, 1], // юг
     ];
     for (const c of cols) {
-      const [cx, cz] = c.split('|').map(Number);
+      const cx = unX(c), cz = unZ(c);
       for (const [dcx, dcz, ox, oz, ax, az, nx, nz] of EDGES) {
-        if (cols.has(`${cx + dcx}|${cz + dcz}`)) continue; // ребро внутреннее
+        if (cols.has(c + dcx + dcz * KZ)) continue; // ребро внутреннее (сосед-colKey)
         const bx = (cx + ox) * VN, bz = (cz + oz) * VN; // старт ребра, в вокселях
         let px = bx * VS, pz = bz * VS;
         let py = this.baseHeight(px, pz);
@@ -396,26 +504,110 @@ export class Digger {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    if (pos.length) geo.computeBoundingSphere(); // мировые координаты — culling честный
     this.skirt.geometry.dispose();
     this.skirt.geometry = geo;
+    this.skirt.visible = pos.length > 0; // у пустой геометрии сфера NaN — прячем меш
   }
 
-  // копание из камеры: луч по взгляду, правка в точке попадания.
-  // Воксельным попаданиям — приоритет: иначе при углублении ямы луч упирался бы
-  // в уже вырезанный (невидимый) плоский террейн, а не в дно пещеры.
-  editFromCamera(camera, sign, reach = 4.8, radius = 1.1, strength = 3.0) {
+  // луч по взгляду до снега (воксельным попаданиям — приоритет: иначе при
+  // углублении ямы луч упирался бы в уже вырезанный невидимый террейн)
+  _aim(camera, reach) {
     camera.getWorldDirection(this._dir);
     this._ray.set(camera.position, this._dir);
     this._ray.far = reach;
     const vHit = this._ray.intersectObjects(this.colliders, false)[0];
     const tHit = this._ray.intersectObject(this.terrainMesh, false)[0];
-    const hit = vHit || tHit;
+    return vHit || tHit || null;
+  }
+
+  // копание из камеры сферой — debug-инструмент (E/Q и мышь в ?debug)
+  editFromCamera(camera, sign, reach = 4.8, radius = 1.1, strength = 3.0) {
+    const hit = this._aim(camera, reach);
     if (!hit) return false;
     this.edit(hit.point, radius, sign, strength);
     return true;
   }
 
+  // Копок лопатой из камеры: штык входит по взгляду в точку прицела.
+  // sign=-1 — снять штык снега, sign=+1 — уложить/намыть. Бокс ориентирован
+  // по азимуту взгляда, оси вертикальны: вертикальные стенки, плоское дно.
+  // Возвращает точку врезания (для брызг/звука) или null (промах).
+  shovelEdit(camera, sign, reach = 3.4) {
+    const hit = this._aim(camera, reach);
+    if (!hit) return null;
+    const c = hit.point.clone().addScaledVector(this._dir, 0.12);
+    c.y += sign > 0 ? 0.1 : -0.08; // укладка растёт над точкой, копок — вглубь
+    const yaw = Math.atan2(this._dir.x, this._dir.z);
+    this.editBox(c, yaw, { x: 0.34, y: 0.24, z: 0.34 }, sign, 2.4, 0.1);
+    // правка у поверхности снимает/засыпает и следы на ней: свежий срез чист,
+    // а под глубоким тоннелем поверхностные следы не трогаем
+    if (
+      this.footprints &&
+      Math.abs(hit.point.y - this.baseHeight(hit.point.x, hit.point.z)) < 1.2
+    ) {
+      this.footprints.eraseCircle(hit.point.x, hit.point.z, 0.55);
+    }
+    return hit.point;
+  }
+
   get colliders() {
     return [...this.chunks.values()];
+  }
+
+  // Восстановление правок из сохранения (см. save.js): заполняем edits разом
+  // и перестраиваем все затронутые чанки — та же логика «грязных» колонок,
+  // что в edit(): колонка в coverage-маске вырезает террейн целиком, поэтому
+  // замащиваем весь диапазон высот её поверхности, не только слой правок.
+  load(entries) {
+    // сейвы старого формата хранили ключ строкой "ix|iy|iz" — конвертируем на
+    // месте; узлы вне домена упаковки отбрасываем, чтобы битый сейв не породил
+    // фантомный чанк из-за переполнившегося ключа
+    if (entries.length && typeof entries[0][0] === 'string') {
+      const conv = [];
+      for (const [k, v] of entries) {
+        const [ix, iy, iz] = k.split('|').map(Number);
+        if (ix >= -1024 && ix < 1024 && iy >= -256 && iy < 256 && iz >= -1024 && iz < 1024)
+          conv.push([key(ix, iy, iz), v]);
+      }
+      entries = conv;
+    }
+    this.edits = new Map(entries);
+    if (this.edits.size === 0) return;
+
+    // диапазон iy правок по колонкам (cx,cz); сэмпл на границе чанка
+    // принадлежит и нижнему соседу (как cmin() в edit())
+    const span = (i) => {
+      const c = Math.floor(i / VN);
+      return ((i % VN) + VN) % VN === 0 ? [c - 1, c] : [c];
+    };
+    const cols = new Map();
+    for (const k of this.edits.keys()) {
+      const ix = unX(k), iy = unY(k), iz = unZ(k);
+      for (const cx of span(ix)) {
+        for (const cz of span(iz)) {
+          const ck = colKey(cx, cz);
+          const c = cols.get(ck);
+          if (!c) cols.set(ck, { cx, cz, jmin: iy, jmax: iy });
+          else {
+            c.jmin = Math.min(c.jmin, iy);
+            c.jmax = Math.max(c.jmax, iy);
+          }
+        }
+      }
+    }
+
+    let changed = false;
+    for (const { cx, cz, jmin, jmax } of cols.values()) {
+      const { hMin, hMax } = this._columnHeights(cx, cz);
+      const jlo = Math.min(jmin, Math.floor(hMin / VS) - 1);
+      const jhi = Math.max(jmax, Math.ceil(hMax / VS) + 1);
+      const cyLo = Math.floor(jlo / VN) - (((jlo % VN) + VN) % VN === 0 ? 1 : 0);
+      for (let cy = cyLo; cy <= Math.floor(jhi / VN); cy++) {
+        changed = this._remesh(cx, cy, cz) || changed;
+      }
+    }
+    if (changed) this._updateCoverage();
+    if (this.onChanged) this.onChanged();
   }
 }

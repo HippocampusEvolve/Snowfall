@@ -1,6 +1,8 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfload.js';
+import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
+import { snowCap } from './snowcap.js';
 
 // Домик: Scandinavian Log Cabin (rivetech, CC-BY). Масштаб к реальным метрам,
 // посадка в снег по рельефу, снег на крыше и кромках брёвен через snowTint.
@@ -9,7 +11,7 @@ import { snowTint } from './snowtint.js';
 // Внутри — процедурный уют: печка с углями, дрова, стол со свечой, кровать.
 
 const LENGTH = 9.6; // длина домика по большей стороне, м (дверь ≈ 2.1 м)
-const DOOR_OPEN = -2.2; // рад — распахнутая внутрь дверь
+const DOOR_OPEN = 2.2; // рад — дверь распахивается НАРУЖУ, на крыльцо (по-северному)
 const DOOR_SPEED = 3.0; // скорость хода двери, 1/с
 
 // План домика в координатах gltf.scene (горизонталь — x/z, они не задеты
@@ -23,7 +25,7 @@ const PORCH_Z1 = 4.67;
 const FOOT = { x0: -2.85, x1: 4.6, z0: -3.05, z1: 5.1 };
 
 export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
-  const gltf = await new GLTFLoader().loadAsync('/models/cabin/scene.gltf');
+  const gltf = await createGLTFLoader().loadAsync(asset('models/cabin/scene.gltf'));
   const root = gltf.scene;
 
   // нормализация: большая сторона = LENGTH, центр XZ в нуле, пол на y=0
@@ -79,7 +81,9 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     if (tinted.has(c.material)) return;
     tinted.add(c.material);
     if (name === 'Roof') snowTint(c.material, '0.85, 0.89, 0.98', 1.0, 0.1, { geoNormal: true });
-    else snowTint(c.material, '0.78, 0.83, 0.94', 0.5, 0.5);
+    // Floor — доски внутри дома и настил крыльца: всё под крышей, снега
+    // на них не бывает (снег внутри дома выглядел как изморозь на полу)
+    else if (name !== 'Floor') snowTint(c.material, '0.78, 0.83, 0.94', 0.5, 0.5);
   });
 
   // дверь — отдельный узел модели, вращается вокруг своей петли
@@ -109,6 +113,10 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   group.rotation.y = rotY;
 
   group.updateMatrixWorld(true);
+
+  // снег лежит ШАПКОЙ на кровле: оболочка поверх меша крыши (snowcap.js);
+  // толщину задаём в метрах через реальный мировой масштаб узла gltf
+  if (roofMesh) snowCap(roofMesh, 0.09 / roofMesh.getWorldScale(new THREE.Vector3()).x);
 
   // преобразования локаль gltf.scene <-> мир
   const invRoot = root.matrixWorld.clone().invert();
@@ -343,7 +351,9 @@ function buildInterior(F) {
     m.position.set(x, y, z);
     m.rotation.y = ry;
     m.rotation.z = rz;
-    m.castShadow = true;
+    // комната целиком в лунной тени крыши — тень мебели от луны не видна
+    // никогда, а десятки мелких мешей утяжеляли каждый depth-проход теней
+    m.castShadow = false;
     m.receiveShadow = true;
     dest.add(m);
     return m;
@@ -558,19 +568,20 @@ async function loadInteriorProps(g, F, colliders) {
     { file: 'brass_pot_01/brass_pot_01_1k.gltf', x: -1.15, z: -1.4, yaw: 1.0, col: 0.22 },
     { file: 'book_encyclopedia_set_01/book_encyclopedia_set_01_1k.gltf', x: 1.6, z: 1.5, yaw: 0.6, on: 'table' },
   ];
-  const loader = new GLTFLoader();
+  const loader = createGLTFLoader();
   const box = new THREE.Box3();
   const TOP0 = F + 0.755; // верх процедурной столешницы (свеча стоит здесь)
   let tableTop = TOP0;
   for (const p of PROPS) {
     let gltf;
     try {
-      gltf = await loader.loadAsync('/models/props/' + p.file);
+      gltf = await loader.loadAsync(asset('models/props/' + p.file));
     } catch (e) {
       continue; // файла нет — процедурный двойник остаётся на месте
     }
     const scene = gltf.scene;
-    scene.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    // castShadow=false: пропсы стоят в комнате, в лунной тени крыши (см. mesh())
+    scene.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = true; } });
     if (p.scale) scene.scale.multiplyScalar(p.scale);
     scene.updateMatrixWorld(true);
     box.setFromObject(scene);

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { createGLTFLoader } from './gltfload.js';
+import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
 
 // Лес: реалистичные сосны LOLIPOP (CC-BY, 15 вариантов × LOD0-2) + камни
@@ -22,10 +23,10 @@ const KINDS = [
 
 const ROCKS = ['Rock_1', 'Rock_2', 'Rock_3', 'Rock_4', 'Rock_5'];
 
-// В паке сосен есть билборды (LOD3) и служебные узлы — выкидываем их из JSON
-// ДО парсинга: их меши не строятся, а значит их текстуры (~18 МБ) не грузятся.
+// Билборды (LOD3) и служебные узлы вычищены из самого ассета при оптимизации
+// (см. CREDITS.md), но фильтр оставлен как страховка на случай замены пака.
 async function loadPinesScene() {
-  const json = await (await fetch('/models/pines/scene.gltf')).json();
+  const json = await (await fetch(asset('models/pines/scene.gltf'))).json();
   const drop = new Set();
   json.nodes.forEach((n, i) => {
     if (/Billboard|^Back$|^Ref_plane$/i.test(n.name || '')) drop.add(i);
@@ -34,7 +35,7 @@ async function loadPinesScene() {
     if (n.children) n.children = n.children.filter((c) => !drop.has(c));
   }
   for (const s of json.scenes) s.nodes = s.nodes.filter((c) => !drop.has(c));
-  const gltf = await new GLTFLoader().parseAsync(JSON.stringify(json), '/models/pines/');
+  const gltf = await createGLTFLoader().parseAsync(JSON.stringify(json), asset('models/pines/'));
   return gltf.scene;
 }
 
@@ -120,7 +121,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
 
   const [pineScene, rockFbx] = await Promise.all([
     loadPinesScene(),
-    Promise.all(ROCKS.map((n) => new FBXLoader().loadAsync(`/models/nature/${n}.fbx`))),
+    Promise.all(ROCKS.map((n) => new FBXLoader().loadAsync(asset(`models/nature/${n}.fbx`)))),
   ]);
 
   const variants = collectPineVariants(pineScene);
@@ -206,7 +207,9 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     const meshes = parts.map((p) => {
       const m = new THREE.InstancedMesh(p.geo, p.mat, list.length);
       if (p.depth) m.customDepthMaterial = p.depth;
-      m.castShadow = true;
+      // дальнее LOD-кольцо тень не отбрасывает: оно почти всегда вне окна карты
+      // теней (±38 м от игрока), а хвоя с alphaTest — самая дорогая в depth-проходе
+      m.castShadow = ring < 2;
       m.receiveShadow = true;
       return m;
     });

@@ -1,12 +1,13 @@
 import * as THREE from 'three';
-import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { resolveColliders } from './collide.js';
 
 const EYE = 1.7;
 const HEIGHT = 1.7; // высота капсулы тела — для вертикального диапазона коллайдеров
 const RADIUS = 0.35; // радиус капсулы тела
-const WALK_SPEED = 3.0;
-const RUN_SPEED = 5.9;
+// Темп вдвое ниже спринтерского прежнего: шаг по целине — неспешный (~1.5 м/с,
+// человеческий прогулочный), бег — трусца. Мир маленький, спешить некуда.
+const WALK_SPEED = 1.5;
+const RUN_SPEED = 3.0;
 const BOUNDS = 72;
 
 const GRAV = 24; // гравитация, м/с²
@@ -49,7 +50,9 @@ const FOOT_SAMPLES = [
 // Вертикаль — не привязка к heightmap, а гравитация + опора на воксельный SDF:
 // можно провалиться в вырытую яму и зайти в пещеру (через Digger.surfaceBelow).
 export class Player {
-  constructor(camera, domElement, terrain, onStep, obstacles = [], digger = null, getFloor = null, onLand = null) {
+  // look — SmoothLook (look.js): владеет ориентацией камеры, сглаживанием и
+  // кренами; здесь остаётся только API lock()/isLocked (бывший PointerLockControls)
+  constructor(camera, look, terrain, onStep, obstacles = [], digger = null, getFloor = null, onLand = null) {
     this.camera = camera;
     this.terrain = terrain;
     this.onStep = onStep;
@@ -58,7 +61,7 @@ export class Player {
     this.getFloor = getFloor; // (x,z) -> Y деревянного пола (домик/крыльцо) или null
     this.onLand = onLand; // (x,z,surface,impact) — приземление после прыжка/падения
     this.surface = 'snow'; // на чём стоим: 'snow' | 'wood' (липкое — в воздухе не мигает)
-    this.controls = new PointerLockControls(camera, domElement);
+    this.controls = look;
 
     this.keys = new Set();
     this.vel = new THREE.Vector3();
@@ -73,6 +76,7 @@ export class Player {
     this.exertion = 0;
     this.running = false;
     this.moving = false;
+    this.carrying = false; // полено в руках: медленнее, бег недоступен
 
     this._fwd = new THREE.Vector3();
     this._right = new THREE.Vector3();
@@ -180,7 +184,7 @@ export class Player {
 
     if (this.debug) {
       const yaw = ((this.keys.has('ArrowLeft') ? 1 : 0) - (this.keys.has('ArrowRight') ? 1 : 0)) * 2.2 * dt;
-      if (yaw) cam.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), yaw);
+      if (yaw) this.controls.rotateBy(yaw); // через цель взгляда — сглаживание общее с мышью
     }
 
     // направление взгляда в плоскости XZ
@@ -193,7 +197,8 @@ export class Player {
     const f = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0);
     const r = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0);
     const wantRun = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
-    const running = wantRun && f > 0 && !this.exhausted && this.stamina > 0.02;
+    const running =
+      wantRun && f > 0 && !this.exhausted && this.stamina > 0.02 && !this.carrying;
 
     this._wish.set(0, 0, 0);
     if (this.locked && (f || r)) {
@@ -201,7 +206,7 @@ export class Player {
         .addScaledVector(this._fwd, f)
         .addScaledVector(this._right, r)
         .normalize()
-        .multiplyScalar(running ? RUN_SPEED : WALK_SPEED);
+        .multiplyScalar((running ? RUN_SPEED : WALK_SPEED) * (this.carrying ? 0.8 : 1));
     }
 
     // инерция (снег вязкий — разгон и торможение плавные)
@@ -289,10 +294,12 @@ export class Player {
     const wantJump = this.keys.has('Space');
     const canJump = this.grounded || (this.airT < COYOTE && this.vy <= 0);
     if (wantJump && !this._jumpHeld && canJump && this.locked && !this.exhausted) {
-      this.vy = JUMP_SPEED;
+      // с поленом в руках толчок слабее (высота ~вдвое ниже) и дороже — прыжок
+      // тяжёлый, а не бодрый: обе руки заняты
+      this.vy = JUMP_SPEED * (this.carrying ? 0.7 : 1);
       this.grounded = false;
       this.airT = COYOTE; // прыжок съедает грацию — двойного прыжка нет
-      this.stamina = Math.max(0, this.stamina - 0.06); // лёгкая цена за толчок
+      this.stamina = Math.max(0, this.stamina - (this.carrying ? 0.1 : 0.06));
     }
     this._jumpHeld = wantJump;
 

@@ -5,6 +5,14 @@ import { snowTint } from './snowtint.js';
 // Костёр: процедурное костровище — кольцо мятых камней, зола, поленья с
 // процедурной корой, тлеющие угли; шейдерное пламя, искры, дым, мерцающий
 // тёплый свет. Всё генерится кодом, без внешних моделей. Источник тепла для Stats.
+//
+// Огонь ЕСТ ДРОВА: fuel 1..0 выгорает за FUEL_TIME — пламя оседает, свет
+// тускнеет, дым редеет, треск затихает (audio), проталина сжимается (main).
+// До нуля не умирает: остаются тлеющие угли (burn ≥ BURN_MIN) — их можно
+// раздуть новым поленом (addFuel). Никакого индикатора: топливо видно по огню.
+const FUEL_TIME = 480; // секунд от полного костра до углей
+const BURN_MIN = 0.1; // «угли»: нижний предел горения
+
 export class Campfire {
   constructor(scene, terrain, x, z) {
     this.position = new THREE.Vector3(x, terrain.getHeight(x, z), z);
@@ -13,6 +21,10 @@ export class Campfire {
     scene.add(this.group);
 
     this.time = { value: 0 };
+    this.burnU = { value: 1 }; // burn в шейдеры пламени и искр
+    this.fuel = 0.8; // 0..1 — запас дров
+    this.burn = 1; // 0..1 — сглаженная сила горения (BURN_MIN на углях)
+    this._flare = 0; // вспышка при подброшенном полене
 
     // ---- костровище: кольцо мятых камней ----
     const stoneGeos = [];
@@ -152,7 +164,7 @@ export class Campfire {
       depthWrite: false,
       side: THREE.DoubleSide,
       fog: false,
-      uniforms: { uTime: this.time },
+      uniforms: { uTime: this.time, uBurn: this.burnU },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() {
@@ -163,6 +175,7 @@ export class Campfire {
       fragmentShader: /* glsl */ `
         varying vec2 vUv;
         uniform float uTime;
+        uniform float uBurn;
         float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float vnoise(vec2 p) {
           vec2 i = floor(p), f = fract(p);
@@ -190,16 +203,20 @@ export class Campfire {
           float a = smoothstep(0.18, 0.5, flame);
           vec3 col = mix(vec3(0.9, 0.16, 0.01), vec3(1.0, 0.62, 0.08), smoothstep(0.2, 0.75, flame));
           col = mix(col, vec3(1.0, 0.93, 0.55), smoothstep(0.62, 0.95, flame));
-          gl_FragColor = vec4(col * (1.2 + flame * 2.2), a * 0.9);
+          // на углях пламени нет — язычки истаивают вместе с burn
+          float b = smoothstep(0.12, 0.45, uBurn);
+          gl_FragColor = vec4(col * (1.2 + flame * 2.2), a * 0.9 * b);
         }
       `,
     });
     const flameGeo = new THREE.PlaneGeometry(0.85, 1.05);
+    this.flames = [];
     for (let i = 0; i < 2; i++) {
       const f = new THREE.Mesh(flameGeo, flameMat);
       f.position.y = 0.62;
       f.rotation.y = (i * Math.PI) / 2;
       f.renderOrder = 3;
+      this.flames.push(f);
       this.group.add(f);
     }
 
@@ -216,7 +233,11 @@ export class Campfire {
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       fog: false,
-      uniforms: { uTime: this.time, uPR: { value: Math.min(window.devicePixelRatio, 1.75) } },
+      uniforms: {
+        uTime: this.time,
+        uBurn: this.burnU,
+        uPR: { value: Math.min(window.devicePixelRatio, 1.75) },
+      },
       vertexShader: /* glsl */ `
         attribute float aSeed;
         uniform float uTime;
@@ -239,10 +260,12 @@ export class Campfire {
       `,
       fragmentShader: /* glsl */ `
         varying float vLife;
+        uniform float uBurn;
         void main() {
           float d = length(gl_PointCoord - 0.5);
           if (d > 0.5) discard;
           float a = (1.0 - vLife) * smoothstep(0.0, 0.08, vLife);
+          a *= smoothstep(0.1, 0.5, uBurn); // угли почти не искрят
           vec3 col = mix(vec3(1.0, 0.7, 0.2), vec3(0.9, 0.2, 0.03), vLife);
           gl_FragColor = vec4(col * 2.0, a);
         }
@@ -301,22 +324,52 @@ export class Campfire {
     this.group.add(this.glow);
   }
 
+  // подбросить полено: топливо +, короткая вспышка занявшегося огня
+  addFuel() {
+    this.fuel = Math.min(1, this.fuel + 0.34);
+    this._flare = 1;
+  }
+
+  // тепло для Stats/проталины: угли греют еле-еле, полный костёр — как раньше
+  get heatK() {
+    return 0.12 + 0.88 * this.burn;
+  }
+
   update(dt, t, windLevel) {
     this.time.value = t;
 
-    // мерцание света
+    // топливо выгорает; сила горения плавно догоняет запас (огонь оседает
+    // не мгновенно), на нуле остаются тлеющие угли
+    this.fuel = Math.max(0, this.fuel - dt / FUEL_TIME);
+    const targetBurn = BURN_MIN + (1 - BURN_MIN) * Math.min(1, this.fuel * 2.4);
+    this.burn += (targetBurn - this.burn) * Math.min(1, dt * 0.25);
+    this._flare = Math.max(0, this._flare - dt * 0.55);
+    const b = Math.min(1, this.burn + this._flare * 0.35); // вспышка от полена
+    this.burnU.value = b;
+
+    // мерцание света × сила горения
     const fl =
       0.82 +
       0.1 * Math.sin(t * 11.3) +
       0.06 * Math.sin(t * 23.7 + 1.3) +
       0.05 * Math.sin(t * 5.1 + 4.2);
-    this.light.intensity = 50 * fl;
+    this.light.intensity = 50 * fl * (0.08 + 0.92 * b);
     this.light.position.x = Math.sin(t * 7.7) * 0.04;
     this.light.position.z = Math.cos(t * 6.3) * 0.04;
-    this.glow.material.opacity = 0.75 + 0.25 * fl;
-    this.emberMat.emissiveIntensity = 1.5 + fl * 1.3; // угли дышат вместе с пламенем
+    this.glow.material.opacity = (0.75 + 0.25 * fl) * (0.12 + 0.88 * b);
+    this.glow.scale.setScalar(5.5 * (0.45 + 0.55 * b));
+    // угли дышат вместе с пламенем; гаснут последними (медленнее, чем свет)
+    this.emberMat.emissiveIntensity = (1.5 + fl * 1.3) * (0.3 + 0.7 * b);
 
-    // дым поднимается и сносится ветром
+    // пламя оседает: язычки ниже, база остаётся на углях
+    const fs = 0.25 + 0.75 * b;
+    for (const f of this.flames) {
+      f.scale.set(0.55 + 0.45 * fs, fs, 1);
+      f.position.y = 0.095 + 0.525 * fs;
+    }
+
+    // дым поднимается и сносится ветром; у затухающего костра он жиже
+    const smokeK = 0.3 + 0.7 * b;
     for (const s of this.smoke) {
       const u = s.userData;
       u.life += dt;
@@ -331,7 +384,7 @@ export class Campfire {
         Math.cos(u.ttl * 9.3 + k * 3.0) * 0.15 + k * k * windLevel * 0.8
       );
       s.scale.setScalar(0.3 + k * 1.6);
-      s.material.opacity = 0.085 * Math.sin(Math.PI * Math.min(k * 1.15, 1));
+      s.material.opacity = 0.085 * smokeK * Math.sin(Math.PI * Math.min(k * 1.15, 1));
     }
   }
 }

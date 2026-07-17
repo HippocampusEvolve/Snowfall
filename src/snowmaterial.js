@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { asset } from './asset.js';
 
 // Общий материал снега для базового террейна и деформируемого патча.
 // base  — обычный меш, следы только шейдингом; дырка (discard) под патчем.
@@ -37,9 +38,9 @@ export function loadSnowTextures(maxAnisotropy) {
     return t;
   };
   return {
-    map: setup(tl.load('/textures/snow_02_diff_2k.jpg'), true),
-    normalMap: setup(tl.load('/textures/snow_02_nor_gl_2k.jpg')),
-    roughnessMap: setup(tl.load('/textures/snow_02_rough_2k.jpg')),
+    map: setup(tl.load(asset('textures/snow_02_diff_2k.jpg')), true),
+    normalMap: setup(tl.load(asset('textures/snow_02_nor_gl_2k.jpg'))),
+    roughnessMap: setup(tl.load(asset('textures/snow_02_rough_2k.jpg'))),
   };
 }
 
@@ -57,6 +58,12 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
   const uniforms = {
     uTrail: { value: footprints.texture },
     uTrailArea: { value: footprints.area },
+    // детальная карта следов (окно вокруг игрока): протектор ботинка, лапки.
+    // Объекты униформ разделяются с Footprints — свап пинг-понга и переезд
+    // окна доходят до шейдера без ручной рассылки
+    uTrailHi: footprints.hiUniform,
+    uTrailHiC: footprints.hiCenterUniform,
+    uTrailHiArea: { value: footprints.hiArea },
     // coverage-маска воксельного копания (Digger): дырку под мешем вырезаем discard'ом
     uCut: { value: defaultCutTex() },
     uCutArea: { value: WORLD },
@@ -90,7 +97,9 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
       float sampleTrail(vec2 wxz) {
         vec2 uv = vec2(wxz.x, -wxz.y) / uTrailArea + 0.5;
         if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
-        return clamp(texture2D(uTrail, uv).r, 0.0, 1.0);
+        // R — свежий след, G — утоптанная тропа (заметается медленнее)
+        vec2 t = texture2D(uTrail, uv).rg;
+        return clamp(max(t.r, t.g), 0.0, 1.0);
       }
       float cutCol(vec2 cell) {
         vec2 c = cell * ${CUTCOL.toFixed(1)} + ${(CUTCOL / 2).toFixed(1)};
@@ -190,7 +199,24 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
       vec2 trailUv(vec3 wp) { return vec2(wp.x, -wp.z) / uTrailArea + 0.5; }
       float trailAt(vec2 uv) {
         if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
-        return texture2D(uTrail, uv).r;
+        vec2 t = texture2D(uTrail, uv).rg; // R — след, G — тропа
+        return max(t.r, t.g);
+      }
+      // детальная карта следов: окно вокруг игрока, к краю гаснет — шов
+      // с общей картой не виден (общая продолжает тот же след, только мягче)
+      uniform sampler2D uTrailHi;
+      uniform vec2 uTrailHiC;
+      uniform float uTrailHiArea;
+      vec2 trailHiUv(vec3 wp) {
+        return vec2(wp.x - uTrailHiC.x, uTrailHiC.y - wp.z) / uTrailHiArea + 0.5;
+      }
+      float trailHiFade(vec2 uv) {
+        vec2 m = abs(uv - 0.5);
+        return 1.0 - smoothstep(0.40, 0.485, max(m.x, m.y));
+      }
+      float trailHiAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
+        return texture2D(uTrailHi, uv).r;
       }
       uniform sampler2D uCut;
       uniform float uCutArea;
@@ -223,6 +249,10 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.885, 0.955), 0.55);
         vec2 tuv = trailUv(vWp);
         float tr = clamp(trailAt(tuv), 0.0, 1.0);
+        // вблизи след уточняется детальной картой (чёткий протектор/лапки)
+        vec2 hiUv = trailHiUv(vWp);
+        float hiW = trailHiFade(hiUv);
+        tr = max(tr, trailHiAt(hiUv) * hiW);
         // утоптанный снег темнее и синее
         diffuseColor.rgb *= 1.0 - tr * 0.38;
         diffuseColor.b *= 1.0 + tr * 0.06;
@@ -246,6 +276,15 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
           float tY = trailAt(tuv + vec2(0.0, e));
           vec3 nOff = vec3(tX - tC, 0.0, -(tY - tC)) * ${mode === 'patch' ? '2.0' : '4.0'};
           normal = normalize(normal + (viewMatrix * vec4(nOff, 0.0)).xyz);
+        }
+        // рельеф протектора из детальной карты — грунтозацепы читаются светотенью
+        if (hiW > 0.001) {
+          float eh = 1.2 / 2048.0;
+          float hC = trailHiAt(hiUv);
+          float hX = trailHiAt(hiUv + vec2(eh, 0.0));
+          float hY = trailHiAt(hiUv + vec2(0.0, eh));
+          vec3 hOff = vec3(hX - hC, 0.0, -(hY - hC)) * 5.0 * hiW;
+          normal = normalize(normal + (viewMatrix * vec4(hOff, 0.0)).xyz);
         }`
       );
   };
@@ -276,6 +315,9 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
     uHeight: { value: heightTex },
     uTrail: { value: footprints.texture },
     uTrailArea: { value: footprints.area },
+    uTrailHi: footprints.hiUniform,
+    uTrailHiC: footprints.hiCenterUniform,
+    uTrailHiArea: { value: footprints.hiArea },
   };
 
   mat.onBeforeCompile = (shader) => {
@@ -305,7 +347,22 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       vec2 trailUv(vec3 wp) { return vec2(wp.x, -wp.z) / uTrailArea + 0.5; }
       float trailAt(vec2 uv) {
         if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
-        return texture2D(uTrail, uv).r;
+        vec2 t = texture2D(uTrail, uv).rg; // R — след, G — тропа
+        return max(t.r, t.g);
+      }
+      uniform sampler2D uTrailHi;
+      uniform vec2 uTrailHiC;
+      uniform float uTrailHiArea;
+      vec2 trailHiUv(vec3 wp) {
+        return vec2(wp.x - uTrailHiC.x, uTrailHiC.y - wp.z) / uTrailHiArea + 0.5;
+      }
+      float trailHiFade(vec2 uv) {
+        vec2 m = abs(uv - 0.5);
+        return 1.0 - smoothstep(0.40, 0.485, max(m.x, m.y));
+      }
+      float trailHiAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
+        return texture2D(uTrailHi, uv).r;
       }`
     );
 
@@ -339,15 +396,16 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       float strata = sin(depth * 7.0) * 0.5 + 0.5;
       col *= 1.0 + (strata - 0.5) * 0.08 * wallness;
       diffuseColor.rgb *= col;
-      // Утоптанность (trail-карта) продолжается с террейна на восстановленную
-      // поверхность — без этого тропа тонально обрывается на линии выреза.
-      // Маска trS: полоса исходного уровня снега (±0.25 м) и только «смотрящее
-      // вверх» — дно ямы, стены и потолок пещеры под тропой остаются свежим
-      // срезом, верх намытой кучи тоже чист.
+      // Следы (trail-карта) живут на всём, куда можно ступить: маска trS —
+      // «смотрит вверх». Дно вырытой ямы и верх намытой кучи теперь принимают
+      // отпечатки (по ним ходят!), стены и потолки пещер остаются свежим
+      // срезом. Старые поверхностные следы над ямой стирает eraseCircle при
+      // правке — призрак следов на свежем срезе не появляется.
       vec2 tuv = trailUv(vWp);
-      float trS = clamp(1.0 - abs(groundY + ${LIFT.toFixed(3)} - vWp.y) * 4.0, 0.0, 1.0)
-                * clamp(wn0.y, 0.0, 1.0);
-      float tr = clamp(trailAt(tuv), 0.0, 1.0) * trS;
+      float trS = smoothstep(0.35, 0.75, wn0.y);
+      vec2 hiUvD = trailHiUv(vWp);
+      float hiWD = trailHiFade(hiUvD);
+      float tr = clamp(max(trailAt(tuv), trailHiAt(hiUvD) * hiWD), 0.0, 1.0) * trS;
       // тот же тон, что у террейна: утоптанный снег темнее и синее
       diffuseColor.rgb *= 1.0 - tr * 0.38;
       diffuseColor.b *= 1.0 + tr * 0.06;
@@ -387,13 +445,22 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       normal = normalize((viewMatrix * vec4(wnorm, 0.0)).xyz);
       {
         // вмятины следов шейдингом — как на базовом террейне (там тоже без
-        // геометрии); маска trS не пускает их на дно ямы и в пещеры
+        // геометрии); маска trS не пускает их на стены и потолки пещер
         float e = 1.5 / 2048.0;
         float tC = trailAt(tuv);
         float tX = trailAt(tuv + vec2(e, 0.0));
         float tY = trailAt(tuv + vec2(0.0, e));
         vec3 nOff = vec3(tX - tC, 0.0, -(tY - tC)) * 4.0 * trS;
         normal = normalize(normal + (viewMatrix * vec4(nOff, 0.0)).xyz);
+      }
+      if (hiWD > 0.001) {
+        // протектор из детальной карты — и на вырытом полу тоже
+        float eh = 1.2 / 2048.0;
+        float hC = trailHiAt(hiUvD);
+        float hX = trailHiAt(hiUvD + vec2(eh, 0.0));
+        float hY = trailHiAt(hiUvD + vec2(0.0, eh));
+        vec3 hOff = vec3(hX - hC, 0.0, -(hY - hC)) * 5.0 * hiWD * trS;
+        normal = normalize(normal + (viewMatrix * vec4(hOff, 0.0)).xyz);
       }`
     );
   };
@@ -402,4 +469,4 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
   return mat;
 }
 
-export const SNOW_CONST = { WORLD, HN, DEPTH, LIFT, CUTCOL };
+export const SNOW_CONST = { WORLD, HN, DEPTH, LIFT, CUTCOL, REPEAT };

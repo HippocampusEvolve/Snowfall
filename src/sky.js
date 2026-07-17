@@ -1,10 +1,21 @@
 import * as THREE from 'three';
 
 // Ночное небо: градиентный купол, мерцающие звёзды, луна с гало.
+// Луна ЖИВАЯ: ползёт по низкому полярному кругу (полный оборот за MOON_PERIOD),
+// высота дышит в противофазе — тени медленно плывут по снегу, мир движется,
+// даже когда игрок стоит. this.moonDir мутируется на месте: main.js держит
+// ссылку и ведёт за ним DirectionalLight.
+const MOON_PERIOD = 5400; // секунд на полный круг по азимуту (~90 мин)
+const MOON_EL_MID = 0.42; // средняя высота, рад
+const MOON_EL_AMP = 0.2; // размах качания высоты, рад
+
 export class Sky {
   constructor(moonDir) {
     this.group = new THREE.Group();
     this.time = { value: 0 };
+    // стартовая фаза — из переданного направления (совпадает с прежней статикой)
+    this.moonDir = moonDir; // мутируем на месте — внешние ссылки живые
+    this._az0 = Math.atan2(moonDir.x, moonDir.z);
 
     // ---- купол неба ----
     const domeMat = new THREE.ShaderMaterial({
@@ -12,7 +23,7 @@ export class Sky {
       depthWrite: false,
       fog: false,
       uniforms: {
-        uMoonDir: { value: moonDir.clone() },
+        uMoonDir: { value: moonDir }, // живая ссылка — сияние едет за луной
       },
       vertexShader: /* glsl */ `
         varying vec3 vDir;
@@ -118,6 +129,7 @@ export class Sky {
     moon.position.copy(moonPos);
     moon.lookAt(0, 0, 0);
     moon.renderOrder = -1;
+    this.moon = moon;
     this.group.add(moon);
 
     // гало луны — спрайт с радиальным градиентом
@@ -141,10 +153,22 @@ export class Sky {
     halo.position.copy(moonPos);
     halo.scale.setScalar(240);
     halo.renderOrder = -1;
+    this.halo = halo;
     this.group.add(halo);
   }
 
   update(t) {
     this.time.value = t;
+
+    // полярный круг: азимут ползёт, высота дышит в противофазе. При t=0
+    // направление совпадает с переданным в конструктор (стартовая сцена та же).
+    const ph = (t / MOON_PERIOD) * Math.PI * 2;
+    const az = this._az0 + ph;
+    const el = MOON_EL_MID + MOON_EL_AMP * Math.cos(ph);
+    const ce = Math.cos(el);
+    this.moonDir.set(Math.sin(az) * ce, Math.sin(el), Math.cos(az) * ce);
+    this.moon.position.copy(this.moonDir).multiplyScalar(800);
+    this.moon.lookAt(0, 0, 0);
+    this.halo.position.copy(this.moon.position);
   }
 }

@@ -9,7 +9,6 @@ export class Stats {
     this.els = {
       stats: document.getElementById('stats'),
       warmth: document.getElementById('warmthFill'),
-      stamina: document.getElementById('staminaFill'),
       temp: document.getElementById('tempText'),
       frost: document.getElementById('frost'),
       death: document.getElementById('death'),
@@ -39,8 +38,7 @@ export class Stats {
     const e = this.els;
     e.warmth.style.width = `${this.warmth * 100}%`;
     e.warmth.classList.toggle('low', this.warmth < 0.3);
-    e.stamina.style.width = `${player.stamina * 100}%`;
-    e.stamina.classList.toggle('low', player.exhausted);
+    // полоски СИЛ больше нет: усталость слышно дыханием (breath/audio)
 
     const temp = Math.round(-10 - blizzard * 16 + (player.moving ? 1 : 0) + heat * 22);
     e.temp.textContent = `${temp}°`;

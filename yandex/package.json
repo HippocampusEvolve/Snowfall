@@ -1,0 +1,13 @@
+{
+  "name": "snowfall-yandex-build",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Автономный сжатый билд (Яндекс.Игры / self-host). НЕ часть основного проекта.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "sharp": "^0.33.5"
+  }
+}

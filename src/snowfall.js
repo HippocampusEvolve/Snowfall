@@ -26,6 +26,7 @@ export class Snowfall {
       uWindOff: { value: new THREE.Vector2(0, 0) },
       uCam: { value: new THREE.Vector3() },
       uBliz: { value: 0 },
+      uShelter: { value: 0 }, // 0..1 — игрок в пещере: снег вокруг гаснет
       uPR: { value: Math.min(window.devicePixelRatio, 1.75) },
       // домик: (x, z, cos, sin) и (полуразмеры, высота кровли) — под крышей снег гаснет
       uCabin: { value: new THREE.Vector4(0, 0, 1, 0) },
@@ -46,6 +47,7 @@ export class Snowfall {
         uniform float uPR;
         uniform vec4 uCabin;
         uniform vec3 uCabinExt;
+        uniform float uShelter;
         varying float vFade;
         void main() {
           vec3 box = vec3(${BOX.x.toFixed(1)}, ${BOX.y.toFixed(1)}, ${BOX.z.toFixed(1)});
@@ -64,6 +66,8 @@ export class Snowfall {
           vec2 cd = wp.xz - uCabin.xy;
           vec2 cl = vec2(cd.x * uCabin.z - cd.y * uCabin.w, cd.x * uCabin.w + cd.y * uCabin.z);
           if (abs(cl.x) < uCabinExt.x && abs(cl.y) < uCabinExt.y && wp.y < uCabinExt.z) vFade = 0.0;
+          // в вырытой пещере снегопада нет (у бокса частиц нет теста грунта)
+          vFade *= 1.0 - uShelter;
           gl_Position = projectionMatrix * mv;
         }
       `,
@@ -90,11 +94,12 @@ export class Snowfall {
     this.uniforms.uCabinExt.value.set(m.hx, m.hz, m.topY);
   }
 
-  update(dt, t, camPos, windLevel, blizzard) {
+  update(dt, t, camPos, windLevel, blizzard, shelter = 0) {
     const u = this.uniforms;
     u.uTime.value = t;
     u.uCam.value.copy(camPos);
     u.uBliz.value = blizzard;
+    u.uShelter.value = shelter;
     // в метель снег валит быстрее (интегрируем фазу, а не множим время)
     u.uFallT.value += dt * (1 + blizzard * 1.1);
     // плавно подтягиваем ветер к уровню порывов из аудио

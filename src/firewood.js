@@ -1,0 +1,168 @@
+import * as THREE from 'three';
+import { snowTint } from './snowtint.js';
+import { snowCap } from './snowcap.js';
+
+// Дрова без инвентаря: поленница у дома — это и есть «сколько у меня дров»
+// (VISION.md: материя имеет вес и место). Полено берут по F, несут В РУКАХ
+// (видно у камеры, идти медленнее, не побегать) и бросают в костёр.
+// Пока поленница неисчерпаема — экономика заготовки придёт вместе с рубкой леса.
+
+// процедурная кора: тёмная база + продольные борозды (как у поленьев костра)
+function makeBarkTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 64;
+  const x = c.getContext('2d');
+  x.fillStyle = '#1c110a';
+  x.fillRect(0, 0, 128, 64);
+  for (let i = 0; i < 80; i++) {
+    const px = Math.random() * 128;
+    const light = Math.random() < 0.22;
+    x.strokeStyle = light
+      ? `rgba(72, 50, 30, ${0.2 + Math.random() * 0.25})`
+      : `rgba(7, 4, 2, ${0.3 + Math.random() * 0.35})`;
+    x.lineWidth = 0.5 + Math.random() * 1.8;
+    x.beginPath();
+    x.moveTo(px, 0);
+    x.bezierCurveTo(px + 3, 20, px - 3, 44, px + Math.random() * 4 - 2, 64);
+    x.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function makeEndTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(32, 32, 3, 32, 32, 32);
+  g.addColorStop(0, '#8a6a42');
+  g.addColorStop(0.75, '#5e422a');
+  g.addColorStop(1, '#241610');
+  x.fillStyle = g;
+  x.fillRect(0, 0, 64, 64);
+  x.strokeStyle = 'rgba(30, 16, 8, 0.5)';
+  for (let r = 6; r < 30; r += 5 + Math.random() * 3) {
+    x.beginPath();
+    x.arc(32, 32, r, 0, Math.PI * 2);
+    x.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function logMaterials() {
+  const bark = makeBarkTexture();
+  const side = new THREE.MeshStandardMaterial({
+    map: bark,
+    bumpMap: bark,
+    bumpScale: 0.012,
+    roughness: 0.95,
+  });
+  const end = new THREE.MeshStandardMaterial({ map: makeEndTexture(), roughness: 0.9 });
+  return [side, end, end];
+}
+
+// Поленница: два ряда колотых поленьев штабелем, сверху присыпаны снегом.
+// Возвращает { group, position, obstacle } — коллайдер в общий реестр.
+export function createWoodpile(terrain, x, z, rotY = 0) {
+  const group = new THREE.Group();
+  const y = terrain.getHeight(x, z);
+  group.position.set(x, y, z);
+  group.rotation.y = rotY;
+
+  const mats = logMaterials();
+  // снег на верхних поленьях — та же метель, что на всём остальном
+  snowTint(mats[0], '0.82, 0.86, 0.96', 0.55, 0.35);
+  const geo = new THREE.CylinderGeometry(0.06, 0.068, 0.62, 8);
+
+  // штабель: ряды со сдвигом, лёгкий разнобой углов — сложено руками
+  let n = 0;
+  for (let row = 0; row < 3; row++) {
+    const count = 4 - (row === 2 ? 1 : 0);
+    for (let i = 0; i < count; i++) {
+      const m = new THREE.Mesh(geo, mats);
+      m.rotation.z = Math.PI / 2;
+      m.rotation.y = (Math.sin(n * 12.9) - 0.5) * 0.14;
+      m.position.set(
+        (i - (count - 1) / 2) * 0.145 + Math.sin(n * 7.3) * 0.012,
+        0.075 + row * 0.125,
+        Math.sin(n * 3.7) * 0.02
+      );
+      m.castShadow = true;
+      m.receiveShadow = true;
+      group.add(m);
+      // два верхних ряда открыты небу — несут снежную шапку по верхней дуге
+      if (row > 0) snowCap(m, 0.03);
+      n++;
+    }
+  }
+
+  return {
+    group,
+    position: new THREE.Vector3(x, y, z),
+    obstacle: { x, z, r: 0.5 },
+  };
+}
+
+// Брошенные поленья: полено можно бросить где угодно (F вне костра) — оно
+// ляжет в снег и ОСТАНЕТСЯ лежать (VISION.md: мир копится, материя имеет
+// место). F рядом — поднять обратно. Переживают перезагрузку (save.js).
+export class GroundLogs {
+  constructor(scene) {
+    this.scene = scene;
+    this.list = []; // {mesh, x, y, z, yaw}
+    this.geo = new THREE.CylinderGeometry(0.055, 0.062, 0.55, 8);
+    this.mats = logMaterials();
+    // лежит под снегопадом — припорашивается, как и поленница
+    snowTint(this.mats[0], '0.82, 0.86, 0.96', 0.5, 0.4);
+  }
+
+  drop(x, y, z, yaw) {
+    const m = new THREE.Mesh(this.geo, this.mats);
+    // лёгкий разнобой наклона: брошено, а не выложено
+    m.rotation.set((Math.random() - 0.5) * 0.14, yaw, Math.PI / 2 + (Math.random() - 0.5) * 0.12);
+    m.position.set(x, y + 0.055, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    this.scene.add(m);
+    this.list.push({ mesh: m, x, y, z, yaw });
+  }
+
+  take(entry) {
+    const i = this.list.indexOf(entry);
+    if (i < 0) return false;
+    this.scene.remove(entry.mesh);
+    this.list.splice(i, 1);
+    return true;
+  }
+
+  serialize() {
+    const r = (v) => Math.round(v * 100) / 100;
+    return this.list.map((l) => [r(l.x), r(l.y), r(l.z), r(l.yaw)]);
+  }
+
+  restore(arr) {
+    for (const [x, y, z, yaw] of arr) this.drop(x, y, z, yaw);
+  }
+}
+
+// Полено в руках: крепится к камере, покачивается в такт ходьбе (main.js
+// только показывает/прячет). Своя пара материалов без snowTint — в руках
+// полено «домашнее», не заснеженное.
+export function createCarriedLog() {
+  const holder = new THREE.Group();
+  const log = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.055, 0.062, 0.55, 8),
+    logMaterials()
+  );
+  log.rotation.z = Math.PI / 2 - 0.18;
+  log.rotation.y = 0.35;
+  holder.add(log);
+  holder.position.set(0.26, -0.32, -0.52); // нижний правый угол взгляда
+  holder.visible = false;
+  return holder;
+}

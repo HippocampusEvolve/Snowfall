@@ -65,6 +65,21 @@
       letter-spacing: 0.18em;
       color: #62719a;
     }
+    /* сброс памяти мира — тихая кнопка, подтверждение вторым нажатием */
+    #resetWorld {
+      margin-top: 1.7rem;
+      padding: 0.4rem 1rem;
+      font-size: 0.68rem;
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: #4d5a7d;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: color 0.25s ease;
+    }
+    #resetWorld:hover { color: #8fa0c6; }
+    #resetWorld.arm { color: #d98a6a; }
 
     #hud {
       position: fixed; right: 24px; bottom: 20px; z-index: 6;
@@ -159,7 +174,8 @@
     <h1>SNOWFALL</h1>
     <p class="sub">долгая тёмная ночь</p>
     <button id="play">Войти в ночь</button>
-    <div class="controls">WASD — движение&nbsp;&nbsp;·&nbsp;&nbsp;SHIFT — бег&nbsp;&nbsp;·&nbsp;&nbsp;ПРОБЕЛ — прыжок&nbsp;&nbsp;·&nbsp;&nbsp;F — дверь&nbsp;&nbsp;·&nbsp;&nbsp;МЫШЬ — обзор&nbsp;&nbsp;·&nbsp;&nbsp;ESC — пауза</div>
+    <div class="controls">WASD — движение&nbsp;&nbsp;·&nbsp;&nbsp;SHIFT — бег&nbsp;&nbsp;·&nbsp;&nbsp;ПРОБЕЛ — прыжок&nbsp;&nbsp;·&nbsp;&nbsp;F — рука (дверь, дрова, лопата)&nbsp;&nbsp;·&nbsp;&nbsp;ЛКМ/ПКМ — копать/намыть (с лопатой)&nbsp;&nbsp;·&nbsp;&nbsp;ESC — пауза</div>
+    <button id="resetWorld">начать ночь заново</button>
   </div>
 
   <div id="hud">SHIFT — БЕГ</div>
@@ -167,16 +183,13 @@
 
   <div id="frost"></div>
 
+  <!-- СИЛЫ убраны с экрана: усталость слышно дыханием и видно раскачкой бега.
+       ТЕПЛО пока остаётся — уйдёт, когда телесных сигналов станет достаточно -->
   <div id="stats">
     <div class="row">
       <span id="tempText">-12°</span>
       <div class="bar"><div id="warmthFill" class="fill"></div></div>
       <span class="cap">ТЕПЛО</span>
-    </div>
-    <div class="row">
-      <span class="temp-spacer" style="width:2.8em"></span>
-      <div class="bar"><div id="staminaFill" class="fill"></div></div>
-      <span class="cap">СИЛЫ</span>
     </div>
   </div>
 
