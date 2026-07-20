@@ -12,6 +12,20 @@ import { snowTint } from './snowtint.js';
 
 const LOD_RINGS = [40, 85]; // ближе 40 м — LOD0, до 85 — LOD1, дальше — LOD2
 
+// Лес детерминирован (mulberry32 от константы): одна и та же раскладка каждую
+// ночь. Иначе «мир копится» ломается — сваленное дерево не найти после
+// перезагрузки, если сосны пересеялись по новым местам.
+const FOREST_SEED = 20260706; // день, когда началась эта ночь
+function mulberry32(a) {
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // рост и радиус ствола (доля от роста) по типу сосны
 const KINDS = [
   { re: /^Pine_big_/, h: [10.5, 13.5], trunk: 0.045 },
@@ -118,6 +132,8 @@ function prepareRock(fbx) {
 export async function createTrees(terrain, count = 170, rockCount = 45, avoid = []) {
   const group = new THREE.Group();
   const obstacles = [];
+  const pines = []; // рубимые сосны — записи для lumber.js
+  const rand = mulberry32(FOREST_SEED);
 
   const [pineScene, rockFbx] = await Promise.all([
     loadPinesScene(),
@@ -168,8 +184,8 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     const out = [];
     let guard = 0;
     while (out.length < n && guard++ < n * 40) {
-      const a = Math.random() * Math.PI * 2;
-      const r = rMin + Math.pow(Math.random(), 0.7) * (rMax - rMin);
+      const a = rand() * Math.PI * 2;
+      const r = rMin + Math.pow(rand(), 0.7) * (rMax - rMin);
       const x = Math.cos(a) * r;
       const z = Math.sin(a) * r;
       if (avoid.some((av) => (av.x - x) ** 2 + (av.z - z) ** 2 < av.r * av.r)) continue;
@@ -216,15 +232,32 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
 
     list.forEach(([x, z], i) => {
       const [hMin, hMax] = v.kind.h;
-      const s = hMin + Math.random() * (hMax - hMin);
-      const j = 0.9 + Math.random() * 0.2; // ширина кроны ±10%
+      const s = hMin + rand() * (hMax - hMin);
+      const j = 0.9 + rand() * 0.2; // ширина кроны ±10%
       dummy.position.set(x, terrain.getHeight(x, z) - 0.06 * Math.min(s, 4), z);
-      dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
       dummy.scale.set(s * j, s, s * j);
       dummy.updateMatrix();
       inst.multiplyMatrices(dummy.matrix, v.pre);
       meshes.forEach((m) => m.setMatrixAt(i, inst));
-      if (v.kind.trunk > 0) obstacles.push({ x, z, r: Math.max(0.4, s * v.kind.trunk) });
+      if (v.kind.trunk > 0) {
+        const ob = { x, z, r: Math.max(0.4, s * v.kind.trunk) };
+        obstacles.push(ob);
+        // запись для рубки: меши инстансов + базовая матрица, чтобы lumber.js
+        // мог крутить дерево (дрожь от удара, валка) поверх базовой позы
+        pines.push({
+          id: pines.length,
+          x,
+          z,
+          y: dummy.position.y,
+          h: s,
+          r: ob.r,
+          ob,
+          parts: meshes.map((m) => ({ mesh: m, i })),
+          base: dummy.matrix.clone(),
+          pre: v.pre,
+        });
+      }
     });
     meshes.forEach((m) => {
       m.instanceMatrix.needsUpdate = true;
@@ -246,10 +279,10 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       return m;
     });
     list.forEach(([x, z], i) => {
-      const s = 0.5 + Math.random() * 1.5;
+      const s = 0.5 + rand() * 1.5;
       dummy.position.set(x, terrain.getHeight(x, z) - 0.12 * s, z);
-      dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
-      dummy.scale.set(s * (0.9 + Math.random() * 0.2), s, s * (0.9 + Math.random() * 0.2));
+      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
+      dummy.scale.set(s * (0.9 + rand() * 0.2), s, s * (0.9 + rand() * 0.2));
       dummy.updateMatrix();
       inst.multiplyMatrices(dummy.matrix, rock.pre);
       meshes.forEach((m) => m.setMatrixAt(i, inst));
@@ -261,5 +294,5 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     });
   });
 
-  return { group, obstacles };
+  return { group, obstacles, pines };
 }

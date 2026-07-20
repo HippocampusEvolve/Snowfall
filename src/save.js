@@ -47,13 +47,19 @@ function unb64(str) {
 }
 
 export class SaveGame {
-  constructor({ digger, footprints, campfire, player, shovel = null, logs = null }) {
+  constructor({
+    digger, footprints, campfire, player,
+    shovel = null, logs = null, axe = null, woodpile = null, lumber = null,
+  }) {
     this.digger = digger;
     this.footprints = footprints;
     this.campfire = campfire;
     this.player = player;
     this.shovel = shovel;
     this.logs = logs;
+    this.axe = axe;
+    this.woodpile = woodpile;
+    this.lumber = lumber;
     this.disabled = false; // взводит reset(): не дать автосейву записать мир обратно
     this.fpSize = 384 * 384 * 4; // размер снапшота следов (footprints.SNAP)
   }
@@ -80,6 +86,18 @@ export class SaveGame {
         this.shovel.place(d.shv.x, d.shv.y, d.shv.z, d.shv.yaw || 0);
         if (d.shv.held) this.shovel.take();
       }
+      // топор стоит там, где его оставили (или снова в руках)
+      if (this.axe && d.axe) {
+        this.axe.place(d.axe.x, d.axe.y, d.axe.z, d.axe.yaw || 0);
+        if (d.axe.held) this.axe.take();
+      }
+      // штабель поленницы — сколько было, столько и лежит
+      if (this.woodpile && typeof d.pile === 'number') {
+        this.woodpile.count = Math.min(d.pile, this.woodpile.capacity);
+        this.woodpile._refresh();
+      }
+      // сваленные деревья лежат, зарубки на стоящих — на месте
+      if (this.lumber && Array.isArray(d.fells)) this.lumber.restore(d.fells, this.player.pos);
       // брошенные поленья лежат, где их бросили; недонесённое — снова в руках
       if (this.logs && Array.isArray(d.logs)) this.logs.restore(d.logs);
       if (d.carry) this.player.carrying = true;
@@ -104,6 +122,18 @@ export class SaveGame {
       carry: this.player.carrying ? 1 : 0,
     };
     if (this.logs) data.logs = this.logs.serialize();
+    if (this.woodpile) data.pile = this.woodpile.count;
+    if (this.lumber) data.fells = this.lumber.serialize();
+    if (this.axe) {
+      const a = this.axe.pos;
+      data.axe = {
+        x: Math.round(a.x * 100) / 100,
+        y: Math.round(a.y * 100) / 100,
+        z: Math.round(a.z * 100) / 100,
+        yaw: Math.round(this.axe.yaw * 100) / 100,
+        held: this.axe.held ? 1 : 0,
+      };
+    }
     if (this.shovel) {
       const s = this.shovel.pos;
       data.shv = {

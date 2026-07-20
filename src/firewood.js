@@ -3,9 +3,10 @@ import { snowTint } from './snowtint.js';
 import { snowCap } from './snowcap.js';
 
 // Дрова без инвентаря: поленница у дома — это и есть «сколько у меня дров»
-// (VISION.md: материя имеет вес и место). Полено берут по F, несут В РУКАХ
-// (видно у камеры, идти медленнее, не побегать) и бросают в костёр.
-// Пока поленница неисчерпаема — экономика заготовки придёт вместе с рубкой леса.
+// (VISION.md: материя имеет вес и место, куча = счётчик). Полено берут по F,
+// несут В РУКАХ (видно у камеры, идти медленнее, не побегать) и бросают
+// в костёр — или приносят НОВОЕ (нарубленное в лесу) и кладут в штабель.
+// Запас КОНЕЧЕН: сколько лежит — столько и есть, цифр поверх не будет.
 
 // процедурная кора: тёмная база + продольные борозды (как у поленьев костра)
 function makeBarkTexture() {
@@ -66,46 +67,87 @@ function logMaterials() {
   return [side, end, end];
 }
 
-// Поленница: два ряда колотых поленьев штабелем, сверху присыпаны снегом.
-// Возвращает { group, position, obstacle } — коллайдер в общий реестр.
-export function createWoodpile(terrain, x, z, rotY = 0) {
-  const group = new THREE.Group();
-  const y = terrain.getHeight(x, z);
-  group.position.set(x, y, z);
-  group.rotation.y = rotY;
+// Поленница: штабель колотых поленьев у стены, сверху присыпаны снегом.
+// КОНЕЧНАЯ: слоты построены заранее, видимы первые `count` — взял полено,
+// и штабель ПОХУДЕЛ; принёс из леса и сложил — подрос. Куча = счётчик.
+export class Woodpile {
+  constructor(terrain, x, z, rotY = 0, initial = 7) {
+    this.group = new THREE.Group();
+    const y = terrain.getHeight(x, z);
+    this.group.position.set(x, y, z);
+    this.group.rotation.y = rotY;
+    this.position = new THREE.Vector3(x, y, z);
+    this.obstacle = { x, z, r: 0.5 };
 
-  const mats = logMaterials();
-  // снег на верхних поленьях — та же метель, что на всём остальном
-  snowTint(mats[0], '0.82, 0.86, 0.96', 0.55, 0.35);
-  const geo = new THREE.CylinderGeometry(0.06, 0.068, 0.62, 8);
+    const mats = logMaterials();
+    // снег на верхних поленьях — та же метель, что на всём остальном
+    snowTint(mats[0], '0.82, 0.86, 0.96', 0.55, 0.35);
+    const geo = new THREE.CylinderGeometry(0.06, 0.068, 0.62, 8);
 
-  // штабель: ряды со сдвигом, лёгкий разнобой углов — сложено руками
-  let n = 0;
-  for (let row = 0; row < 3; row++) {
-    const count = 4 - (row === 2 ? 1 : 0);
-    for (let i = 0; i < count; i++) {
-      const m = new THREE.Mesh(geo, mats);
-      m.rotation.z = Math.PI / 2;
-      m.rotation.y = (Math.sin(n * 12.9) - 0.5) * 0.14;
-      m.position.set(
-        (i - (count - 1) / 2) * 0.145 + Math.sin(n * 7.3) * 0.012,
-        0.075 + row * 0.125,
-        Math.sin(n * 3.7) * 0.02
-      );
-      m.castShadow = true;
-      m.receiveShadow = true;
-      group.add(m);
-      // два верхних ряда открыты небу — несут снежную шапку по верхней дуге
-      if (row > 0) snowCap(m, 0.03);
-      n++;
+    // слоты снизу вверх: ряды со сдвигом, лёгкий разнобой углов — сложено руками
+    this.slots = [];
+    let n = 0;
+    const ROWS = [5, 5, 4, 4]; // capacity = 18
+    for (let row = 0; row < ROWS.length; row++) {
+      const count = ROWS[row];
+      for (let i = 0; i < count; i++) {
+        const m = new THREE.Mesh(geo, mats);
+        m.rotation.z = Math.PI / 2;
+        m.rotation.y = (Math.sin(n * 12.9) - 0.5) * 0.14;
+        m.position.set(
+          (i - (count - 1) / 2) * 0.145 + Math.sin(n * 7.3) * 0.012,
+          0.075 + row * 0.125,
+          Math.sin(n * 3.7) * 0.02
+        );
+        m.castShadow = true;
+        m.receiveShadow = true;
+        this.group.add(m);
+        // верхние ряды открыты небу — несут снежную шапку по верхней дуге
+        if (row > 0) snowCap(m, 0.03);
+        this.slots.push(m);
+        n++;
+      }
     }
+    this.count = Math.min(initial, this.slots.length);
+    this._refresh();
   }
 
-  return {
-    group,
-    position: new THREE.Vector3(x, y, z),
-    obstacle: { x, z, r: 0.5 },
-  };
+  get capacity() {
+    return this.slots.length;
+  }
+
+  _refresh() {
+    this.slots.forEach((m, i) => (m.visible = i < this.count));
+  }
+
+  // взять полено с верха штабеля; false — куча пуста, дрова кончились
+  take() {
+    if (this.count <= 0) return false;
+    this.count--;
+    this._refresh();
+    return true;
+  }
+
+  // положить принесённое полено; false — штабель полон, класть некуда
+  add() {
+    if (this.count >= this.slots.length) return false;
+    this.count++;
+    this._refresh();
+    return true;
+  }
+}
+
+// Колода для колки у поленницы — толстый чурбак; в неё воткнут топор,
+// пока он не в руках. Хозяйство стояло тут до игрока (VISION: «кто здесь жил?»)
+export function createChoppingBlock(terrain, x, z) {
+  const y = terrain.getHeight(x, z);
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.185, 0.44, 10), logMaterials());
+  m.position.set(x, y + 0.19, z);
+  m.rotation.y = 0.7;
+  m.castShadow = true;
+  m.receiveShadow = true;
+  snowCap(m, 0.025);
+  return { mesh: m, x, z, topY: y + 0.41, obstacle: { x, z, r: 0.26 } };
 }
 
 // Брошенные поленья: полено можно бросить где угодно (F вне костра) — оно

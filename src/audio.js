@@ -406,6 +406,239 @@ export class GameAudio {
     this.shovelDig();
   }
 
+  // ---------- топор и рубка ----------
+  // Удар топора в древесину: сухой звонкий «тюк» — резкая атака (у дерева,
+  // в отличие от снега, она есть), деревянный корпус ствола и высокий тик
+  // отскочившей щепы. Мороз делает стук ещё суше и звонче.
+  axeChop() {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.005;
+    const cold = this.cold;
+
+    const out = ctx.createGain();
+    out.gain.value = 0.5 + Math.random() * 0.1;
+    out.connect(this.master);
+
+    // сам «тюк»: узкая шумовая пачка с мгновенной атакой
+    const hit = ctx.createBufferSource();
+    hit.buffer = this.noise;
+    hit.playbackRate.value = 0.9 + Math.random() * 0.3;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 950 + Math.random() * 350 + cold * 250;
+    bp.Q.value = 1.1;
+    const hg = ctx.createGain();
+    hg.gain.setValueAtTime(0.0001, t);
+    hg.gain.linearRampToValueAtTime(0.9, t + 0.002);
+    hg.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+    hit.connect(bp);
+    bp.connect(hg);
+    hg.connect(out);
+    hit.start(t, Math.random() * 1.5, 0.1);
+
+    // корпус ствола: короткий деревянный бум
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(170 + Math.random() * 30, t);
+    o.frequency.exponentialRampToValueAtTime(70, t + 0.07);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t);
+    og.gain.linearRampToValueAtTime(0.35, t + 0.004);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    o.connect(og);
+    og.connect(out);
+    o.start(t);
+    o.stop(t + 0.14);
+
+    // тик щепы
+    const tick = ctx.createBufferSource();
+    tick.buffer = this.noise;
+    const thp = ctx.createBiquadFilter();
+    thp.type = 'bandpass';
+    thp.frequency.value = 2600 + Math.random() * 1400;
+    thp.Q.value = 4;
+    const tg = ctx.createGain();
+    tg.gain.setValueAtTime(0.0001, t + 0.01);
+    tg.gain.linearRampToValueAtTime(0.16, t + 0.013);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+    tick.connect(thp);
+    thp.connect(tg);
+    tg.connect(out);
+    tick.start(t + 0.01, Math.random(), 0.08);
+  }
+
+  // полено отделилось от ствола: раскалывающий треск волокон + тук о снег
+  woodSplit() {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    // серия быстрых щелчков рвущихся волокон
+    for (let i = 0; i < 4; i++) {
+      const st = ctx.currentTime + 0.01 + i * (0.018 + Math.random() * 0.02);
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 1300 + Math.random() * 1800;
+      bp.Q.value = 3;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.linearRampToValueAtTime(0.3 - i * 0.05, st + 0.003);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.05);
+      src.connect(bp);
+      bp.connect(g);
+      g.connect(this.master);
+      src.start(st, Math.random() * 1.5, 0.06);
+    }
+    // само полено падает рядом в снег
+    setTimeout(() => this.woodDrop(), 160 + Math.random() * 120);
+  }
+
+  // скрип подрубленного ствола: stick-slip волокон — серия коротких скрипов,
+  // учащающихся и растущих к моменту отрыва (dur — сколько дереву падать)
+  treeCreak(dur = 2) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t0 = ctx.currentTime + 0.02;
+    let u = 0;
+    let n = 0;
+    while (u < dur * 0.82 && n < 26) {
+      const st = t0 + u;
+      const k = u / dur; // 0..~0.8 — как далеко зашёл накрен
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise;
+      src.playbackRate.value = 0.5 + Math.random() * 0.25;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 240 + Math.random() * 160 - k * 90; // к отрыву — ниже, басовитее
+      bp.Q.value = 7;
+      const g = ctx.createGain();
+      const peak = (0.1 + 0.5 * k) * (0.7 + Math.random() * 0.5);
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.linearRampToValueAtTime(peak, st + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.09 + k * 0.1);
+      src.connect(bp);
+      bp.connect(g);
+      g.connect(this.master);
+      src.start(st, Math.random() * 1.5, 0.25);
+      u += 0.3 - 0.22 * k + Math.random() * 0.08; // скрипы всё чаще
+      n++;
+    }
+  }
+
+  // дерево рухнуло в сугроб: треск последних волокон, глубокий «ух» земли
+  // и долгий выдох снежной пыли. dist — метры до комля: далёкое падение глуше
+  treeFall(dist = 5) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.02;
+    const vol = 1 / (1 + (dist / 11) ** 2);
+
+    const out = ctx.createGain();
+    out.gain.value = 0.9 * vol;
+    // дальнее падение — глуше: воздух и лес съедают верх
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 6000 / (1 + dist * 0.12);
+    out.connect(lp);
+    lp.connect(this.master);
+
+    // треск разрыва комля — плотная пачка щелчков прямо перед ударом
+    for (let i = 0; i < 6; i++) {
+      const st = t + Math.random() * 0.12;
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 700 + Math.random() * 1600;
+      bp.Q.value = 2.5;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.linearRampToValueAtTime(0.35, st + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.07);
+      src.connect(bp);
+      bp.connect(g);
+      g.connect(out);
+      src.start(st, Math.random() * 1.5, 0.09);
+    }
+
+    // «ух» — удар массы о землю
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(72, t + 0.1);
+    o.frequency.exponentialRampToValueAtTime(26, t + 0.5);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t + 0.1);
+    og.gain.linearRampToValueAtTime(0.8, t + 0.13);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
+    o.connect(og);
+    og.connect(out);
+    o.start(t + 0.1);
+    o.stop(t + 0.7);
+
+    // выдох снежной пыли — широкий шумовой хвост
+    const wh = ctx.createBufferSource();
+    wh.buffer = this.noise;
+    wh.playbackRate.value = 0.55;
+    const wlp = ctx.createBiquadFilter();
+    wlp.type = 'lowpass';
+    wlp.frequency.setValueAtTime(1600, t + 0.1);
+    wlp.frequency.exponentialRampToValueAtTime(240, t + 1.1);
+    const wg = ctx.createGain();
+    wg.gain.setValueAtTime(0.0001, t + 0.1);
+    wg.gain.linearRampToValueAtTime(0.5, t + 0.16);
+    wg.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+    wh.connect(wlp);
+    wlp.connect(wg);
+    wg.connect(out);
+    wh.start(t + 0.1, Math.random() * 1.5, 1.15);
+  }
+
+  // сложить полено в поленницу: пара деревянных стуков — штабель принял
+  woodStack() {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    for (let i = 0; i < 2; i++) {
+      const t = ctx.currentTime + 0.02 + i * (0.1 + Math.random() * 0.04);
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(200 - i * 45 + Math.random() * 25, t);
+      o.frequency.exponentialRampToValueAtTime(85 - i * 20, t + 0.06);
+      const og = ctx.createGain();
+      og.gain.setValueAtTime(0.0001, t);
+      og.gain.linearRampToValueAtTime(0.32 - i * 0.08, t + 0.004);
+      og.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+      o.connect(og);
+      og.connect(this.master);
+      o.start(t);
+      o.stop(t + 0.13);
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 420 + Math.random() * 260;
+      bp.Q.value = 2;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.22, t + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+      src.connect(bp);
+      bp.connect(g);
+      g.connect(this.master);
+      src.start(t, Math.random() * 1.5, 0.09);
+    }
+  }
+
+  // взять топор: тот же деревянный перехват, что у лопаты, без её металла
+  axeTake() {
+    this.woodTake();
+  }
+
+  // воткнуть топор в колоду/наст: один сухой тюк
+  axePlant() {
+    this.axeChop();
+  }
+
   resume() {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
   }
