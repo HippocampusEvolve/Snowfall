@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>SNOWFALL — обложка 800×470</title>
+<!--
+  Исходник обложки для витрины магазина (RuStore, Яндекс). Пересобрать:
+  1) npm run dev
+  2) открыть http://localhost:5173/store/cover-src.html в окне ровно 800×470
+  3) снять скриншот вьюпорта -> store/cover-800x470.jpg
+  Фон — игровой кадр 01-hero.jpg; шрифт и разрядка те же, что в меню игры.
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 800px; height: 470px; overflow: hidden; background: #04060c; }
+  .cover {
+    position: relative; width: 800px; height: 470px;
+    font-family: 'Segoe UI', system-ui, sans-serif; color: #e8eefb;
+    background: url('./screenshots/01-hero.jpg') center 42% / cover no-repeat;
+  }
+  /* затемнение слева — под текст; справа кадр остаётся открытым */
+  .cover::after {
+    content: ''; position: absolute; inset: 0;
+    background:
+      linear-gradient(90deg, rgba(3,6,14,0.88) 0%, rgba(3,6,14,0.72) 34%, rgba(3,6,14,0.12) 62%, rgba(3,6,14,0) 100%),
+      radial-gradient(ellipse at 30% 50%, rgba(2,4,12,0) 40%, rgba(2,4,12,0.45) 100%);
+  }
+  .text {
+    position: absolute; z-index: 2; left: 52px; top: 50%; transform: translateY(-50%);
+  }
+  h1 {
+    font-size: 55px; font-weight: 200; letter-spacing: 0.32em; margin-left: 0.32em;
+    text-shadow: 0 0 46px rgba(140, 170, 255, 0.45);
+  }
+  .sub {
+    margin-top: 16px; font-size: 15px; letter-spacing: 0.4em; margin-left: 0.4em;
+    text-transform: uppercase; color: #93a5c9;
+  }
+  .line { width: 92px; height: 1px; margin: 26px 0 22px; background: rgba(180, 200, 240, 0.5); }
+  .tag { font-size: 13.5px; letter-spacing: 0.1em; line-height: 1.8; color: #b6c4e0; white-space: nowrap; }
+</style>
+</head>
+<body>
+  <div class="cover">
+    <div class="text">
+      <h1>SNOWFALL</h1>
+      <div class="sub">долгая тёмная ночь</div>
+      <div class="line"></div>
+      <div class="tag">Топить костёр, рубить дрова, копать снег<br />и дожить до утра</div>
+    </div>
+  </div>
+</body>
+</html>
