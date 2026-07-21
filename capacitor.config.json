@@ -1,0 +1,11 @@
+{
+  "appId": "ru.antonovai.snowfall",
+  "appName": "Snowfall",
+  "webDir": "dist-apk",
+  "backgroundColor": "#04060cff",
+  "android": {
+    "backgroundColor": "#04060cff",
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

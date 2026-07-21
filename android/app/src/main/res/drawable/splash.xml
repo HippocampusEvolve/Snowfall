@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Заставка запуска: та же ночь, что за окном игры (#04060c — фон канваса),
+     и снежинка по центру. Дефолтный светлый логотип Capacitor вспыхивал белым
+     перед тёмной сценой — здесь переход в игру незаметен. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/night" />
+    <item
+        android:drawable="@drawable/ic_launcher_foreground"
+        android:gravity="center"
+        android:width="140dp"
+        android:height="140dp" />
+</layer-list>

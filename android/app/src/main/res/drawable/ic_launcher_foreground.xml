@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Снежинка: шесть одинаковых лучей, повёрнутых на 60°. Только штрих,
+     без заливок — та же тихая белая графика, что у тач-кнопок в игре.
+     Контент держится в радиусе 30 от центра — внутри безопасной зоны
+     адаптивной иконки (36 из 108), маска ничего не срежет. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group android:pivotX="54" android:pivotY="54" android:rotation="0">
+        <path android:pathData="M54,54 L54,24 M54,40.5 L59.2,33.1 M54,40.5 L48.8,33.1 M54,32.4 L57.8,27 M54,32.4 L50.2,27"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round" />
+    </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="60">
+        <path android:pathData="M54,54 L54,24 M54,40.5 L59.2,33.1 M54,40.5 L48.8,33.1 M54,32.4 L57.8,27 M54,32.4 L50.2,27"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round" />
+    </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="120">
+        <path android:pathData="M54,54 L54,24 M54,40.5 L59.2,33.1 M54,40.5 L48.8,33.1 M54,32.4 L57.8,27 M54,32.4 L50.2,27"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round" />
+    </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="180">
+        <path android:pathData="M54,54 L54,24 M54,40.5 L59.2,33.1 M54,40.5 L48.8,33.1 M54,32.4 L57.8,27 M54,32.4 L50.2,27"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round" />
+    </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="240">
+        <path android:pathData="M54,54 L54,24 M54,40.5 L59.2,33.1 M54,40.5 L48.8,33.1 M54,32.4 L57.8,27 M54,32.4 L50.2,27"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round" />
+    </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="300">
+        <path android:pathData="M54,54 L54,24 M54,40.5 L59.2,33.1 M54,40.5 L48.8,33.1 M54,32.4 L57.8,27 M54,32.4 L50.2,27"
+            android:strokeColor="#FFFFFF" android:strokeWidth="3"
+            android:strokeLineCap="round" android:strokeLineJoin="round" />
+    </group>
+</vector>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Палитра — из самой игры: night = фон канваса, primary = цвет тумана,
+     accent = лунный свет на снегу -->
+<resources>
+    <color name="night">#04060C</color>
+    <color name="colorPrimary">#0A1322</color>
+    <color name="colorPrimaryDark">#04060C</color>
+    <color name="colorAccent">#8FB5FF</color>
+</resources>

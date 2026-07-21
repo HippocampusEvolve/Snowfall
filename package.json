@@ -1,17 +1,23 @@
 {
   "name": "snowfall",
   "private": true,
-  "version": "0.16.0",
+  "version": "0.17.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:apk": "vite build --base=/ --outDir dist-apk",
+    "apk": "npm run build:apk && cap sync android && cd android && gradlew.bat assembleDebug",
+    "apk:release": "npm run build:apk && cap sync android && cd android && gradlew.bat assembleRelease"
   },
   "dependencies": {
+    "@capacitor/android": "^7.6.8",
+    "@capacitor/core": "^7.6.8",
     "three": "^0.170.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^7.6.8",
     "vite": "^6.0.0"
   }
 }

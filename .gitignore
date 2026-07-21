@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# сборка веб-ассетов под APK (Capacitor копирует её в android/)
+dist-apk/
 .playwright-mcp/
 # скриншоты и логи тестов в корне (текстуры в public/ не задевать)
 /*.jpeg
@@ -16,3 +18,8 @@ CLAUDE.md
 .env.*
 # реквизиты деплоя (root@IP, путь к ключу)
 deploy/LOCAL.md
+# ключ подписи APK и пароли к нему — НИКОГДА в репозиторий
+*.jks
+*.keystore
+android/keystore.properties
+android/key.properties

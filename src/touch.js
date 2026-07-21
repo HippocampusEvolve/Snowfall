@@ -30,8 +30,14 @@ const ICONS = {
 };
 
 export class TouchControls {
+  // ?touch — включить тач-интерфейс на десктопе (посмотреть раскладку кнопок
+  // и подсказки без телефона; мышью взгляд не водится — pointer lock не нужен)
   static supported() {
-    return matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+    return (
+      new URLSearchParams(location.search).has('touch') ||
+      matchMedia('(pointer: coarse)').matches ||
+      'ontouchstart' in window
+    );
   }
 
   constructor(player, look) {
