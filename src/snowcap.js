@@ -51,8 +51,11 @@ function capMaterial(thick) {
         vWn = normalize((modelMatrix * vec4(objectNormal, 0.0)).xyz);
         vCapY = vWn.y;
         // шапка тоньше к краю: на скатах слой сходит на нет, а не обрывается
-        // стенкой — снег наметает горкой, самый толстый на макушке
-        transformed += objectNormal * ${key} * smoothstep(0.15, 0.78, vCapY);
+        // стенкой — снег наметает горкой, самый толстый на макушке.
+        // Нижняя граница раздува — НЕ ниже порога discard во фрагменте
+        // (0.30–0.40): иначе на низкополигональных цилиндрах (поленья)
+        // кромка шапки уже приподнята и висит плитой над поверхностью
+        transformed += objectNormal * ${key} * smoothstep(0.42, 0.85, vCapY);
         vWp = (modelMatrix * vec4(transformed, 1.0)).xyz;`
       );
 

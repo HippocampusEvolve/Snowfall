@@ -498,6 +498,7 @@ const _camRight = new THREE.Vector3();
 const _dirTmp = new THREE.Vector3();
 const _sprayDir = new THREE.Vector3();
 const _aim = new THREE.Vector3();
+const _aim2 = new THREE.Vector3();
 
 // Ловец фризов (?debug): кадр дольше FREEZE_MS → в консоль уходит [FREEZE] —
 // разбивка, где утонуло время (секции тика), и что дёрнулось в GL за рендер:
@@ -671,13 +672,24 @@ function tick() {
         handTarget = { kind, ref };
       }
     };
-    // пустой штабель не предлагает полено — брать нечего, и это видно глазами
-    if (woodpile.count > 0)
-      consider('pile', woodpile.position.x, woodpile.position.y + 0.4, woodpile.position.z);
+    // пустой штабель не предлагает полено — брать нечего, и это видно глазами;
+    // целимся в реальное верхнее полено, оно же и подсветится
+    if (woodpile.count > 0) {
+      woodpile.topWorld(_aim2);
+      consider('pile', _aim2.x, _aim2.y, _aim2.z);
+    }
     consider('shovel', shovel.pos.x, shovel.pos.y + 0.5, shovel.pos.z);
     if (!axe.held) consider('axe', axe.pos.x, axe.pos.y + 0.35, axe.pos.z);
     for (const l of groundLogs.list) consider('log', l.x, l.y + 0.1, l.z, l);
   }
+  // намерение руки видно на самом штабеле: призрак — куда ляжет, подсветка — что возьмётся
+  woodpile.preview(
+    player.carrying && nearPile && woodpile.count < woodpile.capacity
+      ? 'add'
+      : handTarget && handTarget.kind === 'pile'
+        ? 'take'
+        : null
+  );
   if (shovel.held && shovelHintT > 0) shovelHintT -= dt;
   if (axe.held && axeHintT > 0) axeHintT -= dt;
   if (carryHintT > 0) carryHintT -= dt;
@@ -686,6 +698,7 @@ function tick() {
   else if (player.carrying && nearFire) promptText = 'F — подбросить в огонь';
   else if (player.carrying && nearPile && woodpile.count < woodpile.capacity)
     promptText = 'F — сложить в поленницу';
+  else if (player.carrying && nearPile) promptText = 'поленница полна';
   else if (player.carrying && carryHintT > 0) promptText = 'F — бросить полено';
   else if (handTarget)
     promptText = {

@@ -82,34 +82,106 @@ export class Woodpile {
     const mats = logMaterials();
     // снег на верхних поленьях — та же метель, что на всём остальном
     snowTint(mats[0], '0.82, 0.86, 0.96', 0.55, 0.35);
-    const geo = new THREE.CylinderGeometry(0.06, 0.068, 0.62, 8);
+    const geo = new THREE.CylinderGeometry(0.062, 0.066, 0.62, 8);
 
-    // слоты снизу вверх: ряды со сдвигом, лёгкий разнобой углов — сложено руками
+    // подкладки-лежни поперёк штабеля: дрова не лежат в снегу, и место
+    // поленницы видно, даже когда сожгли всё до полена
+    const bearerGeo = new THREE.CylinderGeometry(0.042, 0.042, 0.72, 7);
+    for (const bx of [-0.18, 0.18]) {
+      const b = new THREE.Mesh(bearerGeo, mats);
+      b.rotation.x = Math.PI / 2; // вдоль Z — поперёк будущих поленьев
+      b.position.set(bx, 0.03, 0);
+      b.castShadow = true;
+      b.receiveShadow = true;
+      snowCap(b, 0.02);
+      this.group.add(b);
+    }
+
+    // Слоты снизу вверх «в замок», ряды 5/4/5/4. Полено после rotation.z=π/2
+    // лежит ВДОЛЬ локальной X — значит, ряд раскладываем ПОПЕРЁК, по Z
+    // (раньше слоты шли по X, и поленья входили друг в друга торцами).
+    // Соседние поленья строго через одно перевёрнуты комлем — как кладут
+    // вручную; тогда сумма радиусов боковых соседей постоянна (0.128).
+    // Просветы из худшего случая (комель к комлю, 0.132): STEP с боковым
+    // зазором, LIFT = sqrt(0.132² − (STEP/2)²) + зазор. Разнобой — только
+    // сдвиг торцов ВДОЛЬ оси бревна: он живой и не создаёт пересечений.
     this.slots = [];
     let n = 0;
-    const ROWS = [5, 5, 4, 4]; // capacity = 18
+    const ROWS = [5, 4, 5, 4]; // capacity = 18 (совместимо с сейвами)
+    const STEP = 0.132;
+    const LIFT = 0.116;
+    const BASE = 0.138; // лежень (центр 0.03, r 0.042) + радиус комля 0.066
     for (let row = 0; row < ROWS.length; row++) {
       const count = ROWS[row];
       for (let i = 0; i < count; i++) {
         const m = new THREE.Mesh(geo, mats);
         m.rotation.z = Math.PI / 2;
-        m.rotation.y = (Math.sin(n * 12.9) - 0.5) * 0.14;
+        m.rotation.y = n % 2 ? Math.PI : 0; // переворот комля через одно
         m.position.set(
-          (i - (count - 1) / 2) * 0.145 + Math.sin(n * 7.3) * 0.012,
-          0.075 + row * 0.125,
-          Math.sin(n * 3.7) * 0.02
+          Math.sin(n * 7.3) * 0.03, // торцы не подровнены — сложено руками
+          BASE + row * LIFT,
+          (i - (count - 1) / 2) * STEP
         );
         m.castShadow = true;
         m.receiveShadow = true;
         this.group.add(m);
         // верхние ряды открыты небу — несут снежную шапку по верхней дуге
-        if (row > 0) snowCap(m, 0.03);
+        if (row > 0) snowCap(m, 0.024);
         this.slots.push(m);
         n++;
       }
     }
     this.count = Math.min(initial, this.slots.length);
+
+    // превью «куда и откуда»: призрак полена в следующем свободном слоте
+    // (сложить) и тёплая подсветка верхнего (взять) — рука видит цель заранее
+    this.ghost = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({
+        color: 0xcfe0ff,
+        transparent: true,
+        opacity: 0.35,
+        depthWrite: false,
+      })
+    );
+    this.pick = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({
+        color: 0xffd28a,
+        transparent: true,
+        opacity: 0.25,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.pick.scale.setScalar(1.12);
+    this.ghost.visible = this.pick.visible = false;
+    this.group.add(this.ghost, this.pick);
     this._refresh();
+  }
+
+  // показать намерение руки: 'add' — призрак в следующем слоте,
+  // 'take' — подсветить полено, которое возьмётся; null — спрятать оба
+  preview(mode) {
+    const next = this.count < this.slots.length ? this.slots[this.count] : null;
+    this.ghost.visible = mode === 'add' && !!next;
+    if (this.ghost.visible) {
+      this.ghost.position.copy(next.position);
+      this.ghost.rotation.copy(next.rotation);
+    }
+    const top = this.count > 0 ? this.slots[this.count - 1] : null;
+    this.pick.visible = mode === 'take' && !!top;
+    if (this.pick.visible) {
+      this.pick.position.copy(top.position);
+      this.pick.rotation.copy(top.rotation);
+    }
+  }
+
+  // мировая позиция верхнего полена — чтобы прицел руки тянулся к нему,
+  // а не к абстрактному центру штабеля
+  topWorld(target) {
+    const top = this.slots[Math.max(0, this.count - 1)];
+    return target.copy(top.position).applyMatrix4(this.group.matrixWorld);
   }
 
   get capacity() {
