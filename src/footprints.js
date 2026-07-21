@@ -559,6 +559,26 @@ export class Footprints {
     return data;
   }
 
+  // То же, но чтение пикселей — асинхронное (PBO + fence), без стойла GPU
+  // в кадре: рендер уменьшенной карты в snapRT синхронный и дешёвый, а
+  // readback приезжает промисом через кадр-два. snapRT больше никем не
+  // трогается до следующего снапшота, так что данные не гоняются.
+  async snapshotAsync() {
+    this._ensureIO();
+    const r = this.renderer;
+    this.ioQuad.material.map = this._coarse.rt.texture;
+    this.ioQuad.material.needsUpdate = true;
+    this._showOnly(this.ioQuad);
+    const oldRT = r.getRenderTarget();
+    r.setRenderTarget(this.snapRT);
+    r.render(this.scene, this.cam);
+    r.setRenderTarget(oldRT);
+    this.ioQuad.visible = false;
+    const data = new Uint8Array(SNAP * SNAP * 4);
+    await r.readRenderTargetPixelsAsync(this.snapRT, 0, 0, SNAP, SNAP, data);
+    return data;
+  }
+
   restore(data) {
     this._ensureIO();
     const tex = new THREE.DataTexture(data, SNAP, SNAP, THREE.RGBAFormat);

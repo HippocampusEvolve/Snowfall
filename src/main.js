@@ -128,7 +128,7 @@ scene.add(snow.points);
 // вокруг домика — поляна без деревьев
 const CABIN = { x: -4.5, z: -13, rotY: 0.95 };
 const [trees, cabin] = await Promise.all([
-  createTrees(terrain, 170, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }]),
+  createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }]),
   createCabin(terrain, CABIN),
 ]);
 scene.add(trees.group);
@@ -239,7 +239,7 @@ const saver = new SaveGame({
   digger, footprints, campfire, player, shovel, logs: groundLogs,
   axe, woodpile, lumber,
 });
-saver.load();
+await saver.load();
 saver.start();
 carriedLog.visible = player.carrying; // недонесённое полено пережило перезагрузку
 
@@ -422,33 +422,47 @@ addEventListener('keydown', (e) => {
   }
 });
 
-// Прелоадер: прогрев шейдеров + проталина у костра. compile() обходит сцену
-// БЕЗ frustum culling — компилирует и материалы вне стартового кадра.
-// Один кадр composer'а этого не давал: после перезагрузки восстановленные ямы
-// (digger) за спиной отсекались культингом, и их тяжёлый шейдер компилировался
-// при ПЕРВОМ повороте к раскопу — сотни мс фриза (Windows/ANGLE). Теперь фриз
-// оплачен здесь, под заставкой.
-requestAnimationFrame(() => {
-  renderer.compile(scene, camera);
-  // чанки ям — кадр без отсечения: геометрия уезжает в GPU тоже под заставкой
-  digger.group.traverse((o) => { o.frustumCulled = false; });
-  composer.render();
-  digger.group.traverse((o) => { o.frustumCulled = true; });
-  view.render(renderer);
-  footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
-  loading.classList.add('hidden');
-  if (player.debug) {
-    statsEl.classList.add('show');
-    const initAudio = () => {
-      audio.init();
-      audio.resume();
-      removeEventListener('keydown', initAudio);
-    };
-    addEventListener('keydown', initAudio);
-  } else {
-    menu.classList.remove('hidden');
-  }
-});
+// Прелоадер: прогрев НАСТОЯЩИМ кадром всей сцены + проталина у костра.
+// renderer.compile() тут не годится: он собирает программы под канвас (srgb),
+// а мир рисуется композером в рендер-таргет (srgb-linear) — это другой ключ
+// программы (outputColorSpace в WebGLPrograms), и при первом повороте камеры
+// всё за пределами стартового ракурса компилировалось заново + заливались
+// VBO и текстуры невидимых объектов — секундный фриз (Windows/ANGLE).
+// Поэтому: дожидаемся DefaultLoadingManager (все текстуры уже в памяти —
+// их GPU-upload тоже ляжет в этот кадр), гасим frustum culling у ВСЕЙ сцены
+// и рисуем один кадр композером под заставкой. Culling возвращаем сразу же.
+let warmed = false;
+function warmUp() {
+  if (warmed) return;
+  warmed = true;
+  requestAnimationFrame(() => {
+    const culled = [];
+    scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
+    renderer.shadowMap.needsUpdate = true; // и depth-варианты теней в тот же кадр
+    composer.render();
+    for (const o of culled) o.frustumCulled = true;
+    view.render(renderer);
+    footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
+    loading.classList.add('hidden');
+    if (player.debug) {
+      statsEl.classList.add('show');
+      const initAudio = () => {
+        audio.init();
+        audio.resume();
+        removeEventListener('keydown', initAudio);
+      };
+      addEventListener('keydown', initAudio);
+    } else {
+      menu.classList.remove('hidden');
+    }
+  });
+}
+THREE.DefaultLoadingManager.onLoad = warmUp;
+// очередь лоадеров могла опустеть ещё до подписки (горячий кэш): пустая
+// пара itemStart/itemEnd синхронно дёргает onLoad, если грузить нечего
+THREE.DefaultLoadingManager.itemStart('warmup-probe');
+THREE.DefaultLoadingManager.itemEnd('warmup-probe');
+setTimeout(warmUp, 10000); // предохранитель: битая сеть не держит заставку вечно
 
 // ---------- resize ----------
 window.addEventListener('resize', () => {

@@ -32,7 +32,7 @@ const KINDS = [
   { re: /^Pine_large_/, h: [12, 15.5], trunk: 0.05 },
   { re: /^Pine_medium_/, h: [7.5, 10.5], trunk: 0.042 },
   { re: /^Pine_small_/, h: [5, 7.5], trunk: 0.04 },
-  { re: /^Pine_sapling_/, h: [1.7, 3.2], trunk: 0 }, // подлесок, сквозь него можно пройти
+  { re: /^Pine_sapling_/, h: [1.7, 3.2], trunk: 0 }, // подлесок: проходим насквозь, но рубится с одного удара
 ];
 
 const ROCKS = ['Rock_1', 'Rock_2', 'Rock_3', 'Rock_4', 'Rock_5'];
@@ -179,8 +179,16 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   );
 
   // ---- раскладка позиций ----
+  // Плотность леса — низкочастотное поле по координатам: где значение высокое,
+  // сосны встают часто (чаща), где низкое — кандидаты отсеиваются (прогалина).
+  // Детерминировано (чистая функция координат) — чащи каждую ночь на своих местах.
+  const density = (x, z) =>
+    0.52 +
+    0.3 * Math.sin(x * 0.043 + 1.7) * Math.cos(z * 0.037 - 0.8) +
+    0.24 * Math.sin((x - z) * 0.021 + 0.5);
+
   const placed = [];
-  const scatter = (n, rMin, rMax, minGap2) => {
+  const scatter = (n, rMin, rMax, minGap2, dens = null) => {
     const out = [];
     let guard = 0;
     while (out.length < n && guard++ < n * 40) {
@@ -188,6 +196,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       const r = rMin + Math.pow(rand(), 0.7) * (rMax - rMin);
       const x = Math.cos(a) * r;
       const z = Math.sin(a) * r;
+      if (dens && rand() >= dens(x, z)) continue;
       if (avoid.some((av) => (av.x - x) ** 2 + (av.z - z) ** 2 < av.r * av.r)) continue;
       if (placed.some((p) => (p[0] - x) ** 2 + (p[1] - z) ** 2 < minGap2)) continue;
       placed.push([x, z]);
@@ -196,12 +205,24 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     return out;
   };
 
+  // Опора по МИНИМУМУ рельефа под пятном основания: на склоне высота в центре
+  // выше, чем у нижней кромки, и посаженный по центру объект «висит» краем
+  // в воздухе. Сажаем по нижней точке — низ всегда в снегу.
+  const groundY = (x, z, rad) => {
+    let m = terrain.getHeight(x, z);
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2;
+      m = Math.min(m, terrain.getHeight(x + Math.cos(a) * rad, z + Math.sin(a) * rad));
+    }
+    return m;
+  };
+
   const dummy = new THREE.Object3D();
   const inst = new THREE.Matrix4();
 
   // ---- сосны: группируем места по (вариант, LOD-кольцо) ----
   const buckets = new Map(); // `${vi}:${ring}` -> [{x,z}]
-  const spots = scatter(count, 13, 140, 16);
+  const spots = scatter(count, 13, 140, 12, density);
   spots.forEach(([x, z], i) => {
     const vi = i % variants.length;
     const r = Math.hypot(x, z);
@@ -234,30 +255,34 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       const [hMin, hMax] = v.kind.h;
       const s = hMin + rand() * (hMax - hMin);
       const j = 0.9 + rand() * 0.2; // ширина кроны ±10%
-      dummy.position.set(x, terrain.getHeight(x, z) - 0.06 * Math.min(s, 4), z);
+      dummy.position.set(x, groundY(x, z, 0.9) - 0.06 * Math.min(s, 4), z);
       dummy.rotation.set(0, rand() * Math.PI * 2, 0);
       dummy.scale.set(s * j, s, s * j);
       dummy.updateMatrix();
       inst.multiplyMatrices(dummy.matrix, v.pre);
       meshes.forEach((m) => m.setMatrixAt(i, inst));
+      // столб коллайдера — только у взрослых сосен; сквозь подлесок ходим
+      let ob = null;
       if (v.kind.trunk > 0) {
-        const ob = { x, z, r: Math.max(0.4, s * v.kind.trunk) };
+        ob = { x, z, r: Math.max(0.4, s * v.kind.trunk) };
         obstacles.push(ob);
-        // запись для рубки: меши инстансов + базовая матрица, чтобы lumber.js
-        // мог крутить дерево (дрожь от удара, валка) поверх базовой позы
-        pines.push({
-          id: pines.length,
-          x,
-          z,
-          y: dummy.position.y,
-          h: s,
-          r: ob.r,
-          ob,
-          parts: meshes.map((m) => ({ mesh: m, i })),
-          base: dummy.matrix.clone(),
-          pre: v.pre,
-        });
       }
+      // запись для рубки: меши инстансов + базовая матрица, чтобы lumber.js
+      // мог крутить дерево (дрожь от удара, валка) поверх базовой позы.
+      // Саженец (ob=null) тоже рубится — с одного удара, на одно полено.
+      pines.push({
+        id: pines.length,
+        x,
+        z,
+        y: dummy.position.y,
+        h: s,
+        r: ob ? ob.r : 0.12,
+        ob,
+        sapling: !ob,
+        parts: meshes.map((m) => ({ mesh: m, i })),
+        base: dummy.matrix.clone(),
+        pre: v.pre,
+      });
     });
     meshes.forEach((m) => {
       m.instanceMatrix.needsUpdate = true;
@@ -280,7 +305,9 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     });
     list.forEach(([x, z], i) => {
       const s = 0.5 + rand() * 1.5;
-      dummy.position.set(x, terrain.getHeight(x, z) - 0.12 * s, z);
+      // сажаем по нижней точке рельефа под камнем и топим на четверть роста:
+      // валун сидит в сугробе, а не лежит НА снегу (и тем более не висит)
+      dummy.position.set(x, groundY(x, z, 0.45 * s) - 0.26 * s, z);
       dummy.rotation.set(0, rand() * Math.PI * 2, 0);
       dummy.scale.set(s * (0.9 + rand() * 0.2), s, s * (0.9 + rand() * 0.2));
       dummy.updateMatrix();
