@@ -64,6 +64,9 @@ export class Player {
     this.controls = look;
 
     this.keys = new Set();
+    // тач-оси (touch.js): f/r — аналоговые −1..1, подмешиваются к клавишам;
+    // active включает locked без pointer lock (на таче его нет)
+    this.touch = { f: 0, r: 0, run: false, jump: false, active: false };
     this.vel = new THREE.Vector3();
     this.bobT = 0;
     this.bobAmt = 0;
@@ -104,7 +107,7 @@ export class Player {
   }
 
   get locked() {
-    return this.controls.isLocked || this.debug;
+    return this.controls.isLocked || this.debug || this.touch.active;
   }
 
   // опора из деревянного пола: raycast в нескольких точках подошвы, берём
@@ -194,19 +197,23 @@ export class Player {
     this._fwd.normalize();
     this._right.crossVectors(this._fwd, cam.up).normalize();
 
-    const f = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0);
-    const r = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0);
-    const wantRun = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    const f = THREE.MathUtils.clamp(
+      (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0) + this.touch.f, -1, 1);
+    const r = THREE.MathUtils.clamp(
+      (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0) + this.touch.r, -1, 1);
+    const wantRun = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.touch.run;
     const running =
       wantRun && f > 0 && !this.exhausted && this.stamina > 0.02 && !this.carrying;
 
     this._wish.set(0, 0, 0);
     if (this.locked && (f || r)) {
-      this._wish
-        .addScaledVector(this._fwd, f)
-        .addScaledVector(this._right, r)
-        .normalize()
-        .multiplyScalar((running ? RUN_SPEED : WALK_SPEED) * (this.carrying ? 0.8 : 1));
+      // аналоговая длина сохраняется (тач: лёгкий увод пальца = медленный шаг),
+      // клавиши дают длину ≥1 и нормализуются как раньше
+      this._wish.addScaledVector(this._fwd, f).addScaledVector(this._right, r);
+      const wl = this._wish.length();
+      this._wish.multiplyScalar(
+        (Math.min(1, wl) / wl) * (running ? RUN_SPEED : WALK_SPEED) * (this.carrying ? 0.8 : 1)
+      );
     }
 
     // инерция (снег вязкий — разгон и торможение плавные)
@@ -291,7 +298,7 @@ export class Player {
 
     // прыжок: пробел, с опоры или в пределах coyote-грации (истощённый — нет)
     const wasAirborne = !this.grounded;
-    const wantJump = this.keys.has('Space');
+    const wantJump = this.keys.has('Space') || this.touch.jump;
     const canJump = this.grounded || (this.airT < COYOTE && this.vy <= 0);
     if (wantJump && !this._jumpHeld && canJump && this.locked && !this.exhausted) {
       // с поленом в руках толчок слабее (высота ~вдвое ниже) и дороже — прыжок

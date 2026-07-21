@@ -28,6 +28,7 @@ import { Lumber } from './lumber.js';
 import { ViewModel, VIEW_Z } from './viewmodel.js';
 import { SaveGame } from './save.js';
 import { SmoothLook } from './look.js';
+import { TouchControls } from './touch.js';
 
 // ---------- рендерер ----------
 // Ярусы качества теней (?shadows=high|medium|low): размер карты, фильтр,
@@ -275,7 +276,8 @@ const playBtn = document.getElementById('play');
 playBtn.addEventListener('click', () => {
   audio.init();
   audio.resume();
-  player.controls.lock();
+  if (touch) touch.activate(); // на таче pointer lock нет — просто входим
+  else player.controls.lock();
 });
 
 // сброс памяти мира: второе нажатие в течение 3.5 с — защита от случайного клика
@@ -345,15 +347,9 @@ function groundAt(x, z) {
   return y;
 }
 
-// F — контекстная «рука»: дверь / в огонь / сложить в штабель / бросить /
-// взять по прицелу / воткнуть инструмент
-addEventListener('keydown', (e) => {
-  if (!player.locked) return;
-  if (e.code === 'KeyE') {
-    if (player.debug) digger.editFromCamera(camera, -1);
-  } else if (e.code === 'KeyQ') {
-    if (player.debug) digger.editFromCamera(camera, +1);
-  } else if (e.code === 'KeyF') {
+// F (и тач-кнопка «рука») — контекстное действие: дверь / в огонь / сложить
+// в штабель / бросить / взять по прицелу / воткнуть инструмент
+function doHandAction() {
     if (nearDoor) {
       audio.door(cabin.toggleDoor());
       shadowDirty = true; // дверь — кастер; распахнутую створку дорисует таймер
@@ -419,8 +415,35 @@ addEventListener('keydown', (e) => {
       audio.axePlant();
       shadowDirty = true; // топор встал в мир — новый кастер
     }
-  }
+}
+
+addEventListener('keydown', (e) => {
+  if (!player.locked) return;
+  if (e.code === 'KeyE') {
+    if (player.debug) digger.editFromCamera(camera, -1);
+  } else if (e.code === 'KeyQ') {
+    if (player.debug) digger.editFromCamera(camera, +1);
+  } else if (e.code === 'KeyF') doHandAction();
 });
+
+// тач-управление (телефон/планшет): создаётся только на тач-устройствах —
+// на десктопе ни кнопок, ни слушателей. Палец слева — идти, справа — смотреть.
+const touch = TouchControls.supported() ? new TouchControls(player, look) : null;
+if (touch) {
+  touch.onAction = doHandAction;
+  // держать кнопку инструмента = держать ЛКМ/ПКМ: замахи цепочкой
+  touch.onTool = (slot, down) => {
+    if (slot === 1) {
+      if (shovel.held) digHeld = down;
+      else if (axe.held) chopHeld = down;
+      else { digHeld = false; chopHeld = false; }
+    } else buildHeld = shovel.held && down;
+  };
+  // клавиатурные подсказки на таче не нужны
+  document.getElementById('hud').textContent = '';
+  document.querySelector('#menu .controls').textContent =
+    'палец слева — идти · палец справа — смотреть';
+}
 
 // Прелоадер: прогрев НАСТОЯЩИМ кадром всей сцены + проталина у костра.
 // renderer.compile() тут не годится: он собирает программы под канвас (srgb),
@@ -711,6 +734,17 @@ function tick() {
     promptText = 'ЛКМ — копать · ПКМ — намыть · F — воткнуть';
   else if (axe.held && axeHintT > 0)
     promptText = 'ЛКМ — рубить · F — воткнуть';
+  if (touch && touch.active) {
+    // кнопка «рука» показывается, когда F что-то сделает; тексты — без клавиш
+    touch.setButtons({
+      action: nearDoor || player.carrying || !!handTarget || shovel.held || axe.held,
+      tool: shovel.held ? 'shovel' : axe.held ? 'axe' : null,
+    });
+    if (promptText)
+      promptText = promptText.startsWith('ЛКМ')
+        ? 'кнопки справа — ' + (shovel.held ? 'копать и намыть' : 'рубить')
+        : promptText.replace('F — ', '');
+  }
   promptEl.classList.toggle('show', !!promptText && player.locked);
   if (promptText) promptEl.textContent = promptText;
 
