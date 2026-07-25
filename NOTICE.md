@@ -1,0 +1,29 @@
+# Лицензии на содержимое репозитория
+
+Код Snowfall распространяется по [MIT](LICENSE). Ассеты — нет.
+
+## Что не покрывается MIT
+
+3D-модели и текстуры в `public/models/` и `public/textures/` — сторонние ассеты
+под собственными лицензиями (CC-BY-4.0 / CC0). Полный список с авторами и
+ссылками на источники: [public/models/CREDITS.md](public/models/CREDITS.md).
+
+Коротко:
+
+- «Scandinavian Log Cabin» by rivetech — CC-BY-4.0
+- «Pine trees pack» by LOLIPOP — CC-BY-4.0
+- Камни Quaternius — CC0
+- Пропсы и текстуры снега Poly Haven — CC0
+
+Модели пережаты для веба (WebP-текстуры + Draco-геометрия, gltf-transform);
+оригиналы доступны по ссылкам в CREDITS.md.
+
+## Звук
+
+Весь звук синтезируется процедурно в WebAudio (`src/audio.js`) — сторонних
+сэмплов в репозитории нет.
+
+---
+
+Эта заметка раньше жила врезкой посреди файла LICENSE, из-за чего GitHub не
+распознавал лицензию и показывал проект как «Other».
