@@ -18,6 +18,8 @@ CLAUDE.md
 .env.*
 # реквизиты деплоя (root@IP, путь к ключу)
 deploy/LOCAL.md
+# собранные APK — публикуются в GitHub Releases, а не в git
+*.apk
 # ключ подписи APK и пароли к нему — НИКОГДА в репозиторий
 *.jks
 *.keystore
