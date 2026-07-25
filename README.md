@@ -1,15 +1,19 @@
 # SNOWFALL
 
+[![CI](https://github.com/HippocampusEvolve/Snowfall/actions/workflows/ci.yml/badge.svg)](https://github.com/HippocampusEvolve/Snowfall/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/HippocampusEvolve/Snowfall)](https://github.com/HippocampusEvolve/Snowfall/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 ### ❄️ [Играть в браузере → antonov-ai.ru/snowfall](https://antonov-ai.ru/snowfall/)
 
 Ничего устанавливать не нужно — первая загрузка ~20 МБ. На десктопе играют
 мышью и клавиатурой, на телефоне и планшете работает тач-управление
 (появляется само на сенсорных экранах).
 
-**Android:** [скачать APK](https://antonov-ai.ru/snowfall/snowfall.apk) (он же
-лежит в репозитории — [store/](store/)) — та же игра, целиком офлайн, без
-интернета после установки. Установка APK не из магазина требует разрешить
-«неизвестные источники». Публикация в RuStore — в работе.
+**Android:** [скачать APK](https://github.com/HippocampusEvolve/Snowfall/releases/latest)
+(зеркало: [antonov-ai.ru/snowfall/snowfall.apk](https://antonov-ai.ru/snowfall/snowfall.apk)) —
+та же игра, целиком офлайн, без интернета после установки. Установка APK не из
+магазина требует разрешить «неизвестные источники». Публикация в RuStore — в работе.
 
 ![Прогулка к костру сквозь снегопад](docs/media/walk.gif)
 
@@ -138,13 +142,15 @@ public/draco/     Draco-декодер (из пакета three)
 Пакет `ru.antonovai.snowfall`, minSdk 23 (Android 6), альбомная ориентация,
 полный экран. Подробности и работа с ключом подписи — [deploy/ANDROID.md](deploy/ANDROID.md).
 
-**Витрины магазинов.** Иконка, скриншоты 16:9, обложка 800×470, готовые
-тексты описаний (краткое/среднее/полное) и сам APK — в [store/](store/).
+**Витрины магазинов.** Иконка, скриншоты 16:9, обложка 800×470 и готовые
+тексты описаний (краткое/среднее/полное) — в [store/](store/). Сам APK — в
+[Releases](https://github.com/HippocampusEvolve/Snowfall/releases).
 
 ## Лицензии
 
 - **Код** — [MIT](LICENSE).
-- **Ассеты** — под своими лицензиями (CC-BY-4.0 / CC0), не покрываются MIT:
+- **Ассеты** — под своими лицензиями (CC-BY-4.0 / CC0), не покрываются MIT
+  (сводка — [NOTICE.md](NOTICE.md)):
   полный список с авторами и ссылками — [public/models/CREDITS.md](public/models/CREDITS.md).
   - «Scandinavian Log Cabin» by rivetech — CC-BY-4.0
   - «Pine trees pack» by LOLIPOP — CC-BY-4.0
