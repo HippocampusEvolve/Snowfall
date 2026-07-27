@@ -80,17 +80,17 @@
     {
       "name": "brass_pot_01_nor_gl",
       "mimeType": "image/webp",
-      "uri": "textures/brass_pot_01_nor_gl_1k.webp"
+      "uri": "tex/brass_pot_01_nor_gl_512.webp"
     },
     {
       "name": "brass_pot_01_diff",
       "mimeType": "image/webp",
-      "uri": "textures/brass_pot_01_diff_1k.webp"
+      "uri": "tex/brass_pot_01_diff_1k.webp"
     },
     {
       "name": "brass_pot_01_metal-brass_pot_01_rough",
       "mimeType": "image/webp",
-      "uri": "textures/brass_pot_01_arm_1k.webp"
+      "uri": "tex/brass_pot_01_arm_512.webp"
     }
   ],
   "buffers": [

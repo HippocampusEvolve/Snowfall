@@ -30,6 +30,21 @@ import { SaveGame } from './save.js';
 import { SmoothLook } from './look.js';
 import { TouchControls } from './touch.js';
 
+// ---------- прогресс заставки ----------
+// Полоса в index.html до этого момента «дышала» вслепую: доли известны только
+// отсюда, когда модуль разобран и лоадеры three начали считать элементы.
+// Один общий DefaultLoadingManager обслуживает и glTF, и текстуры, так что
+// счётчик покрывает всю загрузку мира до первого кадра.
+{
+  const bar = document.getElementById('loadBar');
+  const fill = document.getElementById('loadFill');
+  THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
+    if (!bar || !total) return;
+    bar.classList.add('known');
+    fill.style.width = `${Math.min(1, loaded / total) * 100}%`;
+  };
+}
+
 // ---------- рендерер ----------
 // Ярусы качества теней (?shadows=high|medium|low): размер карты, фильтр,
 // период обновления. Карта перерисовывается по таймеру и по событиям, а не

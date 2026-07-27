@@ -38,9 +38,9 @@ export function loadSnowTextures(maxAnisotropy) {
     return t;
   };
   return {
-    map: setup(tl.load(asset('textures/snow_02_diff_2k.webp')), true),
-    normalMap: setup(tl.load(asset('textures/snow_02_nor_gl_1k.webp'))),
-    roughnessMap: setup(tl.load(asset('textures/snow_02_rough_2k.webp'))),
+    map: setup(tl.load(asset('tex/snow_02_diff_1k.webp')), true),
+    normalMap: setup(tl.load(asset('tex/snow_02_nor_gl_512.webp'))),
+    roughnessMap: setup(tl.load(asset('tex/snow_02_rough_512.webp'))),
   };
 }
 

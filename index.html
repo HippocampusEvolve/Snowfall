@@ -9,14 +9,18 @@
        через <img> в TextureLoader, glTF — fetch'ем в GLTFLoader).
        crossorigin обязателен: three.js грузит с crossOrigin='anonymous' /
        fetch в cors-режиме — без атрибута преролд не переиспользуется
-       и файл качается ДВАЖДЫ -->
-  <link rel="preload" as="image" href="/textures/snow_02_nor_gl_1k.webp" crossorigin="anonymous" />
-  <link rel="preload" as="image" href="/textures/snow_02_diff_2k.webp" crossorigin="anonymous" />
-  <link rel="preload" as="image" href="/textures/snow_02_rough_2k.webp" crossorigin="anonymous" />
-  <link rel="preload" as="fetch" href="/models/cabin/scene.gltf" crossorigin="anonymous" />
-  <link rel="preload" as="fetch" href="/models/cabin/scene.bin" crossorigin="anonymous" />
-  <link rel="preload" as="fetch" href="/models/pines/scene.gltf" crossorigin="anonymous" />
-  <link rel="preload" as="fetch" href="/models/pines/scene.bin" crossorigin="anonymous" />
+       и файл качается ДВАЖДЫ.
+       fetchpriority="low" на моделях: без него семь прелоадов идут наравне с
+       модулем игры и тот приезжает ПОСЛЕДНИМ — до его разбора не будет ни
+       кадра, ни прогресса, только застывшая заставка. Полоса всё равно
+       занята целиком, порядок внутри неё решает, что покажется раньше -->
+  <link rel="preload" as="image" href="/tex/snow_02_nor_gl_512.webp" crossorigin="anonymous" fetchpriority="low" />
+  <link rel="preload" as="image" href="/tex/snow_02_diff_1k.webp" crossorigin="anonymous" fetchpriority="low" />
+  <link rel="preload" as="image" href="/tex/snow_02_rough_512.webp" crossorigin="anonymous" fetchpriority="low" />
+  <link rel="preload" as="fetch" href="/models/cabin/scene.gltf" crossorigin="anonymous" fetchpriority="low" />
+  <link rel="preload" as="fetch" href="/models/cabin/scene.bin" crossorigin="anonymous" fetchpriority="low" />
+  <link rel="preload" as="fetch" href="/models/pines/scene.gltf" crossorigin="anonymous" fetchpriority="low" />
+  <link rel="preload" as="fetch" href="/models/pines/scene.bin" crossorigin="anonymous" fetchpriority="low" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #04060c; }
@@ -169,12 +173,34 @@
 
     #loading {
       position: fixed; inset: 0; z-index: 20;
-      display: flex; align-items: center; justify-content: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 1.6rem;
       background: #04060c;
       font-size: 0.85rem; letter-spacing: 0.4em; color: #5c6a8f;
       transition: opacity 0.5s ease;
     }
     #loading.hidden { opacity: 0; pointer-events: none; }
+
+    /* Полоса загрузки. Пока модуль игры не разобран, о долях ничего не
+       известно — полоса просто «дышит» на CSS-анимации, без единой строчки
+       JS. Как только main.js начинает считать ассеты, он вешает .known и
+       ведёт ширину сам. */
+    #loadBar {
+      position: relative; overflow: hidden;
+      width: min(300px, 48vw); height: 2px;
+      background: rgba(140, 160, 200, 0.14);
+    }
+    #loadFill {
+      position: absolute; top: 0; bottom: 0; left: -34%; width: 34%;
+      background: linear-gradient(90deg, transparent, rgba(160, 190, 255, 0.9), transparent);
+      animation: drift 1.7s ease-in-out infinite;
+    }
+    @keyframes drift { to { left: 100%; } }
+    #loadBar.known #loadFill {
+      animation: none; left: 0; width: 0;
+      background: linear-gradient(90deg, #8fb5ff, #dce8ff);
+      transition: width 0.35s ease;
+    }
 
     /* --- тач-управление (создаётся из touch.js только на тач-устройствах) ---
        без видимых джойстиков; кнопки — голые белые штрихи, никаких подложек */
@@ -207,7 +233,10 @@
 <body>
   <div id="vignette"></div>
 
-  <div id="loading">СНЕГ ИДЁТ…</div>
+  <div id="loading">
+    <span>СНЕГ ИДЁТ…</span>
+    <div id="loadBar"><div id="loadFill"></div></div>
+  </div>
 
   <div id="menu" class="hidden">
     <h1>SNOWFALL</h1>

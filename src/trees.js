@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { createGLTFLoader } from './gltfload.js';
 import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
@@ -100,12 +99,11 @@ function collectPineVariants(root) {
   return variants;
 }
 
-// Собираем геометрии FBX-модели в root-пространстве + матрица нормализации
-// (низ на y=0, центр в нуле, максимальный размер = 1) — для камней.
-function prepareRock(fbx) {
-  fbx.updateMatrixWorld(true);
+// Собираем геометрии одного камня в root-пространстве + матрица нормализации
+// (низ на y=0, центр в нуле, максимальный размер = 1).
+function prepareRock(node) {
   const geos = [];
-  fbx.traverse((child) => {
+  node.traverse((child) => {
     if (!child.isMesh) return;
     geos.push(child.geometry.clone().applyMatrix4(child.matrixWorld));
   });
@@ -135,13 +133,16 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   const pines = []; // рубимые сосны — записи для lumber.js
   const rand = mulberry32(FOREST_SEED);
 
-  const [pineScene, rockFbx] = await Promise.all([
+  const [pineScene, rockScene] = await Promise.all([
     loadPinesScene(),
-    Promise.all(ROCKS.map((n) => new FBXLoader().loadAsync(asset(`models/nature/${n}.fbx`)))),
+    createGLTFLoader()
+      .loadAsync(asset('models/nature/rocks.glb'))
+      .then((g) => g.scene),
   ]);
 
   const variants = collectPineVariants(pineScene);
-  const rocks = rockFbx.map(prepareRock);
+  rockScene.updateMatrixWorld(true);
+  const rocks = ROCKS.map((n) => prepareRock(rockScene.getObjectByName(n)));
 
   // ---- материалы ----
   // Кора и хвоя — PBR-материалы из пака (общие на все варианты). Хвою переводим

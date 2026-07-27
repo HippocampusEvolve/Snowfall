@@ -883,99 +883,99 @@
   "images": [
     {
       "mimeType": "image/webp",
-      "uri": "textures/Floor_baseColor.webp"
+      "uri": "tex/Floor_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Floor_metallicRoughness.webp"
+      "uri": "tex/Floor_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Floor_normal.webp"
+      "uri": "tex/Floor_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/DoorAndWindows_baseColor.webp"
+      "uri": "tex/DoorAndWindows_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/DoorAndWindows_metallicRoughness.webp"
+      "uri": "tex/DoorAndWindows_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/DoorAndWindows_normal.webp"
+      "uri": "tex/DoorAndWindows_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/DoorAndWindows_specularf0.webp"
+      "uri": "tex/DoorAndWindows_specularf0.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Wooden_Support_Struct_baseColor.webp"
+      "uri": "tex/Wooden_Support_Struct_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Wooden_Support_Struct_metallicRoughness.webp"
+      "uri": "tex/Wooden_Support_Struct_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Wooden_Support_Struct_normal.webp"
+      "uri": "tex/Wooden_Support_Struct_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Building_Base_baseColor.webp"
+      "uri": "tex/Building_Base_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Building_Base_metallicRoughness.webp"
+      "uri": "tex/Building_Base_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Building_Base_normal.webp"
+      "uri": "tex/Building_Base_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Building_Base_specularf0.webp"
+      "uri": "tex/Building_Base_specularf0.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Walls_Front_and_Back_baseColor.webp"
+      "uri": "tex/Walls_Front_and_Back_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Walls_Front_and_Back_metallicRoughness.webp"
+      "uri": "tex/Walls_Front_and_Back_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Walls_Front_and_Back_normal.webp"
+      "uri": "tex/Walls_Front_and_Back_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Walls_Sides_baseColor.webp"
+      "uri": "tex/Walls_Sides_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Walls_Sides_metallicRoughness.webp"
+      "uri": "tex/Walls_Sides_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Walls_Sides_normal.webp"
+      "uri": "tex/Walls_Sides_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Roof_baseColor.webp"
+      "uri": "tex/Roof_baseColor.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Roof_metallicRoughness.webp"
+      "uri": "tex/Roof_metallicRoughness.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Roof_normal.webp"
+      "uri": "tex/Roof_normal.webp"
     },
     {
       "mimeType": "image/webp",
-      "uri": "textures/Roof_specularf0.webp"
+      "uri": "tex/Roof_specularf0.webp"
     }
   ],
   "buffers": [

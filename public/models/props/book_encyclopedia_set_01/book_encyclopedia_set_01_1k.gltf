@@ -1469,32 +1469,32 @@
     {
       "name": "book_encyclopedia_set_01_cover_nor_gl",
       "mimeType": "image/webp",
-      "uri": "textures/book_encyclopedia_set_01_cover_nor_gl_1k.webp"
+      "uri": "tex/book_encyclopedia_set_01_cover_nor_gl_64.webp"
     },
     {
       "name": "book_encyclopedia_set_01_cover_diff",
       "mimeType": "image/webp",
-      "uri": "textures/book_encyclopedia_set_01_cover_diff_1k.webp"
+      "uri": "tex/book_encyclopedia_set_01_cover_diff_1k.webp"
     },
     {
       "name": "book_encyclopedia_set_01_cover_metallic-book_encyclopedia_set_01_cover_roughness",
       "mimeType": "image/webp",
-      "uri": "textures/book_encyclopedia_set_01_cover_arm_1k.webp"
+      "uri": "tex/book_encyclopedia_set_01_cover_arm_512.webp"
     },
     {
       "name": "book_encyclopedia_set_01_paper_nor_gl",
       "mimeType": "image/webp",
-      "uri": "textures/book_encyclopedia_set_01_paper_nor_gl_1k.webp"
+      "uri": "tex/book_encyclopedia_set_01_paper_nor_gl_512.webp"
     },
     {
       "name": "book_encyclopedia_set_01_paper_diff",
       "mimeType": "image/webp",
-      "uri": "textures/book_encyclopedia_set_01_paper_diff_1k.webp"
+      "uri": "tex/book_encyclopedia_set_01_paper_diff_1k.webp"
     },
     {
       "name": "book_encyclopedia_set_01_paper_roughness",
       "mimeType": "image/webp",
-      "uri": "textures/book_encyclopedia_set_01_paper_roughness_1k.webp"
+      "uri": "tex/book_encyclopedia_set_01_paper_roughness_64.webp"
     }
   ],
   "buffers": [
