@@ -521,14 +521,6 @@ export class Digger {
     return vHit || tHit || null;
   }
 
-  // копание из камеры сферой — debug-инструмент (E/Q и мышь в ?debug)
-  editFromCamera(camera, sign, reach = 4.8, radius = 1.1, strength = 3.0) {
-    const hit = this._aim(camera, reach);
-    if (!hit) return false;
-    this.edit(hit.point, radius, sign, strength);
-    return true;
-  }
-
   // Копок лопатой из камеры: штык входит по взгляду в точку прицела.
   // sign=-1 — снять штык снега, sign=+1 — уложить/намыть. Бокс ориентирован
   // по азимуту взгляда, оси вертикальны: вертикальные стенки, плоское дно.

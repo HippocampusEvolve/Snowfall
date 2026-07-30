@@ -29,6 +29,7 @@ import { ViewModel, VIEW_Z } from './viewmodel.js';
 import { SaveGame } from './save.js';
 import { SmoothLook } from './look.js';
 import { TouchControls } from './touch.js';
+import { createShell } from './shell.js';
 
 // ---------- прогресс заставки ----------
 // Полоса в index.html до этого момента «дышала» вслепую: доли известны только
@@ -281,18 +282,18 @@ const bloom = new UnrealBloomPass(
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
-// ---------- UI ----------
-const menu = document.getElementById('menu');
+// ---------- оболочка мира ----------
+// Вход, пауза и выход на витрину — общий для всех миров экран (shell.js).
+// Esc браузер обрабатывает сам: он отпускает курсор, а по этому событию
+// возвращается экран паузы.
 const loading = document.getElementById('loading');
-const hud = document.getElementById('hud');
-const statsEl = document.getElementById('stats');
-const playBtn = document.getElementById('play');
-
-playBtn.addEventListener('click', () => {
+const shell = createShell(() => {
   audio.init();
   audio.resume();
-  if (touch) touch.activate(); // на таче pointer lock нет — просто входим
-  else player.controls.lock();
+  if (touch) {
+    touch.activate(); // на таче pointer lock нет — просто входим
+    shell.close();
+  } else player.controls.lock();
 });
 
 // сброс памяти мира: второе нажатие в течение 3.5 с — защита от случайного клика
@@ -313,19 +314,17 @@ resetBtn.addEventListener('click', () => {
   }, 3500);
 });
 player.controls.addEventListener('lock', () => {
-  menu.classList.add('hidden');
-  statsEl.classList.add('show');
+  shell.close();
   audio.resume();
-  setTimeout(() => hud.classList.add('faded'), 6000);
 });
 player.controls.addEventListener('unlock', () => {
-  if (!stats.dead) menu.classList.remove('hidden');
+  // Замёрзшего экран паузы не встречает: у смерти свой экран со своей кнопкой.
+  if (!stats.dead) shell.open();
 });
 
 // Копание — только лопатой в руках: ЛКМ — копнуть (срез-штык), ПКМ — уложить
 // снег; кнопку можно держать — замахи идут цепочкой. Правка происходит
 // в момент врезания штыка (см. shovel.update в тике).
-// В ?debug остаётся старая сферическая кисть: мышь без лопаты и клавиши E/Q.
 let digHeld = false;
 let buildHeld = false;
 let chopHeld = false; // ЛКМ с топором — цепочка ударов, как копание лопатой
@@ -334,10 +333,8 @@ renderer.domElement.addEventListener('mousedown', (e) => {
   if (e.button === 0) {
     if (shovel.held) digHeld = true;
     else if (axe.held) chopHeld = true;
-    else if (player.debug) digger.editFromCamera(camera, -1);
   } else if (e.button === 2) {
     if (shovel.held) buildHeld = true;
-    else if (player.debug) digger.editFromCamera(camera, +1);
   }
 });
 addEventListener('mouseup', (e) => {
@@ -434,11 +431,7 @@ function doHandAction() {
 
 addEventListener('keydown', (e) => {
   if (!player.locked) return;
-  if (e.code === 'KeyE') {
-    if (player.debug) digger.editFromCamera(camera, -1);
-  } else if (e.code === 'KeyQ') {
-    if (player.debug) digger.editFromCamera(camera, +1);
-  } else if (e.code === 'KeyF') doHandAction();
+  if (e.code === 'KeyF') doHandAction();
 });
 
 // тач-управление (телефон/планшет): создаётся только на тач-устройствах —
@@ -454,10 +447,6 @@ if (touch) {
       else { digHeld = false; chopHeld = false; }
     } else buildHeld = shovel.held && down;
   };
-  // клавиатурные подсказки на таче не нужны
-  document.getElementById('hud').textContent = '';
-  document.querySelector('#menu .controls').textContent =
-    'палец слева — идти · палец справа — смотреть';
 }
 
 // Прелоадер: прогрев НАСТОЯЩИМ кадром всей сцены + проталина у костра.
@@ -483,7 +472,7 @@ function warmUp() {
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
     loading.classList.add('hidden');
     if (player.debug) {
-      statsEl.classList.add('show');
+      // ?debug идёт мимо экрана входа: звук заводится первой же клавишей.
       const initAudio = () => {
         audio.init();
         audio.resume();
@@ -491,7 +480,7 @@ function warmUp() {
       };
       addEventListener('keydown', initAudio);
     } else {
-      menu.classList.remove('hidden');
+      shell.open(); // мир готов — можно звать внутрь
     }
   });
 }

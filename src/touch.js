@@ -128,13 +128,14 @@ export class TouchControls {
     }
   }
 
-  // касание DOM-кнопок (экран смерти, меню) не глушим — иначе не будет click
+  // касание DOM-кнопок (экран входа, экран смерти, выход на витрину) не глушим —
+  // иначе не будет click
   _skip(e) {
-    return !this.active || (e.target.closest && e.target.closest('button, #menu, #death'));
+    return !this.active || (e.target.closest && e.target.closest('button, a, #gate, #death'));
   }
 
   _start(e) {
-    if (this._skip(e)) return; // в меню/на кнопках экран живёт как обычная страница
+    if (this._skip(e)) return; // на экранах оболочки страница живёт как обычная
     e.preventDefault();
     for (const t of e.changedTouches) {
       if (t.clientX < innerWidth * 0.5) {

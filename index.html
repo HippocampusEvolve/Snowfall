@@ -5,107 +5,153 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>SNOWFALL</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>❄️</text></svg>" />
-  <!-- прелоад тяжёлых ассетов: старт загрузки до парсинга JS (текстуры снега —
-       через <img> в TextureLoader, glTF — fetch'ем в GLTFLoader).
-       crossorigin обязателен: three.js грузит с crossOrigin='anonymous' /
-       fetch в cors-режиме — без атрибута преролд не переиспользуется
-       и файл качается ДВАЖДЫ.
-       fetchpriority="low" на моделях: без него семь прелоадов идут наравне с
-       модулем игры и тот приезжает ПОСЛЕДНИМ — до его разбора не будет ни
-       кадра, ни прогресса, только застывшая заставка. Полоса всё равно
-       занята целиком, порядок внутри неё решает, что покажется раньше -->
-  <link rel="preload" as="image" href="/tex/snow_02_nor_gl_512.webp" crossorigin="anonymous" fetchpriority="low" />
-  <link rel="preload" as="image" href="/tex/snow_02_diff_1k.webp" crossorigin="anonymous" fetchpriority="low" />
-  <link rel="preload" as="image" href="/tex/snow_02_rough_512.webp" crossorigin="anonymous" fetchpriority="low" />
-  <link rel="preload" as="fetch" href="/models/cabin/scene.gltf" crossorigin="anonymous" fetchpriority="low" />
-  <link rel="preload" as="fetch" href="/models/cabin/scene.bin" crossorigin="anonymous" fetchpriority="low" />
-  <link rel="preload" as="fetch" href="/models/pines/scene.gltf" crossorigin="anonymous" fetchpriority="low" />
-  <link rel="preload" as="fetch" href="/models/pines/scene.bin" crossorigin="anonymous" fetchpriority="low" />
+  <!-- ПРЕЛОАДА ЗДЕСЬ БОЛЬШЕ НЕТ, и это результат замера, а не забывчивость.
+       Семь link rel=preload на текстуры снега и обе модели (2.2 МБ) стояли тут
+       затем, чтобы загрузка началась до разбора JS. fetchpriority="low" был
+       попыткой не дать им перебить модуль игры, и она помогала лишь наполовину:
+       на 1.5 Мбит/с бандл приезжал на 6559 мс с прелоадом против 2443 мс без
+       него, то есть полоса загрузки на четыре секунды дольше «дышала» вслепую,
+       не зная долей. Общее время до входа от прелоада не выигрывало ничего:
+       27.5-33.7 с в обоих случаях, разброс замеров больше эффекта.
+       Причина простая: скачать всё равно надо всё, а порядок решает только то,
+       насколько рано появится счётчик. Он появляется с бандлом — значит бандл
+       и идёт первым. Тот же вывод и у Winter Tower, только там разница резче. -->
   <style>
+    /* ========================================================================
+       ОБОЛОЧКА МИРА — одинаковая во всех мирах find-the-end.fun.
+       Полоса загрузки, экран входа (он же пауза), выход на витрину. Числа
+       в этом блоке общие для всех миров и правятся сразу во всех; своё у
+       мира — только палитра ниже и три строки текста в разметке.
+       Эталон и правила: docs/games.md, «Единая оболочка мира».
+       ======================================================================== */
+    :root {
+      color-scheme: dark;
+      --bg: #04060c;      /* фон мира: тот же цвет, что у неба в кадре */
+      --ink: #cfd8ea;     /* основной текст */
+      --dim: #62719a;     /* тихий текст: подписи и тихие ссылки */
+      --accent: #ffb163;  /* акцент мира — тот же, что на карточке витрины */
+      --edge: rgba(255, 177, 99, 0.45); /* та же краска в рамке кнопки */
+      --glow: rgba(255, 177, 99, 0.12); /* и в её подсветке под курсором */
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #04060c; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; color: #cfd8ea; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif; color: var(--ink);
+      /* Игра ведёт себя как приложение, а не как документ: текст здесь не для
+         копирования. Без этого зажатая мышь тянет по меню полосу выделения,
+         а долгое касание вызывает лупу и «скопировать». Раньше это стояло
+         только у body.touch-mode — то есть чинило телефон и не чинило мышь. */
+      -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    }
     canvas { display: block; }
+
+    /* Заставка загрузки: мир открывается уже отделанным и с прогретыми
+       шейдерами (см. warmUp в main.js). */
+    #loading {
+      position: fixed; inset: 0; z-index: 20;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.6rem;
+      background: var(--bg);
+      font-size: 0.8rem; letter-spacing: 0.4em; text-indent: 0.4em; color: var(--dim);
+      transition: opacity 0.6s ease;
+    }
+    #loading.hidden { opacity: 0; pointer-events: none; }
+
+    /* Пока модуль игры не разобран, о долях ничего не известно — полоса просто
+       «дышит» на CSS-анимации, без единой строчки JS. Как только main.js
+       начинает считать ассеты, он вешает .known и ведёт ширину сам. */
+    #loadBar {
+      position: relative; overflow: hidden;
+      width: min(300px, 48vw); height: 2px;
+      background: rgba(140, 165, 205, 0.14);
+    }
+    #loadFill {
+      position: absolute; top: 0; bottom: 0; left: -34%; width: 34%;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      animation: drift 1.7s ease-in-out infinite;
+    }
+    @keyframes drift { to { left: 100%; } }
+    #loadBar.known #loadFill {
+      animation: none; left: 0; width: 0;
+      background: linear-gradient(90deg, var(--accent), var(--ink));
+      transition: width 0.35s ease;
+    }
+
+    /* Вход в мир, он же пауза: один экран на оба случая — уходит по кнопке,
+       возвращается, когда курсор отпущен (Esc, потеря фокуса). */
+    #gate {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: rgba(4, 8, 14, 0.62);
+      backdrop-filter: blur(6px);
+      transition: opacity 0.5s ease;
+    }
+    #gate.hidden { opacity: 0; pointer-events: none; }
+    /* Кегль ведёт себя от ширины экрана осторожно: имя мира — одно длинное
+       слово с большим трекингом, и на 360 px оно упиралось в края. */
+    #gate h1 {
+      max-width: 100%; padding: 0 1rem;
+      font-size: clamp(1.5rem, 5.4vw, 4.6rem); font-weight: 200;
+      letter-spacing: 0.4em; text-indent: 0.4em; text-align: center;
+      text-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+    }
+    /* Строка настроения — та же, что на карточке этого мира на витрине. */
+    #gate .mood {
+      margin-top: 1.1rem; padding: 0 1.5rem;
+      font-size: 0.9rem; letter-spacing: 0.06em; color: var(--dim); text-align: center;
+    }
+    .btn {
+      margin-top: 3rem; padding: 0.9rem 3.2rem;
+      font: inherit; font-size: 0.95rem;
+      letter-spacing: 0.3em; text-indent: 0.3em; text-transform: uppercase;
+      color: var(--ink); background: transparent;
+      border: 1px solid var(--edge); border-radius: 2px;
+      cursor: pointer; transition: all 0.25s ease;
+    }
+    .btn:hover { background: var(--glow); border-color: var(--accent); }
+
+    /* Тихие ссылки под кнопкой: выход из мира и всё, что мир добавит от себя. */
+    .quiet {
+      margin-top: 1.8rem;
+      font: inherit; font-size: 0.68rem;
+      letter-spacing: 0.28em; text-indent: 0.28em; text-transform: uppercase;
+      color: var(--dim); opacity: 0.75; text-decoration: none;
+      background: transparent; border: none; cursor: pointer;
+      transition: opacity 0.25s ease, color 0.25s ease;
+    }
+    .quiet:hover { opacity: 1; color: var(--ink); }
+
+    /* Выход на витрину. В самой игре его в кадре нет: стрелка появляется
+       только когда курсор свободен — на экране входа и на паузе. */
+    #exit {
+      position: fixed; z-index: 11;
+      top: max(14px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left));
+      width: 44px; height: 44px;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; pointer-events: none; transition: opacity 0.35s ease;
+    }
+    body.paused #exit { opacity: 0.45; pointer-events: auto; }
+    #exit:hover { opacity: 1; }
+    #exit svg {
+      width: 20px; height: 20px; fill: none; stroke: var(--ink);
+      stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round;
+    }
+
+    /* =================== дальше — своё этого мира ========================= */
+
+    /* сброс памяти мира — тихая кнопка, подтверждение вторым нажатием */
+    #resetWorld { margin-top: 1.1rem; }
+    #resetWorld.arm { color: #d98a6a; opacity: 1; }
 
     #vignette {
       position: fixed; inset: 0; pointer-events: none; z-index: 5;
       background: radial-gradient(ellipse at center, transparent 52%, rgba(2, 4, 12, 0.62) 100%);
     }
 
-    #menu {
-      position: fixed; inset: 0; z-index: 10;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: rgba(3, 5, 12, 0.55);
-      backdrop-filter: blur(6px);
-      transition: opacity 0.6s ease;
-    }
-    #menu.hidden { opacity: 0; pointer-events: none; }
-
-    #menu h1 {
-      font-size: clamp(3rem, 9vw, 6.5rem);
-      font-weight: 200;
-      letter-spacing: 0.55em;
-      margin-left: 0.55em; /* компенсация letter-spacing */
-      color: #e8eefb;
-      text-shadow: 0 0 40px rgba(140, 170, 255, 0.35);
-    }
-    #menu .sub {
-      margin-top: 0.6rem;
-      font-size: 0.95rem;
-      letter-spacing: 0.45em;
-      margin-left: 0.45em;
-      text-transform: uppercase;
-      color: #7d8db0;
-    }
-    #play {
-      margin-top: 3.2rem;
-      padding: 0.9rem 3.4rem;
-      font-size: 1rem;
-      letter-spacing: 0.3em;
-      text-transform: uppercase;
-      color: #dfe8fa;
-      background: transparent;
-      border: 1px solid rgba(160, 185, 235, 0.45);
-      border-radius: 2px;
-      cursor: pointer;
-      transition: all 0.25s ease;
-    }
-    #play:hover {
-      background: rgba(150, 180, 240, 0.12);
-      border-color: rgba(190, 210, 250, 0.8);
-      box-shadow: 0 0 30px rgba(120, 155, 230, 0.25);
-    }
-    #menu .controls {
-      margin-top: 2.6rem;
-      font-size: 0.8rem;
-      letter-spacing: 0.18em;
-      color: #62719a;
-    }
-    /* сброс памяти мира — тихая кнопка, подтверждение вторым нажатием */
-    #resetWorld {
-      margin-top: 1.7rem;
-      padding: 0.4rem 1rem;
-      font-size: 0.68rem;
-      letter-spacing: 0.28em;
-      text-transform: uppercase;
-      color: #4d5a7d;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      transition: color 0.25s ease;
-    }
-    #resetWorld:hover { color: #8fa0c6; }
-    #resetWorld.arm { color: #d98a6a; }
-
-    #hud {
-      position: fixed; right: 24px; bottom: 20px; z-index: 6;
-      font-size: 0.75rem; letter-spacing: 0.2em; color: rgba(160, 178, 214, 0.55);
-      pointer-events: none;
-      transition: opacity 2s ease;
-    }
-    #hud.faded { opacity: 0; }
-
-    /* --- подсказка у двери --- */
+    /* --- подсказка у двери ---
+       Единственный текст, который остаётся в кадре, и то у самого объекта.
+       Уйдёт вместе с переходом на интуитивное управление (ROADMAP витрины). */
     #prompt {
       position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%);
       z-index: 6; pointer-events: none;
@@ -115,32 +161,9 @@
     }
     #prompt.show { opacity: 1; }
 
-    /* --- статы выживания --- */
-    #stats {
-      position: fixed; left: 24px; bottom: 20px; z-index: 6;
-      pointer-events: none; opacity: 0; transition: opacity 1.2s ease;
-    }
-    #stats.show { opacity: 1; }
-    #stats .row { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
-    #stats .cap {
-      font-size: 0.6rem; letter-spacing: 0.28em; color: #5d6c92; width: 64px;
-    }
-    #stats .bar {
-      width: 130px; height: 3px; border-radius: 2px; overflow: hidden;
-      background: rgba(140, 160, 200, 0.16);
-    }
-    #stats .fill {
-      height: 100%; width: 100%;
-      background: linear-gradient(90deg, #8fb5ff, #dce8ff);
-      transition: width 0.35s ease;
-    }
-    #stats .fill.low { background: linear-gradient(90deg, #ff8f5e, #ffcf9e); }
-    #tempText {
-      font-size: 0.85rem; letter-spacing: 0.08em; color: #a9bde0;
-      width: 2.8em; text-align: right;
-    }
-
-    /* --- изморозь при замерзании --- */
+    /* --- изморозь при замерзании ---
+       Полос и градусов на экране нет: холод игрок читает по краям кадра,
+       по дыханию и по раскачке бега. */
     #frost {
       position: fixed; inset: 0; z-index: 7; pointer-events: none;
       opacity: 0; transition: opacity 1.5s ease;
@@ -159,48 +182,14 @@
     #death.show { opacity: 1; pointer-events: auto; }
     #death h2 {
       font-size: clamp(1.6rem, 4.5vw, 3rem); font-weight: 200;
-      letter-spacing: 0.5em; margin-left: 0.5em; color: #b9c9ea;
+      letter-spacing: 0.5em; text-indent: 0.5em; color: #b9c9ea;
     }
-    #death p { margin-top: 1rem; font-size: 0.8rem; letter-spacing: 0.3em; color: #55648c; }
-    #retry {
-      margin-top: 2.6rem; padding: 0.8rem 2.8rem;
-      font-size: 0.9rem; letter-spacing: 0.3em; text-transform: uppercase;
-      color: #dfe8fa; background: transparent;
-      border: 1px solid rgba(160, 185, 235, 0.45); border-radius: 2px; cursor: pointer;
-      transition: all 0.25s ease;
-    }
-    #retry:hover { background: rgba(150, 180, 240, 0.12); }
+    #death p { margin-top: 1rem; font-size: 0.8rem; letter-spacing: 0.3em; color: var(--dim); }
 
-    #loading {
-      position: fixed; inset: 0; z-index: 20;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 1.6rem;
-      background: #04060c;
-      font-size: 0.85rem; letter-spacing: 0.4em; color: #5c6a8f;
-      transition: opacity 0.5s ease;
-    }
-    #loading.hidden { opacity: 0; pointer-events: none; }
-
-    /* Полоса загрузки. Пока модуль игры не разобран, о долях ничего не
-       известно — полоса просто «дышит» на CSS-анимации, без единой строчки
-       JS. Как только main.js начинает считать ассеты, он вешает .known и
-       ведёт ширину сам. */
-    #loadBar {
-      position: relative; overflow: hidden;
-      width: min(300px, 48vw); height: 2px;
-      background: rgba(140, 160, 200, 0.14);
-    }
-    #loadFill {
-      position: absolute; top: 0; bottom: 0; left: -34%; width: 34%;
-      background: linear-gradient(90deg, transparent, rgba(160, 190, 255, 0.9), transparent);
-      animation: drift 1.7s ease-in-out infinite;
-    }
-    @keyframes drift { to { left: 100%; } }
-    #loadBar.known #loadFill {
-      animation: none; left: 0; width: 0;
-      background: linear-gradient(90deg, #8fb5ff, #dce8ff);
-      transition: width 0.35s ease;
-    }
+    /* На таче pointer lock не используется, а значит нет и паузы, на которой
+       стрелка выхода появляется сама: там она висит всегда и тусклее — иначе
+       из мира не выйти ничем, кроме кнопки «назад» браузера. */
+    body.touch-mode #exit { opacity: 0.35; pointer-events: auto; }
 
     /* --- тач-управление (создаётся из touch.js только на тач-устройствах) ---
        без видимых джойстиков; кнопки — голые белые штрихи, никаких подложек */
@@ -238,33 +227,26 @@
     <div id="loadBar"><div id="loadFill"></div></div>
   </div>
 
-  <div id="menu" class="hidden">
+  <a id="exit" href="https://find-the-end.fun/" aria-label="Выйти на витрину">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+  </a>
+
+  <div id="gate" class="hidden">
     <h1>SNOWFALL</h1>
-    <p class="sub">долгая тёмная ночь</p>
-    <button id="play">Войти в ночь</button>
-    <div class="controls">WASD — движение&nbsp;&nbsp;·&nbsp;&nbsp;SHIFT — бег&nbsp;&nbsp;·&nbsp;&nbsp;ПРОБЕЛ — прыжок&nbsp;&nbsp;·&nbsp;&nbsp;F — рука (дверь, дрова, лопата)&nbsp;&nbsp;·&nbsp;&nbsp;ЛКМ/ПКМ — копать/намыть (с лопатой)&nbsp;&nbsp;·&nbsp;&nbsp;ESC — пауза</div>
-    <button id="resetWorld">начать ночь заново</button>
+    <p class="mood">Минус четырнадцать. Свет в окне горит не для тебя.</p>
+    <button id="enter" class="btn" type="button" data-resume="продолжить">войти в ночь</button>
+    <a class="quiet" href="https://find-the-end.fun/">выйти из мира</a>
+    <button id="resetWorld" class="quiet" type="button">начать ночь заново</button>
   </div>
 
-  <div id="hud">SHIFT — БЕГ</div>
   <div id="prompt"></div>
 
   <div id="frost"></div>
 
-  <!-- СИЛЫ убраны с экрана: усталость слышно дыханием и видно раскачкой бега.
-       ТЕПЛО пока остаётся — уйдёт, когда телесных сигналов станет достаточно -->
-  <div id="stats">
-    <div class="row">
-      <span id="tempText">-12°</span>
-      <div class="bar"><div id="warmthFill" class="fill"></div></div>
-      <span class="cap">ТЕПЛО</span>
-    </div>
-  </div>
-
   <div id="death">
     <h2>ВЫ ЗАМЁРЗЛИ</h2>
     <p>ночь оказалась длиннее вас</p>
-    <button id="retry">Ещё раз</button>
+    <button id="retry" class="btn" type="button">ещё раз</button>
   </div>
 
   <script type="module" src="/src/main.js"></script>
