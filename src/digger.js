@@ -510,6 +510,37 @@ export class Digger {
     this.skirt.visible = pos.length > 0; // у пустой геометрии сфера NaN — прячем меш
   }
 
+  // ---- прогрев материала под заставкой ----
+  // Программа снежного среза (digger-snow) в three собирается лениво: ровно
+  // тогда, когда меш с этим материалом ВПЕРВЫЕ попадает в список отрисовки.
+  // До первого копка в сцене нет ни одного такого меша (юбка есть, но она
+  // пустая и visible=false), поэтому вся компиляция приходилась на кадр
+  // сразу после первого удара лопатой — замерено 211 мс в composer.render()
+  // при одной новой программе. Лечение: на время прогревочного кадра (main.js,
+  // под заставкой) подкладываем этим же материалом вырожденный треугольник
+  // глубоко под миром. В кадр он не приносит ни пикселя, но программу и её
+  // depth-вариант для карты теней заставляет собрать заранее.
+  primeStart() {
+    const geo = new THREE.BufferGeometry();
+    const y = -80; // ниже любого рельефа: даже без куллинга ничего не видно
+    geo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, y, 0, 0.01, y, 0, 0, y, 0.01], 3)
+    );
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+    geo.computeBoundingSphere();
+    this.skirt.geometry.dispose();
+    this.skirt.geometry = geo;
+    this.skirt.visible = true;
+  }
+
+  // прогрев отработал — возвращаем юбку в исходное пустое состояние
+  primeEnd() {
+    this.skirt.geometry.dispose();
+    this.skirt.geometry = new THREE.BufferGeometry();
+    this.skirt.visible = false;
+  }
+
   // луч по взгляду до снега (воксельным попаданиям — приоритет: иначе при
   // углублении ямы луч упирался бы в уже вырезанный невидимый террейн)
   _aim(camera, reach) {

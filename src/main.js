@@ -473,8 +473,12 @@ function warmUp() {
     scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
     // материал вырытого снега прогревать нечем: до первого копка в сцене нет
     // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
+    // материал вырытого снега прогревать нечем: до первого копка в сцене нет
+    // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
+    digger.primeStart();
     renderer.shadowMap.needsUpdate = true; // и depth-варианты теней в тот же кадр
     composer.render();
+    digger.primeEnd();
     for (const o of culled) o.frustumCulled = true;
     view.render(renderer);
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
