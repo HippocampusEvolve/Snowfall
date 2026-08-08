@@ -3,7 +3,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { snowTint } from './snowtint.js';
 
 // Костёр: процедурное костровище — кольцо мятых камней, зола, поленья с
-// процедурной корой, тлеющие угли; шейдерное пламя, искры, дым, мерцающий
+// процедурной корой, тлеющие угли; живое пламя, искры, дым, мерцающий
 // тёплый свет. Всё генерится кодом, без внешних моделей. Источник тепла для Stats.
 //
 // Огонь ЕСТ ДРОВА: fuel 1..0 выгорает за FUEL_TIME — пламя оседает, свет
@@ -13,6 +13,71 @@ import { snowTint } from './snowtint.js';
 const FUEL_TIME = 480; // секунд от полного костра до углей
 const BURN_MIN = 0.1; // «угли»: нижний предел горения
 
+// ---- шум для пламени ----
+// Пламя рисуется не шейдером, а покадрово в маленький canvas: так язычок
+// можно вести по высоте — сузить кверху, качнуть, разорвать турбулентностью.
+// Хеш целочисленный (без sin), value-шум сглажен, fbm складывает октавы.
+function hash2(x, y, s) {
+  let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(s | 0, 0x9e3779b1);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x2545f491);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0x27d4eb2d);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function wrapi(a, n) {
+  a %= n;
+  return a < 0 ? a + n : a;
+}
+// px/py — периоды решётки: шум замыкается сам на себя и не «расползается»
+function vnoise(x, y, px, py, s) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const fx = x - xi;
+  const fy = y - yi;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fy * fy * (3 - 2 * fy);
+  const x0 = wrapi(xi, px);
+  const x1 = wrapi(xi + 1, px);
+  const y0 = wrapi(yi, py);
+  const y1 = wrapi(yi + 1, py);
+  const a = hash2(x0, y0, s);
+  const b = hash2(x1, y0, s);
+  const c = hash2(x0, y1, s);
+  const d = hash2(x1, y1, s);
+  const t = a + (b - a) * u;
+  const q = c + (d - c) * u;
+  return t + (q - t) * v;
+}
+function fbm(x, y, px, py, oct, s) {
+  let amp = 1;
+  let f = 1;
+  let sum = 0;
+  let nrm = 0;
+  for (let i = 0; i < oct; i++) {
+    sum += amp * vnoise(x * f, y * f, px * f, py * f, s + i * 7919);
+    nrm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / nrm;
+}
+const cl01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+function ss(e0, e1, x) {
+  const t = cl01((x - e0) / (e1 - e0));
+  return t * t * (3 - 2 * t);
+}
+
+// размер полотна пламени: мельче — видно ступеньки, крупнее — дорого на телефоне
+const FLAME_W = 72;
+const FLAME_H = 108;
+const FLAME_FPS = 30; // текстура перерисовывается 30 раз в секунду, глазу хватает
+// Полотно шире, чем высокое: костёр приземистый и разлапистый, в отличие от
+// вытянутого огня в камине. Ширина подобрана по просвету кладки.
+const FLAME_PW = 0.95;
+const FLAME_PH = 0.9;
+
 export class Campfire {
   constructor(scene, terrain, x, z) {
     this.position = new THREE.Vector3(x, terrain.getHeight(x, z), z);
@@ -20,8 +85,7 @@ export class Campfire {
     this.group.position.copy(this.position);
     scene.add(this.group);
 
-    this.time = { value: 0 };
-    this.burnU = { value: 1 }; // burn в шейдеры пламени и искр
+    this.burnU = { value: 1 }; // сила горения наружу (звук треска)
     this.fuel = 0.8; // 0..1 — запас дров
     this.burn = 1; // 0..1 — сглаженная сила горения (BURN_MIN на углях)
     this._flare = 0; // вспышка при подброшенном полене
@@ -157,121 +221,82 @@ export class Campfire {
     }
     this.group.add(new THREE.Mesh(mergeGeometries(emberGeos), this.emberMat));
 
-    // ---- пламя: два скрещенных полотна с fbm-шейдером ----
-    const flameMat = new THREE.ShaderMaterial({
+    // ---- пламя: три скрещенных полотна с покадровой текстурой ----
+    // Полотен три, под 60 градусов: с любой стороны огонь читается объёмным,
+    // а ребро полотна не поймать (на двух крестом оно ловилось и огонь
+    // схлопывался в плоскую картинку).
+    const flameCanvas = document.createElement('canvas');
+    flameCanvas.width = FLAME_W;
+    flameCanvas.height = FLAME_H;
+    this.fctx = flameCanvas.getContext('2d');
+    this.fimg = this.fctx.createImageData(FLAME_W, FLAME_H);
+    this.ftex = new THREE.CanvasTexture(flameCanvas);
+    this.ftex.colorSpace = THREE.SRGBColorSpace;
+    this._fAcc = 0; // накопитель кадров текстуры
+    const flameMat = new THREE.MeshBasicMaterial({
+      map: this.ftex,
+      // чуть выше единицы: ядро перешагивает порог bloom (0.82) и обрастает
+      // ореолом, а тонмаппинг его не съедает (toneMapped: false). Выше 1.2
+      // язычки сливаются в белое пятно — проверено на снегу у избы
+      color: new THREE.Color(1.15, 1.08, 1),
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
+      toneMapped: false,
       fog: false,
-      uniforms: { uTime: this.time, uBurn: this.burnU },
-      vertexShader: /* glsl */ `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        varying vec2 vUv;
-        uniform float uTime;
-        uniform float uBurn;
-        float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-        float vnoise(vec2 p) {
-          vec2 i = floor(p), f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          return mix(
-            mix(hash(i), hash(i + vec2(1, 0)), f.x),
-            mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x),
-            f.y
-          );
-        }
-        float fbm(vec2 p) {
-          float v = 0.0, a = 0.5;
-          for (int i = 0; i < 3; i++) { v += a * vnoise(p); p *= 2.2; a *= 0.5; }
-          return v;
-        }
-        void main() {
-          vec2 uv = vUv;
-          float t = uTime;
-          float n = fbm(vec2(uv.x * 3.5, uv.y * 2.2 - t * 2.1));
-          float n2 = fbm(vec2(uv.x * 7.0 + 13.7, uv.y * 3.0 - t * 3.2));
-          float xm = 1.0 - abs(uv.x - 0.5) * 2.0;
-          float flame = (1.0 - uv.y) * pow(max(xm, 0.0), 0.7);
-          flame *= 0.55 + 0.6 * n;
-          flame -= n2 * 0.22 * uv.y;
-          float a = smoothstep(0.18, 0.5, flame);
-          vec3 col = mix(vec3(0.9, 0.16, 0.01), vec3(1.0, 0.62, 0.08), smoothstep(0.2, 0.75, flame));
-          col = mix(col, vec3(1.0, 0.93, 0.55), smoothstep(0.62, 0.95, flame));
-          // на углях пламени нет — язычки истаивают вместе с burn
-          float b = smoothstep(0.12, 0.45, uBurn);
-          gl_FragColor = vec4(col * (1.2 + flame * 2.2), a * 0.9 * b);
-        }
-      `,
     });
-    const flameGeo = new THREE.PlaneGeometry(0.85, 1.05);
+    const flameGeo = new THREE.PlaneGeometry(FLAME_PW, FLAME_PH);
     this.flames = [];
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
       const f = new THREE.Mesh(flameGeo, flameMat);
-      f.position.y = 0.62;
-      f.rotation.y = (i * Math.PI) / 2;
+      f.position.y = 0.095 + FLAME_PH / 2;
+      f.rotation.y = (i * Math.PI) / 3;
       f.renderOrder = 3;
       this.flames.push(f);
       this.group.add(f);
     }
+    this._drawFlame(0, 1); // первый кадр — чтобы прогрев сцены увидел пламя, а не пустоту
 
     // ---- угли-искры ----
-    const EMBERS = 60;
+    // Каждая искра живёт сама по себе: рождается над углями, всплывает,
+    // виляет, сносится ветром и гаснет. Яркость идёт вершинным цветом —
+    // на углях искры просто не вылетают.
+    const EMBERS = 64;
     const eGeo = new THREE.BufferGeometry();
-    const ePos = new Float32Array(EMBERS * 3); // нули — позиция в шейдере
-    const eSeed = new Float32Array(EMBERS);
-    for (let i = 0; i < EMBERS; i++) eSeed[i] = Math.random();
-    eGeo.setAttribute('position', new THREE.BufferAttribute(ePos, 3));
-    eGeo.setAttribute('aSeed', new THREE.BufferAttribute(eSeed, 1));
-    const eMat = new THREE.ShaderMaterial({
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      fog: false,
-      uniforms: {
-        uTime: this.time,
-        uBurn: this.burnU,
-        uPR: { value: Math.min(window.devicePixelRatio, 1.75) },
-      },
-      vertexShader: /* glsl */ `
-        attribute float aSeed;
-        uniform float uTime;
-        uniform float uPR;
-        varying float vLife;
-        void main() {
-          float speed = 0.35 + aSeed * 0.5;
-          float life = fract(uTime * speed + aSeed * 7.31);
-          vLife = life;
-          vec3 p;
-          float ang = aSeed * 40.0 + uTime * (0.5 + aSeed);
-          float rad = 0.06 + aSeed * 0.14 + life * 0.12;
-          p.x = cos(ang) * rad + sin(life * 12.0 + aSeed * 20.0) * 0.05;
-          p.z = sin(ang) * rad + cos(life * 10.0 + aSeed * 30.0) * 0.05;
-          p.y = 0.25 + life * (1.3 + aSeed * 0.9);
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          gl_PointSize = (2.5 * (1.0 - life) + 1.0) * uPR * (3.0 / max(-mv.z, 0.5));
-          gl_Position = projectionMatrix * mv;
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        varying float vLife;
-        uniform float uBurn;
-        void main() {
-          float d = length(gl_PointCoord - 0.5);
-          if (d > 0.5) discard;
-          float a = (1.0 - vLife) * smoothstep(0.0, 0.08, vLife);
-          a *= smoothstep(0.1, 0.5, uBurn); // угли почти не искрят
-          vec3 col = mix(vec3(1.0, 0.7, 0.2), vec3(0.9, 0.2, 0.03), vLife);
-          gl_FragColor = vec4(col * 2.0, a);
-        }
-      `,
-    });
-    const embers = new THREE.Points(eGeo, eMat);
+    eGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(EMBERS * 3), 3));
+    eGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(EMBERS * 3), 3));
+    this.sparkPos = eGeo.attributes.position;
+    this.sparkCol = eGeo.attributes.color;
+    this.sparks = [];
+    for (let i = 0; i < EMBERS; i++) {
+      const s = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: Math.random(), rate: 0.5, on: false };
+      this.sparks.push(s);
+    }
+    const spCanvas = document.createElement('canvas');
+    spCanvas.width = spCanvas.height = 32;
+    const spctx = spCanvas.getContext('2d');
+    const spg = spctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    spg.addColorStop(0, 'rgba(255,220,150,1)');
+    spg.addColorStop(0.4, 'rgba(255,130,40,0.6)');
+    spg.addColorStop(1, 'rgba(255,80,0,0)');
+    spctx.fillStyle = spg;
+    spctx.fillRect(0, 0, 32, 32);
+    const spTex = new THREE.CanvasTexture(spCanvas);
+    spTex.colorSpace = THREE.SRGBColorSpace;
+    const embers = new THREE.Points(
+      eGeo,
+      new THREE.PointsMaterial({
+        size: 0.04,
+        map: spTex,
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
+        fog: false,
+      })
+    );
     embers.frustumCulled = false;
     embers.renderOrder = 3;
     this.group.add(embers);
@@ -301,25 +326,32 @@ export class Campfire {
     this.light.position.set(0, 0.9, 0);
     this.group.add(this.light);
 
-    // тёплое свечение на снегу вокруг
+    // мягкое сияние вокруг пламени: тёплое ядро, к краю сходит в ноль
     const glowCanvas = document.createElement('canvas');
     glowCanvas.width = glowCanvas.height = 128;
     const gctx = glowCanvas.getContext('2d');
     const gg = gctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    gg.addColorStop(0, 'rgba(255,150,60,0.28)');
-    gg.addColorStop(1, 'rgba(255,120,40,0)');
+    // ядро слабее эталонного (0.95): у нас вокруг белый снег и bloom, на такой
+    // подложке яркое сияние съедает сами язычки
+    gg.addColorStop(0, 'rgba(255,168,74,0.5)');
+    gg.addColorStop(0.35, 'rgba(255,110,30,0.2)');
+    gg.addColorStop(1, 'rgba(255,80,10,0)');
     gctx.fillStyle = gg;
     gctx.fillRect(0, 0, 128, 128);
+    const glowTex = new THREE.CanvasTexture(glowCanvas);
+    glowTex.colorSpace = THREE.SRGBColorSpace;
     this.glow = new THREE.Sprite(
       new THREE.SpriteMaterial({
-        map: new THREE.CanvasTexture(glowCanvas),
+        map: glowTex,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         transparent: true,
+        toneMapped: false,
+        fog: false,
       })
     );
-    this.glow.position.y = 0.75;
-    this.glow.scale.setScalar(5.5);
+    this.glow.scale.set(2.6, 2.2, 1);
+    this.glow.position.y = 0.06 + 1.1; // остальное задаёт update
     this.glow.renderOrder = 2;
     this.group.add(this.glow);
   }
@@ -335,9 +367,41 @@ export class Campfire {
     return 0.12 + 0.88 * this.burn;
   }
 
-  update(dt, t, windLevel) {
-    this.time.value = t;
+  // Кадр пламени: снизу широкое, кверху сужается и рвётся турбулентностью,
+  // ядро выбелено. Всё полотно медленно качает вбок — огонь «дышит».
+  // b — сила горения: на углях язычки истаивают в ноль.
+  _drawFlame(t, b) {
+    const d = this.fimg.data;
+    const k = ss(0.12, 0.45, b);
+    let i = 0;
+    for (let y = 0; y < FLAME_H; y++) {
+      const v = 1 - y / FLAME_H; // 0 у углей, 1 на верхушке
+      const taper = Math.pow(1 - v, 0.62); // кверху язычок тоньше
+      const sway = Math.sin(t * 2.1 + v * 3.6) * 0.1 * v + Math.sin(t * 3.7 + v * 6) * 0.045 * v;
+      for (let x = 0; x < FLAME_W; x++, i++) {
+        const u = x / FLAME_W - 0.5;
+        const turb = fbm((x / FLAME_W) * 3.2, (y / FLAME_H) * 3.4 + t * 1.35, 8, 64, 4, 1451) - 0.5;
+        const dist = Math.abs(u - sway) / (taper * 0.6 + 0.02);
+        const val = 1 - dist + turb * (0.45 + v * 1.05) - v * 0.42;
+        // сверху язычок тает, у самого низа — уходит в угли, а не режется краем
+        const a = ss(0.26, 0.58, val) * (1 - ss(0.56, 0.95, v)) * ss(0, 0.045, v);
+        const core = ss(0.55, 0.92, val) * (1 - ss(0.2, 0.72, v)) * 0.95;
+        const m = ss(0.3, 0.7, val);
+        const r = 186 + (255 - 186) * m;
+        const g = 30 + (146 - 30) * m;
+        const bl = 4 + (26 - 4) * m;
+        const o = i * 4;
+        d[o] = r + (255 - r) * core;
+        d[o + 1] = g + (240 - g) * core;
+        d[o + 2] = bl + (196 - bl) * core;
+        d[o + 3] = a * 255 * k;
+      }
+    }
+    this.fctx.putImageData(this.fimg, 0, 0);
+    this.ftex.needsUpdate = true;
+  }
 
+  update(dt, t, windLevel) {
     // топливо выгорает; сила горения плавно догоняет запас (огонь оседает
     // не мгновенно), на нуле остаются тлеющие угли
     this.fuel = Math.max(0, this.fuel - dt / FUEL_TIME);
@@ -347,26 +411,71 @@ export class Campfire {
     const b = Math.min(1, this.burn + this._flare * 0.35); // вспышка от полена
     this.burnU.value = b;
 
-    // мерцание света × сила горения
-    const fl =
-      0.82 +
-      0.1 * Math.sin(t * 11.3) +
-      0.06 * Math.sin(t * 23.7 + 1.3) +
-      0.05 * Math.sin(t * 5.1 + 4.2);
-    this.light.intensity = 50 * fl * (0.08 + 0.92 * b);
+    // Мерцание: медленное дыхание от fbm плюс быстрая дрожь. Синусы дают
+    // слышимый период, шум — нет, поэтому огонь не «тикает».
+    const fl = 0.72 + fbm(t * 1.6, 0.5, 64, 64, 3, 99) * 0.5 + Math.sin(t * 17.3) * 0.045;
+    // 23 вместо прежних 50: на белом снегу да с ACES и bloom прежняя яркость
+    // выжигала всё вокруг костра в чистый белый, и на полу проступали круги —
+    // ступеньки проталины. С 23 остаётся тёплая лужа света, а огонь видно.
+    this.light.intensity = 23 * fl * (0.08 + 0.92 * b);
     this.light.position.x = Math.sin(t * 7.7) * 0.04;
     this.light.position.z = Math.cos(t * 6.3) * 0.04;
-    this.glow.material.opacity = (0.75 + 0.25 * fl) * (0.12 + 0.88 * b);
-    this.glow.scale.setScalar(5.5 * (0.45 + 0.55 * b));
     // угли дышат вместе с пламенем; гаснут последними (медленнее, чем свет)
-    this.emberMat.emissiveIntensity = (1.5 + fl * 1.3) * (0.3 + 0.7 * b);
+    this.emberMat.emissiveIntensity = (1.35 + fl * 1.25) * (0.3 + 0.7 * b);
 
-    // пламя оседает: язычки ниже, база остаётся на углях
+    // Сияние: спрайт стоит НА углях. Раньше он был вдвое шире и утоплен в
+    // землю — террейн срезал его нижнюю половину, и на снегу проступал
+    // светлый круг. Теперь нижняя кромка держится над снегом.
+    const gs = 0.45 + 0.55 * b;
+    this.glow.material.opacity = (0.4 + 0.3 * fl) * (0.12 + 0.88 * b);
+    this.glow.scale.set((2.5 + fl * 0.4) * gs, (2.1 + fl * 0.35) * gs, 1);
+    this.glow.position.y = 0.06 + this.glow.scale.y * 0.5;
+
+    // пламя оседает: язычки ниже, база остаётся на углях; мерцание качает
+    // ширину и высоту полотен, каждое следующее чуть шире соседа
     const fs = 0.25 + 0.75 * b;
-    for (const f of this.flames) {
-      f.scale.set(0.55 + 0.45 * fs, fs, 1);
-      f.position.y = 0.095 + 0.525 * fs;
+    for (let i = 0; i < this.flames.length; i++) {
+      const f = this.flames[i];
+      f.scale.set((0.55 + 0.45 * fs) * (0.86 + fl * 0.22 + i * 0.03), fs * (0.8 + fl * 0.34), 1);
+      f.position.y = 0.095 + (FLAME_PH / 2) * f.scale.y;
     }
+    // текстуру пламени пересчитываем 30 раз в секунду: покадрово на телефоне
+    // это заметный кусок кадра, а разницы на глаз нет
+    this._fAcc += dt;
+    if (this._fAcc >= 1 / FLAME_FPS) {
+      this._fAcc = 0;
+      this._drawFlame(t, b);
+    }
+
+    // искры
+    const pos = this.sparkPos;
+    const col = this.sparkCol;
+    for (let k = 0; k < this.sparks.length; k++) {
+      const e = this.sparks[k];
+      e.life -= dt * e.rate;
+      if (e.life <= 0) {
+        e.life = 1;
+        e.rate = 0.4 + Math.random() * 0.45;
+        e.on = Math.random() < 0.12 + 0.88 * b; // на углях вылетают одиночки
+        e.x = (Math.random() - 0.5) * 0.34;
+        e.y = 0.14;
+        e.z = (Math.random() - 0.5) * 0.34;
+        e.vx = (Math.random() - 0.5) * 0.22;
+        e.vy = 0.45 + Math.random() * 0.8;
+        e.vz = (Math.random() - 0.5) * 0.22;
+      }
+      e.vx += (Math.sin(t * 3 + k) * 0.12 + windLevel * 0.7) * dt;
+      e.vz += (Math.cos(t * 2.6 + k) * 0.1 + windLevel * 0.25) * dt;
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+      e.z += e.vz * dt;
+      pos.setXYZ(k, e.x, e.y, e.z);
+      // разгорается на вылете, гаснет к концу жизни и краснеет
+      const a = e.on ? e.life * Math.min(1, (1 - e.life) * 8) : 0;
+      col.setXYZ(k, a, a * (0.5 + 0.5 * e.life), a * (0.2 + 0.4 * e.life));
+    }
+    pos.needsUpdate = true;
+    col.needsUpdate = true;
 
     // дым поднимается и сносится ветром; у затухающего костра он жиже
     const smokeK = 0.3 + 0.7 * b;
