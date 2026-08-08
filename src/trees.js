@@ -86,6 +86,11 @@ function collectPineVariants(root) {
       box.union(geo.boundingBox);
     }
     const height = Math.max(box.max.y - box.min.y, 1e-3);
+    // Радиус кроны в долях от роста: сосна ставится с произвольным поворотом,
+    // поэтому берём больший из полуразмеров по x/z - получается круг, который
+    // крону гарантированно накрывает при любом повороте. Нужен, чтобы
+    // отбраковать сосну, влезшую ветками в постройку (см. cull).
+    v.crown = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2 / height;
     v.pre = new THREE.Matrix4()
       .makeScale(1 / height, 1 / height, 1 / height)
       .multiply(
@@ -278,6 +283,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
         y: dummy.position.y,
         h: s,
         r: ob ? ob.r : 0.12,
+        crown: v.crown * s * j, // радиус кроны в метрах - для cull
         ob,
         sapling: !ob,
         parts: meshes.map((m) => ({ mesh: m, i })),
@@ -292,6 +298,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   }
 
   // ---- камни ----
+  const boulders = []; // записи для cull, как pines у сосен
   const rockSpots = scatter(rockCount, 10, 130, 6);
   const perRock = rocks.map(() => []);
   rockSpots.forEach((sp, i) => perRock[i % rocks.length].push(sp));
@@ -314,7 +321,17 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       dummy.updateMatrix();
       inst.multiplyMatrices(dummy.matrix, rock.pre);
       meshes.forEach((m) => m.setMatrixAt(i, inst));
-      if (s > 0.8) obstacles.push({ x, z, r: s * 0.5 });
+      let ob = null;
+      if (s > 0.8) {
+        ob = { x, z, r: s * 0.5 };
+        obstacles.push(ob);
+      }
+      boulders.push({
+        x, z,
+        crown: s * 0.5, // валун нормирован в единичный куб: радиус = половина роста
+        ob,
+        parts: meshes.map((m) => ({ mesh: m, i })),
+      });
     });
     meshes.forEach((m) => {
       m.instanceMatrix.needsUpdate = true;
@@ -322,5 +339,60 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     });
   });
 
-  return { group, obstacles, pines };
+  // ---- отбраковка того, что налезло на постройку ----
+  // Зачем отдельным проходом, а не фильтром в scatter: раскладка леса - часть
+  // геймплея, «мир копится». Сваленное дерево ищется в сейве по НОМЕРУ сосны,
+  // а номер - это её место в общей очереди. Любой отказ внутри scatter сдвигает
+  // очередь (цикл добирает кандидатов, пока не наберёт count) и заодно уводит
+  // курсор ГПСЧ - после такой правки весь лес переезжает, а старый сейв
+  // показывает пни не там. Поэтому позиции не трогаем вовсе: раскладка
+  // считается ровно как раньше, а лишнее просто убирается из мира уже после -
+  // нулевым масштабом инстанса и снятием коллайдера. Номера остаются на местах.
+  //
+  // zones - повёрнутые прямоугольники габаритов построек:
+  //   { x, z, rotY, hx, hz, margin } (см. cabin.footprint).
+  const _zero = new THREE.Vector3(0, 0, 0);
+  const _hide = new THREE.Matrix4();
+  // зазор от точки до прямоугольника, м (отрицательный - точка внутри)
+  const gapToZone = (x, z, zn) => {
+    const c = Math.cos(zn.rotY || 0);
+    const sn = Math.sin(zn.rotY || 0);
+    const dx = x - zn.x;
+    const dz = z - zn.z;
+    const rx = c * dx - sn * dz; // мир -> оси постройки
+    const rz = sn * dx + c * dz;
+    const ax = Math.abs(rx) - zn.hx;
+    const az = Math.abs(rz) - zn.hz;
+    if (ax <= 0 && az <= 0) return Math.max(ax, az);
+    return Math.hypot(Math.max(ax, 0), Math.max(az, 0));
+  };
+  const hide = (item) => {
+    _hide.makeTranslation(item.x, 0, item.z).scale(_zero);
+    for (const part of item.parts) {
+      part.mesh.setMatrixAt(part.i, _hide);
+      part.mesh.instanceMatrix.needsUpdate = true;
+    }
+    if (item.ob) {
+      const idx = obstacles.indexOf(item.ob);
+      if (idx >= 0) obstacles.splice(idx, 1);
+      item.ob = null;
+    }
+    item.culled = true;
+  };
+  const cull = (zones) => {
+    let n = 0;
+    for (const zn of zones) {
+      const keep = zn.margin || 0; // запас, чтобы ветки не скребли по кровле
+      for (const item of [...pines, ...boulders]) {
+        if (item.culled) continue;
+        if (gapToZone(item.x, item.z, zn) < item.crown + keep) {
+          hide(item);
+          n++;
+        }
+      }
+    }
+    return n;
+  };
+
+  return { group, obstacles, pines, cull };
 }
