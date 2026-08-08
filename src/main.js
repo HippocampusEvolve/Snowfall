@@ -148,6 +148,12 @@ const [trees, cabin] = await Promise.all([
   createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }]),
   createCabin(terrain, CABIN),
 ]);
+// Круг avoid в createTrees держит от домика только СТВОЛЫ, и то с натяжкой:
+// сруб - повёрнутый прямоугольник 8.1 x 9.6 м, а крона взрослой сосны сама
+// по себе до 4 м в радиусе. Поэтому габарит домика домик и меряет сам, а лес
+// убирает по нему то, что залезло ветками внутрь. Отбраковка идёт ПОСЛЕ
+// раскладки и не двигает ни одну другую сосну (см. cull в trees.js).
+trees.cull([{ ...cabin.footprint, margin: 0.5 }]);
 scene.add(trees.group);
 scene.add(cabin.group);
 snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
@@ -468,8 +474,14 @@ function warmUp() {
   requestAnimationFrame(() => {
     const culled = [];
     scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
+    // материал вырытого снега прогревать нечем: до первого копка в сцене нет
+    // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
+    // материал вырытого снега прогревать нечем: до первого копка в сцене нет
+    // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
+    digger.primeStart();
     renderer.shadowMap.needsUpdate = true; // и depth-варианты теней в тот же кадр
     composer.render();
+    digger.primeEnd();
     for (const o of culled) o.frustumCulled = true;
     view.render(renderer);
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);

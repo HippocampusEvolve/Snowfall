@@ -50,6 +50,10 @@ export class Lumber {
       p.lieOb = null; // коллайдер лежащего ствола (снимается при исчезновении)
       p.wobA = 0; // дрожь от удара: амплитуда и фаза
       p.wobT = 0;
+      // сосна, убранная из мира отбраковкой (налезла на дом, см. cull в
+      // trees.js): её нет ни в кадре, ни в коллайдерах - и топором её тоже
+      // нет. Номер за ней остаётся, чтобы не поехали номера соседей в сейве.
+      if (p.culled) p.state = 'gone';
     }
   }
 
@@ -288,6 +292,7 @@ export class Lumber {
   serialize() {
     const out = [];
     for (const p of this.pines) {
+      if (p.culled) continue; // убранной из мира сосны в памяти мира нет
       if (p.state === 'up') {
         if (p.hits > 0) out.push([p.id, 0, p.hits]); // зарубки тоже память
       } else {
@@ -301,7 +306,7 @@ export class Lumber {
   restore(arr, playerPos) {
     for (const [id, downed, a, yaw] of arr) {
       const p = this.pines[id];
-      if (!p) continue;
+      if (!p || p.culled) continue; // старый сейв мог помнить отбракованную сосну
       if (!downed) {
         p.hits = a;
       } else {

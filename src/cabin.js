@@ -39,6 +39,11 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     -s * box.min.y,
     -s * (box.min.z + box.max.z) / 2
   );
+  // Габарит сруба в его собственных осях (полуразмеры по x/z, вместе со свесом
+  // кровли). Отдаём наружу как footprint: лес обмеряет по нему, что налезло
+  // на дом, и убирает это из мира (см. cull в trees.js). Круг вокруг центра
+  // тут не годится - дом вытянут и повёрнут, круг либо режет лишнее, либо
+  // пропускает угол.
   const half = new THREE.Vector2((size.x * s) / 2, (size.z * s) / 2);
 
   const group = new THREE.Group();
@@ -317,6 +322,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     group, obstacles, update, toggleDoor,
     get doorOpen() { return doorOpen; },
     doorCenter, floorHeightAt, isInside, snowMask, stovePos,
+    // повёрнутый прямоугольник габарита в мировых координатах
+    footprint: { x, z, rotY, hx: half.x, hz: half.y },
   };
 }
 
