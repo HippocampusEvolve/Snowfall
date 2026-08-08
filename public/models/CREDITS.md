@@ -5,5 +5,16 @@
 - `nature/rocks.glb` — Quaternius, Ultimate Stylized Nature Pack (CC0, quaternius.com). Исходные `Rock_1..5.fbx` собраны в один glb и сжаты Draco скриптом `tools/rocks-to-glb.mjs`
 - `props/brass_pot_01`, `props/book_encyclopedia_set_01` — Poly Haven (CC0, polyhaven.com/a/brass_pot_01, polyhaven.com/a/book_encyclopedia_set_01) — чугунок и книги в интерьере домика
 - `../tex/snow_02_*.webp` — Poly Haven (CC0, polyhaven.com/a/snow_02)
+- `props/shovel.glb` — **наша модель**, собрана в Blender инструментом
+  `blender-web-agent-kit` и запечена в один атлас (base + ORM, 512). Внешних
+  источников не использует, лицензия проекта. Несжатая намеренно: на 616
+  треугольниках Draco экономит десятки килобайт, а Winter Tower, куда едет та же
+  геометрия (со своим, холодным атласом), декодера не держит вовсе
 
-Костровище — процедурное (код, `src/campfire.js`), внешних моделей не использует.
+- `props/firepit.glb` — **наша модель**, кольцо камней костровища, собрано в
+  Blender инструментом `blender-web-agent-kit` и запечено в один атлас
+  (base + ORM, 1024). Внешних источников не использует, лицензия проекта.
+  Несжатая по той же причине, что и лопата: 584 треугольника
+
+Огонь костра — пламя, искры, дым, угли и свет — по-прежнему процедурный
+(код, `src/campfire.js`), моделью заменено только кольцо камней.

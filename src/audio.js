@@ -1,5 +1,7 @@
 // Процедурный звук на WebAudio: вой ветра, хруст снега, костёр, дыхание.
 // Никаких внешних ассетов — всё синтезируется из шума.
+import { impulseResponse, SEND } from './reverb.js';
+
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 export class GameAudio {
   constructor() {
@@ -24,6 +26,15 @@ export class GameAudio {
     this.master.gain.value = 0.85;
     this.master.connect(ctx.destination);
 
+    // Шина разовых звуков: шаги, инструмент, костёр, треск деревьев. Ветер идёт
+    // мимо неё прямо в мастер — свёртка шума шумом ничего не добавляет, а
+    // считается каждый кадр.
+    this.sfx = ctx.createGain();
+    this.sfx.gain.value = 1;
+    this.sfx.connect(this.master);
+
+    this._buildSpaces();
+
     // общий буфер белого шума
     const len = ctx.sampleRate * 2;
     this.noise = ctx.createBuffer(1, len, ctx.sampleRate);
@@ -34,6 +45,36 @@ export class GameAudio {
     this._scheduleWeather();
     this._buildCampfire();
     this._scheduleTreeCrack();
+  }
+
+  // ---------- пространство ----------
+  // Три свёртки, включённые параллельно самому звуку: сухой удар идёт прямо и
+  // остаётся нетронутым, а копия уходит в место и возвращается хвостом. Место
+  // выбирается не переключателем, а перекрёстным затуханием в setIndoor —
+  // иначе в дверях и на входе в нору хвост щёлкал бы при каждом шаге.
+  _buildSpaces() {
+    const ctx = this.ctx;
+    this.send = ctx.createGain();
+    this.send.gain.value = 1;
+    this.sfx.connect(this.send);
+
+    const space = (kind, level) => {
+      const conv = ctx.createConvolver();
+      conv.normalize = true;
+      conv.buffer = impulseResponse(ctx, kind);
+      const g = ctx.createGain();
+      g.gain.value = level;
+      this.send.connect(conv);
+      conv.connect(g);
+      g.connect(this.master);
+      return g;
+    };
+    // Игрок начинается снаружи, поэтому дом и нора входят с нуля.
+    this.spaces = {
+      forest: space('forest', SEND.forest),
+      cabin: space('cabin', 0),
+      cave: space('cave', 0),
+    };
   }
 
   // ---------- костёр ----------
@@ -48,7 +89,7 @@ export class GameAudio {
     this.fireLP.frequency.value = 20000;
     this.fireBus.connect(this.firePan);
     this.firePan.connect(this.fireLP);
-    this.fireLP.connect(this.master);
+    this.fireLP.connect(this.sfx);
 
     // шипение и низкий гул пламени
     const hiss = ctx.createBufferSource();
@@ -137,7 +178,7 @@ export class GameAudio {
       g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
       src.connect(bp);
       bp.connect(g);
-      g.connect(this.master);
+      g.connect(this.sfx);
       src.start(t, Math.random() * 1.5, 0.12);
     }
   }
@@ -150,7 +191,7 @@ export class GameAudio {
 
     const out = ctx.createGain();
     out.gain.value = 0.5;
-    out.connect(this.master);
+    out.connect(this.sfx);
 
     const o = ctx.createOscillator();
     o.type = 'sine';
@@ -260,7 +301,7 @@ export class GameAudio {
     soft.frequency.value = 1500 + cold * 600;
     soft.Q.value = 0.5;
     out.connect(soft);
-    soft.connect(this.master);
+    soft.connect(this.sfx);
 
     // врез: шумовая пачка с ниспадающим полосовым фильтром
     const cut = ctx.createBufferSource();
@@ -324,7 +365,7 @@ export class GameAudio {
 
     const out = ctx.createGain();
     out.gain.value = 0.42 + Math.random() * 0.1;
-    out.connect(this.master);
+    out.connect(this.sfx);
 
     const wh = ctx.createBufferSource();
     wh.buffer = this.noise;
@@ -374,7 +415,7 @@ export class GameAudio {
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
     src.connect(bp);
     bp.connect(g);
-    g.connect(this.master);
+    g.connect(this.sfx);
     src.start(t, Math.random() * 1.5, 0.22);
   }
 
@@ -396,7 +437,7 @@ export class GameAudio {
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
     tick.connect(bp);
     bp.connect(g);
-    g.connect(this.master);
+    g.connect(this.sfx);
     tick.start(t, Math.random(), 0.11);
   }
 
@@ -418,7 +459,7 @@ export class GameAudio {
 
     const out = ctx.createGain();
     out.gain.value = 0.5 + Math.random() * 0.1;
-    out.connect(this.master);
+    out.connect(this.sfx);
 
     // сам «тюк»: узкая шумовая пачка с мгновенной атакой
     const hit = ctx.createBufferSource();
@@ -437,15 +478,41 @@ export class GameAudio {
     hg.connect(out);
     hit.start(t, Math.random() * 1.5, 0.1);
 
-    // корпус ствола: короткий деревянный бум
+    // Корпус ствола. Не один синус, а набор мод: у деревянного бруска они идут
+    // как 1 : 2.76 : 5.40 — это изгибные моды свободного стержня, и именно их
+    // отношение делает удар ударом ПО БРЕВНУ, а не ударом вообще. Высокие моды
+    // гаснут первыми, поэтому «тюк» на слух темнеет, а не просто затихает.
+    // Один синус этого дать не мог, сколько его ни настраивай.
+    const f0 = 170 + Math.random() * 30;
+    const modes = [
+      [1, 0.35, 0.12],
+      [2.76, 0.13, 0.07],
+      [5.4, 0.05, 0.04],
+    ];
+    for (const [ratio, gain, dur] of modes) {
+      const m = ctx.createOscillator();
+      m.type = 'sine';
+      // Лёгкая расстройка: идеально кратные моды звучат электронным органом.
+      m.frequency.value = f0 * ratio * (1 + (Math.random() - 0.5) * 0.014);
+      const mg = ctx.createGain();
+      mg.gain.setValueAtTime(0.0001, t);
+      mg.gain.linearRampToValueAtTime(gain, t + 0.003);
+      mg.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      m.connect(mg);
+      mg.connect(out);
+      m.start(t);
+      m.stop(t + dur + 0.03);
+    }
+
+    // низкий провал комля под ударом: он есть только у самого удара, не у мод
     const o = ctx.createOscillator();
     o.type = 'sine';
-    o.frequency.setValueAtTime(170 + Math.random() * 30, t);
+    o.frequency.setValueAtTime(f0 * 0.62, t);
     o.frequency.exponentialRampToValueAtTime(70, t + 0.07);
     const og = ctx.createGain();
     og.gain.setValueAtTime(0.0001, t);
-    og.gain.linearRampToValueAtTime(0.35, t + 0.004);
-    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    og.gain.linearRampToValueAtTime(0.16, t + 0.004);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
     o.connect(og);
     og.connect(out);
     o.start(t);
@@ -487,7 +554,7 @@ export class GameAudio {
       g.gain.exponentialRampToValueAtTime(0.0001, st + 0.05);
       src.connect(bp);
       bp.connect(g);
-      g.connect(this.master);
+      g.connect(this.sfx);
       src.start(st, Math.random() * 1.5, 0.06);
     }
     // само полено падает рядом в снег
@@ -519,7 +586,7 @@ export class GameAudio {
       g.gain.exponentialRampToValueAtTime(0.0001, st + 0.09 + k * 0.1);
       src.connect(bp);
       bp.connect(g);
-      g.connect(this.master);
+      g.connect(this.sfx);
       src.start(st, Math.random() * 1.5, 0.25);
       u += 0.3 - 0.22 * k + Math.random() * 0.08; // скрипы всё чаще
       n++;
@@ -541,7 +608,7 @@ export class GameAudio {
     lp.type = 'lowpass';
     lp.frequency.value = 6000 / (1 + dist * 0.12);
     out.connect(lp);
-    lp.connect(this.master);
+    lp.connect(this.sfx);
 
     // треск разрыва комля — плотная пачка щелчков прямо перед ударом
     for (let i = 0; i < 6; i++) {
@@ -609,7 +676,7 @@ export class GameAudio {
       og.gain.linearRampToValueAtTime(0.32 - i * 0.08, t + 0.004);
       og.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
       o.connect(og);
-      og.connect(this.master);
+      og.connect(this.sfx);
       o.start(t);
       o.stop(t + 0.13);
       const src = ctx.createBufferSource();
@@ -624,7 +691,7 @@ export class GameAudio {
       g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
       src.connect(bp);
       bp.connect(g);
-      g.connect(this.master);
+      g.connect(this.sfx);
       src.start(t, Math.random() * 1.5, 0.09);
     }
   }
@@ -643,8 +710,14 @@ export class GameAudio {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
   }
 
-  // k: 0..1 — насколько игрок «внутри» (стены глушат ветер и костёр)
-  setIndoor(k) {
+  // k: 0..1 — насколько игрок «внутри» (стены глушат ветер и костёр).
+  //
+  // cave: 0..1 — чем именно он укрыт. Ноль — бревенчатый дом, единица — нора,
+  // вырытая в снегу. Разница слышна не громкостью, а хвостом: дом отвечает
+  // короткой деревянной комнатой, а снег не отвечает вообще, и мёртвая тишина
+  // под толщей — это то, ради чего нору роют. Раньше оба укрытия звучали
+  // одинаково, потому что до хвоста дело просто не доходило.
+  setIndoor(k, cave = 0) {
     this._indoorK = clamp(k, 0, 1); // треск деревьев тоже глушится стенами
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
@@ -652,6 +725,12 @@ export class GameAudio {
     this.windLP.frequency.setTargetAtTime(f, t, 0.3);
     this.fireLP.frequency.setTargetAtTime(f, t, 0.3);
     this.windMaster.gain.setTargetAtTime(0.4 * (1 - 0.72 * k), t, 0.3);
+
+    const inside = clamp(k, 0, 1);
+    const den = clamp(cave, 0, 1);
+    this.spaces.forest.gain.setTargetAtTime(SEND.forest * (1 - inside), t, 0.35);
+    this.spaces.cabin.gain.setTargetAtTime(SEND.cabin * inside * (1 - den), t, 0.35);
+    this.spaces.cave.gain.setTargetAtTime(SEND.cave * inside * den, t, 0.35);
   }
 
   // ---------- дверь: скрип петель + щеколда ----------
@@ -662,7 +741,7 @@ export class GameAudio {
 
     const out = ctx.createGain();
     out.gain.value = 0.55;
-    out.connect(this.master);
+    out.connect(this.sfx);
 
     // щёлчок щеколды: при открытии — сразу, при закрытии — в конце хода
     const ct = open ? t : t + 0.5;
@@ -857,7 +936,7 @@ export class GameAudio {
       lp.frequency.value = (5200 - far * 3800) * (1 - 0.8 * this._indoorK);
       out.connect(pan);
       pan.connect(lp);
-      lp.connect(this.master);
+      lp.connect(this.sfx);
 
       // сухой щелчок раскалывающегося волокна
       const crack = ctx.createBufferSource();
@@ -920,7 +999,7 @@ export class GameAudio {
     src.connect(bp);
     bp.connect(lp);
     lp.connect(g);
-    g.connect(this.master);
+    g.connect(this.sfx);
     src.start(t, Math.random() * 1.2, 0.8);
   }
 
@@ -939,7 +1018,7 @@ export class GameAudio {
     soft.frequency.value = (running ? 1900 : 1500) + this.cold * 700;
     soft.Q.value = 0.5;
     out.connect(soft);
-    soft.connect(this.master);
+    soft.connect(this.sfx);
 
     // хруст — серия шумовых «зёрен»: удар пятки + дробное сминание наста.
     // Чем злее мороз (this.cold), тем выше и суше скрипит снег под ногой —
@@ -999,7 +1078,7 @@ export class GameAudio {
 
     const out = ctx.createGain();
     out.gain.value = (running ? 0.5 : 0.34) * (0.85 + Math.random() * 0.3);
-    out.connect(this.master);
+    out.connect(this.sfx);
 
     // глухой удар каблука
     const o = ctx.createOscillator();
@@ -1074,7 +1153,7 @@ export class GameAudio {
     soft.frequency.value = wood ? 2600 : 1300;
     soft.Q.value = 0.5;
     out.connect(soft);
-    soft.connect(this.master);
+    soft.connect(this.sfx);
 
     // низкий «бум» веса: по доскам — короткий удар со свипом, по снегу —
     // ровное придавливание с длинным мягким хвостом
@@ -1088,7 +1167,9 @@ export class GameAudio {
     }
     const og = ctx.createGain();
     og.gain.setValueAtTime(0.0001, t);
-    og.gain.linearRampToValueAtTime(wood ? 0.5 : 0.4, t + (wood ? 0.008 : 0.04));
+    // 4 мс по доскам, а не 8: у дерева атака мгновенная, и восьми уже хватало,
+    // чтобы приземление читалось мягким. Разницу видно только счётом.
+    og.gain.linearRampToValueAtTime(wood ? 0.5 : 0.4, t + (wood ? 0.004 : 0.04));
     og.gain.exponentialRampToValueAtTime(0.0001, t + (wood ? 0.19 : 0.34));
     o.connect(og);
     og.connect(out);
@@ -1111,7 +1192,7 @@ export class GameAudio {
     }
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(wood ? 0.5 : 0.42, t + (wood ? 0.005 : 0.022));
+    g.gain.linearRampToValueAtTime(wood ? 0.5 : 0.42, t + (wood ? 0.003 : 0.022));
     g.gain.exponentialRampToValueAtTime(0.0001, t + (wood ? 0.13 : 0.26));
     src.connect(filt);
     filt.connect(g);

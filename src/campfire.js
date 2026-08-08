@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { snowTint } from './snowtint.js';
+import { createGLTFLoader } from './gltfload.js';
+import { asset } from './asset.js';
 
 // Костёр: процедурное костровище — кольцо мятых камней, зола, поленья с
 // процедурной корой, тлеющие угли; шейдерное пламя, искры, дым, мерцающий
@@ -12,6 +14,44 @@ import { snowTint } from './snowtint.js';
 // раздуть новым поленом (addFuel). Никакого индикатора: топливо видно по огню.
 const FUEL_TIME = 480; // секунд от полного костра до углей
 const BURN_MIN = 0.1; // «угли»: нижний предел горения
+
+// Кольцо камней собрано в Blender (blender-web-agent-kit) и запечено в один
+// материал: base + ORM, 584 треугольника, один draw call. Камни разной породы
+// (плитняк, колотый, окатанный) лежат плоской стороной вниз, стык к стыку, а
+// внутренние бока закопчены — копоть запечена в атлас по расстоянию до огня,
+// поэтому чернота приходится ровно на ту сторону, что смотрит в пламя.
+// Прежнее процедурное кольцо (одиннадцать мятых икосфер) — в истории файла.
+const PIT_MODEL = 'models/props/firepit.glb';
+
+let pitProto = null;
+const pitWaiting = [];
+let pitLoading = null;
+
+/** Грузит кольцо камней один раз. Полосу загрузки ведёт DefaultLoadingManager. */
+export function loadFirepitModel() {
+  if (!pitLoading) {
+    pitLoading = createGLTFLoader()
+      .loadAsync(asset(PIT_MODEL))
+      .then((gltf) => {
+        pitProto = gltf.scene;
+        pitProto.traverse((o) => {
+          if (!o.isMesh) return;
+          o.castShadow = true;
+          o.receiveShadow = true;
+          // шероховатость лежит в ORM, множитель её не трогает
+          o.material.roughness = 1;
+          o.material.metalness = 0;
+          // у огня снег на камнях тает — лишь лёгкий иней с наружной стороны
+          snowTint(o.material, '0.6, 0.65, 0.78', 0.18, 0.6);
+        });
+        while (pitWaiting.length) pitWaiting.pop().add(pitProto.clone(true));
+        return pitProto;
+      });
+  }
+  return pitLoading;
+}
+
+loadFirepitModel();
 
 export class Campfire {
   constructor(scene, terrain, x, z) {
@@ -26,51 +66,16 @@ export class Campfire {
     this.burn = 1; // 0..1 — сглаженная сила горения (BURN_MIN на углях)
     this._flare = 0; // вспышка при подброшенном полене
 
-    // ---- костровище: кольцо мятых камней ----
-    const stoneGeos = [];
-    const sv = new THREE.Vector3();
-    const N_STONES = 11;
-    for (let i = 0; i < N_STONES; i++) {
-      const g = new THREE.IcosahedronGeometry(0.13 + ((i * 7) % 4) * 0.03, 1);
-      const seed = i * 17.31;
-      const pos = g.attributes.position;
-      for (let k = 0; k < pos.count; k++) {
-        sv.fromBufferAttribute(pos, k);
-        const n =
-          Math.sin(sv.x * 9.1 + seed) * Math.cos(sv.y * 7.7 + seed * 0.7) +
-          Math.sin(sv.z * 8.3 + seed * 1.3) * 0.7;
-        sv.multiplyScalar(1 + n * 0.12); // рваный колотый профиль
-        pos.setXYZ(k, sv.x, sv.y * 0.62, sv.z); // приплюснутые — лежат, а не парят
-      }
-      g.computeVertexNormals(); // фасеточные грани — колотый камень
-      const a = (i / N_STONES) * Math.PI * 2 + Math.sin(seed) * 0.16;
-      const rad = 0.52 + Math.sin(seed * 2.1) * 0.03;
-      g.applyMatrix4(
-        new THREE.Matrix4().compose(
-          new THREE.Vector3(Math.cos(a) * rad, 0.045, Math.sin(a) * rad),
-          new THREE.Quaternion().setFromEuler(
-            new THREE.Euler(Math.sin(seed) * 0.4, seed, Math.cos(seed * 0.7) * 0.4)
-          ),
-          new THREE.Vector3(1, 1, 1)
-        )
-      );
-      stoneGeos.push(g);
-    }
-    // у огня снег на камнях тает — лишь лёгкий иней с наружной стороны
-    const stoneMat = snowTint(
-      new THREE.MeshStandardMaterial({ color: 0x262b36, roughness: 1 }),
-      '0.6, 0.65, 0.78',
-      0.18,
-      0.6
-    );
-    const stones = new THREE.Mesh(mergeGeometries(stoneGeos), stoneMat);
-    stones.castShadow = true;
-    stones.receiveShadow = true;
-    this.group.add(stones);
+    // ---- костровище: кольцо камней из Blender ----
+    // группа отдаётся сцене сразу, модель доедет в неё сама
+    if (pitProto) this.group.add(pitProto.clone(true));
+    else pitWaiting.push(this.group);
 
     // ---- зола под костром ----
+    // радиус меряется по просвету кладки (0.372 у модели): диск шире просвета
+    // прошёл бы сквозь камни на уровне земли и замерцал в стыках
     const ash = new THREE.Mesh(
-      new THREE.CircleGeometry(0.44, 24).rotateX(-Math.PI / 2),
+      new THREE.CircleGeometry(0.36, 24).rotateX(-Math.PI / 2),
       new THREE.MeshStandardMaterial({ color: 0x0d0a08, roughness: 1 })
     );
     ash.position.y = 0.02;

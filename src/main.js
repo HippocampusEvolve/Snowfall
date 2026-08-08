@@ -22,7 +22,7 @@ import { Stats } from './stats.js';
 import { Critters } from './critters.js';
 import { Woodpile, createChoppingBlock, createCarriedLog, GroundLogs } from './firewood.js';
 import { initSnowCap } from './snowcap.js';
-import { Shovel } from './shovel.js';
+import { Shovel, loadShovelModel } from './shovel.js';
 import { Axe } from './axe.js';
 import { Lumber } from './lumber.js';
 import { ViewModel, VIEW_Z } from './viewmodel.js';
@@ -219,7 +219,10 @@ carriedLog.position.z *= VIEW_Z; // компенсация узкого FOV — 
 view.add(carriedLog);
 
 // лопата — воткнута в снег у поленницы. Ей копают (ЛКМ — срез-штык) и
-// намывают (ПКМ — укладка); без лопаты в руках правок снега нет
+// намывают (ПКМ — укладка); без лопаты в руках правок снега нет.
+// Модель ждём здесь: она догрузилась бы и сама, но тогда лопата у поленницы
+// первые кадры стояла бы невидимой
+await loadShovelModel();
 const shovel = new Shovel(scene, view);
 shovel.place(3.0, terrain.getHeight(3.0, -15.4), -15.4, 2.2);
 
@@ -666,7 +669,9 @@ function tick() {
   const inside = cabin.isInside(camera.position.x, camera.position.z);
   indoorK += ((inside ? 1 : 0) - indoorK) * Math.min(1, dt * 2.5);
   const shelter = Math.max(indoorK, caveK); // стены дома ИЛИ толща снега
-  audio.setIndoor(shelter);
+  // Второе число — чем именно укрыт: дом отвечает деревянной комнатой, нора не
+  // отвечает вовсе. Пока укрытия нет, доля не имеет значения.
+  audio.setIndoor(shelter, shelter > 0 ? caveK / Math.max(shelter, 1e-4) : 0);
   const stoveDist = camera.position.distanceTo(cabin.stovePos);
   const stoveHeat = THREE.MathUtils.clamp(1 - (stoveDist - 0.9) / 3.4, 0, 1);
   const cabinHeat = indoorK * Math.max(0.45, stoveHeat * 0.95); // в доме тепло, у печки — жарко

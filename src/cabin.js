@@ -290,8 +290,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     return doorOpen;
   }
 
-  // тепло очага: мировая позиция печки (x/z из плана, Y — реальный пол)
-  const stovePos = l2w(interior.stove.x, FLOOR_Y, interior.stove.z).clone();
+  // тепло очага: мировая позиция устья (x/z из плана, Y — реальный пол)
+  const stovePos = l2w(interior.hearth.x, FLOOR_Y, interior.hearth.z).clone();
   stovePos.y = worldFloorTop + 0.5;
 
   // мягкое «печное» дыхание света в окнах + дверь + огонь в печи и свеча
@@ -366,49 +366,100 @@ function buildInterior(F) {
     return grp;
   };
 
-  // ---- печка-буржуйка в дальнем левом углу ----
-  const stove = { x: -1.95, z: -2.05 };
-  mesh(new THREE.CylinderGeometry(0.34, 0.36, 0.72, 14), iron, stove.x, F + 0.48, stove.z);
-  mesh(new THREE.CylinderGeometry(0.37, 0.37, 0.05, 14), iron, stove.x, F + 0.87, stove.z);
-  for (const a of [0.5, 2.1, 3.7, 5.3]) {
-    mesh(
-      new THREE.CylinderGeometry(0.035, 0.045, 0.14, 6), iron,
-      stove.x + Math.cos(a) * 0.27, F + 0.07, stove.z + Math.sin(a) * 0.27
-    );
-  }
-  // дверца с щелью углей — светится и пульсирует
+  // ---- камин у задней стены ----
+  // Сложен в Blender (blender-web-agent-kit) и запечён в один материал:
+  // base + ORM + нормали, 1588 треугольников, один draw call. Подиум, стойки
+  // с открытой топкой, брус полки поперёк, дымосборник трапецией до кровли.
+  // Нутро топки кирпичное и тёплое против холодного наружного бута — этот
+  // контраст читается как «горит» ещё до того, как в топке появится огонь.
+  //
+  // Карта нормалей здесь не украшение, а единственный способ показать объём.
+  // Занятость (aoMap) three.js применяет ТОЛЬКО к непрямому свету, а в этой
+  // комнате картинку лепит точечный огонь: без нормалей кладка приезжает
+  // плоской заливкой, как бы хорошо ни был посчитан AO. Фаска на рёбрах
+  // блоков живёт там же — её даёт Bevel в материале, не геометрия.
+  //
+  // До него в этой комнате стояла каменка в углу, а до неё буржуйка — обе в
+  // истории файла. Камин выбран за открытый огонь: он и источник света, и
+  // картинка, а угловая печь ни того ни другого в полную силу не даёт.
+  //
+  // Модель встаёт СВОИМ началом координат: середина по ширине, на полу, у
+  // плоскости стены. Тело растёт от стены в комнату.
+  //     габарит модели: x ±1.16, z 0..1.18 (вперёд), высота 4.25
+  // ROOM — коллизионный прямоугольник, а НЕ плоскость стены. Брёвна сруба
+  // круглые и выпирают внутрь комнаты: у задней стены самая дальняя точка
+  // геометрии лежит на z = -2.35, то есть на 55 см ближе к центру, чем
+  // ROOM.z0 = -2.9. Камин, поставленный по ROOM, наполовину утонул в брёвнах,
+  // и в топке вместо кирпича была видна рама окна.
+  // Замерено перебором вершин сруба внутри объёма топки, а не на глаз.
+  const BACK_WALL = -2.30;
+  const stove = { x: -1.0, z: BACK_WALL };
+  const stoveGroup = new THREE.Group();
+  stoveGroup.name = 'fireplaceModel';
+  stoveGroup.position.set(stove.x, F, stove.z);
+  g.add(stoveGroup);
+  createGLTFLoader()
+    .loadAsync(asset('models/props/fireplace.glb'))
+    .then((gltf) => {
+      gltf.scene.traverse((o) => {
+        if (!o.isMesh) return;
+        // камин в лунной тени крыши, как и прочая мебель (см. mesh())
+        o.castShadow = false;
+        o.receiveShadow = true;
+        // шероховатость и затенение лежат в ORM, множитель их не трогает
+        o.material.roughness = 1;
+        // А вот металл гасим наглухо, и это не перестраховка. В камине металла
+        // нет вовсе — кочерга и решётка это отдельные предметы, — но ORM
+        // ужимается в webp с потерями, и webp жмёт три канала как ЦВЕТ, с
+        // прореживанием по хроме. Резкая граница затенения в красном канале
+        // мажет в синий, где лежит металл: у 16% площади там оказалось до 0.14,
+        // а местами до 0.54. Камень с примесью металла отражает по-своему —
+        // это и был тот самый пластиковый блик. Множитель 0 стоит ноль
+        // килобайт; хранить ORM без потерь стоило бы 1023 КБ вместо 233.
+        o.material.metalness = 0;
+      });
+      stoveGroup.add(gltf.scene);
+    })
+    .catch(() => {}); // нет файла — огонь и свет всё равно на месте
+
+  // Топка: проём 1.12 шириной и 0.96 высотой, низ на подиуме (0.14), дно
+  // полости в 11.5 см от стены. Числа не на глаз — из стадии формы
+  // (temp/props/fireplace/stages/s1_form.py).
+  const mouth = { x: stove.x, y: F + 0.14, z: stove.z + 0.40 };
+  // Огонь в топке — светится и пульсирует. Пока это светящаяся плита,
+  // как было у каменки; настоящее шейдерное пламя из campfire.js сюда просится
+  // и подойдёт как есть, но это отдельный заход.
   const emberMat = new THREE.MeshStandardMaterial({
     color: 0x1a0d05,
     emissive: 0xff5f1e,
-    emissiveIntensity: 1.8,
+    emissiveIntensity: 1.5,
     roughness: 0.6,
   });
-  mesh(new THREE.BoxGeometry(0.24, 0.28, 0.05), emberMat, stove.x, F + 0.44, stove.z + 0.34);
-  // труба уходит сквозь кровлю (снаружи станет печной трубой)
-  mesh(new THREE.CylinderGeometry(0.09, 0.09, 3.6, 10), iron, stove.x, F + 2.7, stove.z);
-  // свет углей
-  const ember = new THREE.PointLight(0xff8a40, 2.4, 6.5, 2);
-  ember.position.set(stove.x, F + 0.75, stove.z + 0.45);
+  mesh(new THREE.BoxGeometry(0.62, 0.34, 0.04), emberMat, mouth.x, mouth.y + 0.17, mouth.z - 0.06);
+  // поленья в топке, на которых огонь и держится
+  const fireLogGeo = new THREE.CylinderGeometry(0.05, 0.055, 0.66, 7);
+  const fireLogMat = new THREE.MeshStandardMaterial({ color: 0x33210f, roughness: 0.95 });
+  for (const [dx, dy, dz, rz] of [[-0.06, 0.05, 0.02, 0.06], [0.08, 0.05, -0.06, -0.04], [0.0, 0.14, -0.02, 0.09]]) {
+    mesh(fireLogGeo, fireLogMat, mouth.x + dx, mouth.y + dy, mouth.z + dz, 0, Math.PI / 2 + rz);
+  }
+  // свет огня: у самого устья, чтобы он выходил в комнату, а не грел заднюю стенку
+  const ember = new THREE.PointLight(0xff8a40, 3.1, 8.5, 2);
+  ember.position.set(mouth.x, mouth.y + 0.28, mouth.z + 0.34);
   g.add(ember);
-  colliders.push({ x: stove.x, z: stove.z, r: 0.45 });
+  // Коллайдер — отрезок: камин это плита 2.32 на 1.18 у стены, и кругом её
+  // не описать, не отобрав у комнаты угол.
+  colliders.push({
+    x1: stove.x - 0.62, z1: stove.z + 0.55, x2: stove.x + 0.62, z2: stove.z + 0.55, r: 0.62,
+  });
 
-  // чугунный чайник на плите — маленькая тёплая деталь на верхней конфорке
-  const ky = F + 0.9;
-  const kettle = mesh(new THREE.SphereGeometry(0.135, 14, 10), iron, stove.x + 0.06, ky + 0.05, stove.z);
-  kettle.scale.y = 0.82;
-  mesh(new THREE.CylinderGeometry(0.145, 0.1, 0.025, 14), iron, stove.x + 0.06, ky, stove.z); // основание
-  mesh(new THREE.CylinderGeometry(0.032, 0.05, 0.05, 8), iron, stove.x + 0.06, ky + 0.14, stove.z); // горлышко
-  const spout = mesh(new THREE.CylinderGeometry(0.016, 0.032, 0.13, 6), iron, stove.x + 0.185, ky + 0.075, stove.z);
-  spout.rotation.z = -0.95; // изогнутый носик
-  // дужка-ручка: полукольцо, стоящее над чайником
-  mesh(new THREE.TorusGeometry(0.11, 0.011, 6, 12, Math.PI), iron, stove.x + 0.06, ky + 0.1, stove.z);
-
-  // ---- поленница у печки ----
+  // ---- поленница сбоку от камина ----
+  // Переехала вправо: камин занимает заднюю стену до x 0.16, и на прежнем
+  // месте поленья наполовину сидели бы в кладке.
   const logGeo = new THREE.CylinderGeometry(0.055, 0.06, 0.52, 7);
   const logMat = new THREE.MeshStandardMaterial({ color: 0x5c4126, roughness: 0.9 });
   const logs = [
-    [-0.95, 0.06, -2.4], [-0.83, 0.06, -2.4], [-1.07, 0.06, -2.4],
-    [-0.89, 0.165, -2.4], [-1.01, 0.165, -2.4], [-0.95, 0.27, -2.4],
+    [0.62, 0.06, -2.12], [0.74, 0.06, -2.12], [0.50, 0.06, -2.12],
+    [0.68, 0.165, -2.12], [0.56, 0.165, -2.12], [0.62, 0.27, -2.12],
   ];
   for (const [lx, ly, lz] of logs) mesh(logGeo, logMat, lx, F + ly, lz, 0, Math.PI / 2);
 
@@ -547,7 +598,9 @@ function buildInterior(F) {
     lampGlass.emissiveIntensity = 2.4 * lk;
   }
 
-  return { group: g, colliders, stove, update };
+  // hearth — устье, а не середина печи: тепло считают от него. У буржуйки
+  // разницы почти не было, у каменки середина приходится в толщу кладки.
+  return { group: g, colliders, stove, hearth: { x: mouth.x, z: mouth.z }, update };
 }
 
 // Реальные ассеты мебели (Poly Haven, CC0, glTF 1k) поверх процедурного
@@ -565,7 +618,9 @@ async function loadInteriorProps(g, F, colliders) {
     // file — относительно /models/props/; x,z — якорь в локали; yaw — доворот;
     // on — 'floor'(деф)|'table'; col — радиус коллайдера; scale — доп. масштаб;
     // hide — имя процедурной группы-двойника ('table'|'seat0'|'seat1')
-    { file: 'brass_pot_01/brass_pot_01_1k.gltf', x: -1.15, z: -1.4, yaw: 1.0, col: 0.22 },
+    // чугунок стоял у прежней печи; камин занял это место, и котелок
+    // переехал к краю подиума, откуда его удобно снять с огня
+    { file: 'brass_pot_01/brass_pot_01_1k.gltf', x: 0.32, z: -1.32, yaw: 1.0, col: 0.22 },
     { file: 'book_encyclopedia_set_01/book_encyclopedia_set_01_1k.gltf', x: 1.6, z: 1.5, yaw: 0.6, on: 'table' },
   ];
   const loader = createGLTFLoader();
