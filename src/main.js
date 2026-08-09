@@ -296,10 +296,19 @@ composer.addPass(new OutputPass());
 // Esc браузер обрабатывает сам: он отпускает курсор, а по этому событию
 // возвращается экран паузы.
 const loading = document.getElementById('loading');
-const shell = createShell(() => {
+const shell = createShell((ev) => {
   audio.init();
   audio.resume();
-  if (touch) {
+  // Чем вошли, тем и играем. Раньше выбор шёл по факту «тач вообще возможен»,
+  // а `'ontouchstart' in window` истинно на любом ноутбуке с сенсорным
+  // экраном: там мир уходил в тач-режим, pointer lock не запрашивался
+  // никогда — и мышь не могла повернуть взгляд вовсе. Спрашиваем само
+  // нажатие: палец это был или мышь. Синтетический клик (Enter с клавиатуры)
+  // pointerType не несёт — тогда решает тип указателя устройства.
+  const byFinger = TouchControls.forced() || (ev && ev.pointerType
+    ? ev.pointerType !== 'mouse'
+    : matchMedia('(pointer: coarse)').matches);
+  if (touch && byFinger) {
     touch.activate(); // на таче pointer lock нет — просто входим
     shell.close();
   } else player.controls.lock();

@@ -34,10 +34,16 @@ export class TouchControls {
   // и подсказки без телефона; мышью взгляд не водится — pointer lock не нужен)
   static supported() {
     return (
-      new URLSearchParams(location.search).has('touch') ||
+      TouchControls.forced() ||
       matchMedia('(pointer: coarse)').matches ||
       'ontouchstart' in window
     );
+  }
+
+  // `?touch` — приказ, а не признак: раскладку кнопок смотрят мышью на
+  // десктопе, и выбор режима по нажатию (main.js) этот случай обязан пропустить.
+  static forced() {
+    return new URLSearchParams(location.search).has('touch');
   }
 
   constructor(player, look) {

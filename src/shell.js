@@ -15,7 +15,10 @@ export function createShell(onEnter) {
   const gate = document.getElementById('gate');
   const button = document.getElementById('enter');
 
-  button.addEventListener('click', onEnter);
+  // Событие клика уходит наружу целиком: по нему мир узнаёт, чем именно вошли
+  // — пальцем или мышью. Наличие тачскрина об этом не говорит ничего: у
+  // ноутбука с сенсорным экраном есть и то, и другое.
+  button.addEventListener('click', (ev) => onEnter(ev));
 
   return {
     /** Показать экран: до первого входа и на каждой паузе. */
