@@ -685,7 +685,10 @@ function tick() {
   if (axe.held && chopHeld) axe.trySwing('chop');
   axe.update(dt, onAxeImpact);
   lumber.update(dt, player.pos); // дрожь крон и валка — после ударов этого кадра
-  if (lumber.animating) shadowDirty = true; // падающее дерево тащит тень за собой
+  // Падающее дерево тащит тень за собой; дрожь кроны — нет. Разница в цене
+  // велика: дрожь длится около секунды после КАЖДОГО удара топором, и на этом
+  // флаге полная карта теней перерисовывалась каждый кадр всю рубку.
+  if (lumber.felling) shadowDirty = true;
   view.update(dt, player); // sway/bob/дыхание/просадка — общие для всего, что в руках
   if (dbg) _fm[3] = performance.now(); // ловец: конец лопаты/рук
 

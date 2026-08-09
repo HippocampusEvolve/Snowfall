@@ -130,8 +130,15 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         if (cutCol(cell + vec2(1.0, 1.0)) > 0.5) d = min(d, length(g));
         return smoothstep(0.0, ${CUTFADE.toFixed(2)}, d);
       }
-      float snowY(vec2 wxz) {
-        return sampleGround(wxz) + ${LIFT.toFixed(3)} - sampleTrail(wxz) * cutFade(wxz) * ${DEPTH.toFixed(3)};
+      // Вес выреза приходит ПАРАМЕТРОМ, а не считается внутри. Причина в цене:
+      // snowY зовётся пять раз на вершину (сама высота и четыре сэмпла для
+      // нормали), а cutFade после первого копка делает до девяти выборок
+      // текстуры — до полусотни выборок на вершину, и так на все 66 тысяч
+      // вершин патча каждый кадр. Вершины стоят в сантиметрах друг от друга,
+      // вес выреза на таком расстоянии не меняется вовсе: считаем один раз
+      // в точке вершины и передаём всем пяти.
+      float snowY(vec2 wxz, float cut) {
+        return sampleGround(wxz) + ${LIFT.toFixed(3)} - sampleTrail(wxz) * cut * ${DEPTH.toFixed(3)};
       }`;
     }
     shader.vertexShader = shader.vertexShader.replace('#include <common>', vsCommon);
@@ -162,11 +169,12 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
           `#include <beginnormal_vertex>
           {
             vec2 wxz = (modelMatrix * vec4(position, 1.0)).xz;
+            float cut = cutFade(wxz);
             float e = 0.22;
-            float yL = snowY(wxz - vec2(e, 0.0));
-            float yR = snowY(wxz + vec2(e, 0.0));
-            float yB = snowY(wxz - vec2(0.0, e));
-            float yF = snowY(wxz + vec2(0.0, e));
+            float yL = snowY(wxz - vec2(e, 0.0), cut);
+            float yR = snowY(wxz + vec2(e, 0.0), cut);
+            float yB = snowY(wxz - vec2(0.0, e), cut);
+            float yF = snowY(wxz + vec2(0.0, e), cut);
             objectNormal = normalize(vec3(yL - yR, 2.0 * e, yB - yF));
           }`
         )
@@ -175,7 +183,7 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
           `#include <begin_vertex>
           {
             vec2 wxz = (modelMatrix * vec4(position, 1.0)).xz;
-            transformed.y = snowY(wxz);
+            transformed.y = snowY(wxz, cutFade(wxz));
             vWp = vec3(wxz.x, transformed.y, wxz.y);
           }`
         );

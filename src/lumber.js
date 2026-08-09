@@ -37,7 +37,13 @@ export class Lumber {
     this.colliders = colliders;
     this.groundLogs = groundLogs;
     this.deps = deps;
-    this.animating = false; // идёт валка/дрожь — main перерисовывает тени
+    this.animating = false; // идёт валка или дрожь кроны
+    // Только валка. Разделено ради карты теней: падающий ствол её правда
+    // меняет, а дрожь после удара топором — сотые доли радиана в кроне,
+    // и тень от неё не сдвигается ни на тексель. Раньше по одному флагу
+    // полная карта перерисовывалась 60 раз в секунду всю рубку — то есть
+    // ровно в те секунды, когда игрок занят делом (см. main.js).
+    this.felling = false;
     for (const p of pines) {
       p.state = 'up'; // 'up' | 'falling' | 'down' | 'gone' (разделан до конца)
       p.hits = 0; // зарубка на стоящем стволе
@@ -271,9 +277,11 @@ export class Lumber {
 
   update(dt, playerPos) {
     this.animating = false;
+    this.felling = false;
     for (const p of this.pines) {
       if (p.state === 'falling') {
         this.animating = true;
+        this.felling = true;
         p.fallT += dt;
         const t = Math.min(p.fallT / FALL_DUR, 1);
         // накрен разгоняется как настоящий рычаг: сперва еле заметно, у земли — ух

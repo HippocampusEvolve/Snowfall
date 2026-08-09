@@ -208,11 +208,17 @@ export class Digger {
   // Если старт оказался внутри грунта (шаг вверх на уступ) — чуть поднимаемся до
   // воздуха, но не больше ~0.6 м, чтобы не пробить потолок пещеры наверх.
   surfaceBelow(x, z, yTop, yBottom, ds = 0.1) {
-    let py = yTop, pd = this.densityAt(x, py, z);
+    // Марш идёт по вертикали, а (x, z) на нём не меняются — значит и высота
+    // рельефа под колонкой одна на весь марш. Раньше её считал каждый шаг:
+    // `densityAt` звал `baseHeight`, а тот — шум террейна, и на кадр стоя
+    // на месте выходило под полторы сотни вызовов шума впустую.
+    const base = this.baseHeight(x, z);
+
+    let py = yTop, pd = base - py + this.editAt(x, py, z);
     let guard = 0;
-    while (pd >= 0 && guard++ < 6) { py += ds; pd = this.densityAt(x, py, z); }
+    while (pd >= 0 && guard++ < 6) { py += ds; pd = base - py + this.editAt(x, py, z); }
     for (let y = py - ds; y >= yBottom; y -= ds) {
-      const d = this.densityAt(x, y, z);
+      const d = base - y + this.editAt(x, y, z);
       if (pd < 0 && d >= 0) {
         const t = pd / (pd - d); // доля пути [py→y], где плотность = 0
         return py + (y - py) * t;
