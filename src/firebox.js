@@ -371,8 +371,11 @@ export function buildFirebox(parent, { x, y, z }) {
   // СКОЛЬЗЯЩЕ вдоль кирпича: ровно так проявляется рельеф, который в лобовом
   // свете пропадает. Без него футеровка читается плоской заливкой — той самой,
   // из-за которой камин и выглядел нарисованным.
-  const mouthLight = new THREE.PointLight(0xff8a40, 3.1, 8.5, 2);
-  mouthLight.position.set(0, CAVITY.floor + 0.42, CAVITY.mouth + 0.06);
+  // Свет устья стоит ВЫШЕ середины проёма и чуть глубже его плоскости. Ниже и
+  // ближе он бил прямо в подиум, и плита перед топкой светилась ярче всей
+  // кладки — единственное белое пятно на тёмном камне.
+  const mouthLight = new THREE.PointLight(0xff8a40, 2.6, 8.5, 2);
+  mouthLight.position.set(0, CAVITY.floor + 0.56, CAVITY.mouth + 0.01);
   box.add(mouthLight);
 
   const innerLight = new THREE.PointLight(0xff6a24, 1.5, 1.9, 2);
@@ -387,7 +390,7 @@ export function buildFirebox(parent, { x, y, z }) {
     const fk = 0.72 + 0.18 * Math.sin(t * 9.7) + 0.1 * Math.sin(t * 23.3 + 1.7);
     const b = Math.min(1, 0.82 + fk * 0.2);
 
-    mouthLight.intensity = 3.1 * fk;
+    mouthLight.intensity = 2.6 * fk;
     mouthLight.position.x = Math.sin(t * 6.9) * 0.03;
     innerLight.intensity = 1.5 * (0.75 + 0.35 * fk);
     emberMat.emissiveIntensity = (1.4 + fk * 1.1);
