@@ -677,7 +677,7 @@ function tick() {
   snow.update(dt, t, camera.position, audio.windLevel, blizzard, caveK);
   aurora.update(t, blizzard);
   breath.update(dt, player.exertion, audio.windLevel);
-  campfire.update(dt, t, audio.windLevel);
+  campfire.update(dt, t, audio.windLevel, player.locked);
   cabin.update(t, dt);
   critters.update(dt);
   if (dbg) _fm[4] = performance.now(); // ловец: конец мировых систем
@@ -793,16 +793,20 @@ function tick() {
     camera.position.y += (Math.sin(t * 41.9 + 0.7) + Math.sin(t * 27.3 + 2.1)) * 0.5 * a;
   }
 
-  // снег постепенно заметает следы; проталина у костра живёт, пока он горит
-  fadeAcc += dt;
-  if (fadeAcc > 0.25) {
-    fadeAcc = 0;
-    footprints.fade();
-  }
-  meltAcc += dt;
-  if (meltAcc > 3) {
-    meltAcc = 0;
-    footprints.stampCircle(FIRE.x, FIRE.z, 0.8 + 1.1 * campfire.burn, 0.09 * campfire.burn);
+  // Снег постепенно заметает следы; проталина у костра живёт, пока он горит.
+  // На паузе память мира стоит: вернуться и не найти собственной тропы -
+  // то же самое, что вернуться к погасшему костру (см. campfire.update).
+  if (player.locked) {
+    fadeAcc += dt;
+    if (fadeAcc > 0.25) {
+      fadeAcc = 0;
+      footprints.fade();
+    }
+    meltAcc += dt;
+    if (meltAcc > 3) {
+      meltAcc = 0;
+      footprints.stampCircle(FIRE.x, FIRE.z, 0.8 + 1.1 * campfire.burn, 0.09 * campfire.burn);
+    }
   }
 
   // Отдача от удара лопатой. Кладём её на камеру ровно на время кадра и снимаем

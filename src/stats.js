@@ -30,7 +30,7 @@ export class Stats {
       const drain = Math.max(0.1, 0.35 + blizzard * 1.5 - moveBonus) / 420;
       this.warmth = Math.max(0, this.warmth - drain * dt * (1 - heat * 0.95));
       this.warmth = Math.min(1, this.warmth + heat * dt / 40);
-      if (this.warmth <= 0) this._die();
+      if (this.warmth <= 0) this._die(player);
     }
 
     // изморозь обновляем ~10 раз/с: чаще нет смысла, переход и так плавный
@@ -43,12 +43,15 @@ export class Stats {
     this.els.frost.style.opacity = (cold * cold * 0.95).toFixed(3);
   }
 
-  _die() {
+  _die(player) {
     this.dead = true;
     this.els.death.classList.add('show');
     // Тот же класс, что на паузе: игра встала, курсор свободен, и в углу
     // появляется выход на витрину (см. shell.js).
     document.body.classList.add('paused');
     if (document.pointerLockElement) document.exitPointerLock();
+    // Курсор отпускает браузер, а пальцы держит только наш флаг: без этого
+    // тело шло дальше за экраном смерти (см. player.halt).
+    if (player) player.halt();
   }
 }

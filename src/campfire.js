@@ -412,10 +412,14 @@ export class Campfire {
     this.ftex.needsUpdate = true;
   }
 
-  update(dt, t, windLevel) {
+  // spend — идёт ли игра. На паузе огонь живёт (пламя дрожит, свет качается:
+  // мир за полупрозрачным гейтом остаётся живым), но запас не тратит. Так же
+  // устроено тепло игрока в stats.js: уйти на десять минут и вернуться к
+  // остывшим углям было бы наказанием за отлучку, а не игрой.
+  update(dt, t, windLevel, spend = true) {
     // топливо выгорает; сила горения плавно догоняет запас (огонь оседает
     // не мгновенно), на нуле остаются тлеющие угли
-    this.fuel = Math.max(0, this.fuel - dt / FUEL_TIME);
+    if (spend) this.fuel = Math.max(0, this.fuel - dt / FUEL_TIME);
     const targetBurn = BURN_MIN + (1 - BURN_MIN) * Math.min(1, this.fuel * 2.4);
     this.burn += (targetBurn - this.burn) * Math.min(1, dt * 0.25);
     this._flare = Math.max(0, this._flare - dt * 0.55);
