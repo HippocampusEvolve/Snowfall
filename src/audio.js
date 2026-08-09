@@ -45,6 +45,16 @@ export class GameAudio {
     this._scheduleWeather();
     this._buildCampfire();
     this._scheduleTreeCrack();
+
+    // Ушли со вкладки — замолкаем. Кадры останавливает браузер сам, а звук
+    // живёт своей жизнью: ветер и костёр закольцованы и продолжали бы выть в
+    // наушниках соседней вкладки. Возврат заодно лечит контекст, заглохший не
+    // по нашей воле (звонок на телефоне уводит его в interrupted).
+    document.addEventListener('visibilitychange', () => {
+      if (!this.ctx) return;
+      if (document.hidden) this.ctx.suspend();
+      else this.resume();
+    });
   }
 
   // ---------- пространство ----------
@@ -707,7 +717,9 @@ export class GameAudio {
   }
 
   resume() {
-    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+    // `interrupted` — состояние Safari после звонка или Siri; лечится тем же
+    // resume, но под `=== 'suspended'` не попадало и оставляло мир немым.
+    if (this.ctx && this.ctx.state !== 'running') this.ctx.resume();
   }
 
   // k: 0..1 — насколько игрок «внутри» (стены глушат ветер и костёр).

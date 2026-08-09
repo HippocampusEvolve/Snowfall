@@ -94,6 +94,7 @@ export class Digger {
     this.skirt = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
     this.skirt.castShadow = this.skirt.receiveShadow = true;
     this.skirt.visible = false; // включается в _rebuildSkirt; bbox считается там же
+    this._primeKeep = null; // юбка, отложенная на время прогревочного кадра
     this.group.add(this.skirt);
 
     // coverage-маска в плоскости XZ: где воксельный меш заменяет плоский террейн.
@@ -529,16 +530,22 @@ export class Digger {
     );
     geo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
     geo.computeBoundingSphere();
-    this.skirt.geometry.dispose();
+    // Юбка к этому моменту может быть НЕ пустой: сейв загружается раньше
+    // прогрева и успевает построить её по всему периметру раскопа. Прячем её
+    // на один кадр, а не выбрасываем, — иначе обжитый мир каждый запуск
+    // встречал бы игрока щелью по краю ямы, ради которой юбка и написана.
+    this._primeKeep = { geometry: this.skirt.geometry, visible: this.skirt.visible };
     this.skirt.geometry = geo;
     this.skirt.visible = true;
   }
 
-  // прогрев отработал — возвращаем юбку в исходное пустое состояние
+  // прогрев отработал — возвращаем юбку такой, какой она была до него
   primeEnd() {
-    this.skirt.geometry.dispose();
-    this.skirt.geometry = new THREE.BufferGeometry();
-    this.skirt.visible = false;
+    this.skirt.geometry.dispose(); // временный треугольник, больше не нужен
+    const keep = this._primeKeep;
+    this._primeKeep = null;
+    this.skirt.geometry = keep ? keep.geometry : new THREE.BufferGeometry();
+    this.skirt.visible = keep ? keep.visible : false;
   }
 
   // луч по взгляду до снега (воксельным попаданиям — приоритет: иначе при
