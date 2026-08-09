@@ -58,6 +58,15 @@
     }
     #loading.hidden { opacity: 0; pointer-events: none; }
 
+    /* Загрузка не состоялась: полоса врёт о продолжении, и её не остаётся.
+       Разрядка тоже уходит - она хороша для двух слов, а не для просьбы
+       обновить страницу. */
+    #loading.failed #loadBar { display: none; }
+    #loading.failed span {
+      letter-spacing: 0.08em; text-indent: 0; text-align: center;
+      max-width: 22rem; line-height: 1.7;
+    }
+
     /* Пока модуль игры не разобран, о долях ничего не известно — полоса просто
        «дышит» на CSS-анимации, без единой строчки JS. Как только main.js
        начинает считать ассеты, он вешает .known и ведёт ширину сам. */

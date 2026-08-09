@@ -46,6 +46,28 @@ import { createShell } from './shell.js';
   };
 }
 
+// ---------- предохранитель заставки ----------
+// Ставится ПЕРВЫМ, до единой загрузки, и в этом весь смысл. Ниже по файлу
+// модуль ждёт лес, дом и лопату через await: отказ любой из этих загрузок
+// обрывает разбор модуля целиком - вместе с таймером прогрева, который стоял
+// в самом низу и до этого места просто не доживал. Мир не появлялся никогда,
+// а игрок оставался перед дышащей полосой навсегда, без единого слова о том,
+// что случилось. Теперь слово есть.
+let bootDone = false;
+function bootFailed(e) {
+  if (bootDone) return;
+  bootDone = true;
+  console.error('мир не собрался:', e);
+  const el = document.getElementById('loading');
+  if (el) {
+    el.classList.add('failed'); // прячет полосу и распускает разрядку (index.html)
+    const label = el.querySelector('span');
+    if (label) label.textContent = 'Мир не загрузился. Проверь сеть и обнови страницу';
+  }
+}
+const bootGuard = setTimeout(() => bootFailed(new Error('загрузка не уложилась в 30 с')), 30000);
+addEventListener('unhandledrejection', (ev) => bootFailed(ev.reason));
+
 // ---------- рендерер ----------
 // Ярусы качества теней (?shadows=high|medium|low): размер карты, фильтр,
 // период обновления. Карта перерисовывается по таймеру и по событиям, а не
@@ -480,6 +502,8 @@ let warmed = false;
 function warmUp() {
   if (warmed) return;
   warmed = true;
+  bootDone = true; // мир собрался: предохранитель заставки больше не нужен
+  clearTimeout(bootGuard);
   requestAnimationFrame(() => {
     const culled = [];
     scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
