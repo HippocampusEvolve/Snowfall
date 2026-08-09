@@ -566,6 +566,8 @@ let caveK = 0; // 0..1 — сглаженное «мы в вырытой пещ�
 let caveTarget = 0;
 let shelterAcc = 0;
 const promptEl = document.getElementById('prompt');
+let promptShown = false; // что уже стоит в DOM: класс видимости и сам текст
+let promptLast = null;
 const _toFire = new THREE.Vector3();
 const _camRight = new THREE.Vector3();
 const _dirTmp = new THREE.Vector3();
@@ -803,8 +805,17 @@ function tick() {
         ? 'кнопки справа — ' + (shovel.held ? 'копать и намыть' : 'рубить')
         : promptText.replace('F — ', '');
   }
-  promptEl.classList.toggle('show', !!promptText && player.locked);
-  if (promptText) promptEl.textContent = promptText;
+  // DOM трогаем только на смене. Раньше подсказка писалась каждый кадр:
+  // класс и текст переставлялись 60 раз в секунду, чтобы остаться теми же.
+  const promptOn = !!promptText && player.locked;
+  if (promptOn !== promptShown) {
+    promptShown = promptOn;
+    promptEl.classList.toggle('show', promptOn);
+  }
+  if (promptText && promptText !== promptLast) {
+    promptLast = promptText;
+    promptEl.textContent = promptText;
+  }
 
   // укрытие спасает от ветра: тепло утекает как в штиль
   const effBliz = blizzard * (1 - 0.75 * shelter);

@@ -10,6 +10,11 @@ export class GameAudio {
     this.weatherPhase = 'calm'; // calm | build | storm | lull — длинная дуга метели
     this.cold = 0.2; // 0..1 — «злость» мороза: скрип шагов выше, деревья трещат
     this._indoorK = 0; // копия indoor: треск деревьев за стенами глуше
+    // Когда в последний раз писали плавные значения в аудиопоток. Плавное
+    // незачем обновлять каждый кадр (см. setIndoor, updateCampfire).
+    this._indoorAt = -1;
+    this._indoorSet = -1;
+    this._fireAt = -1;
   }
 
   // температура воздуха (°C) → злость мороза. Мороз слышно, а не видно:
@@ -164,9 +169,14 @@ export class GameAudio {
   // burn 0..1 — сила горения: угли еле шепчут, свежие дрова ревут
   updateCampfire(dist, pan, burn = 1) {
     if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    // Та же мера, что у setIndoor: костёр не убегает за одну шестидесятую
+    // секунды, а очередь автоматизации копится по-настоящему.
+    if (t - this._fireAt < 0.1) return;
+    this._fireAt = t;
     const vol = (0.75 / (1 + (dist / 3.2) ** 2)) * (0.12 + 0.88 * burn);
-    this.fireBus.gain.setTargetAtTime(vol, this.ctx.currentTime, 0.12);
-    this.firePan.pan.setTargetAtTime(clamp(pan, -0.85, 0.85), this.ctx.currentTime, 0.12);
+    this.fireBus.gain.setTargetAtTime(vol, t, 0.12);
+    this.firePan.pan.setTargetAtTime(clamp(pan, -0.85, 0.85), t, 0.12);
   }
 
   // взять полено с поленницы: глухой перестук дерева в руках
@@ -733,6 +743,13 @@ export class GameAudio {
     this._indoorK = clamp(k, 0, 1); // треск деревьев тоже глушится стенами
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
+    // Шесть автоматизаций каждый кадр - это триста с лишним событий в секунду
+    // в очередь аудиопотока, и все ради значений, которые сами едут плавно
+    // (постоянная времени 0.3 с). Пишем на порядок реже и только при заметной
+    // разнице: слуху всё равно, потоку - нет.
+    if (t - this._indoorAt < 0.1 && Math.abs(k - this._indoorSet) < 0.02) return;
+    this._indoorAt = t;
+    this._indoorSet = k;
     const f = 20000 * Math.pow(340 / 20000, clamp(k, 0, 1)); // экспоненциальный спад частоты среза
     this.windLP.frequency.setTargetAtTime(f, t, 0.3);
     this.fireLP.frequency.setTargetAtTime(f, t, 0.3);
