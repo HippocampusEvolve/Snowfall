@@ -476,8 +476,6 @@ function warmUp() {
     scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
     // материал вырытого снега прогревать нечем: до первого копка в сцене нет
     // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
-    // материал вырытого снега прогревать нечем: до первого копка в сцене нет
-    // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
     digger.primeStart();
     renderer.shadowMap.needsUpdate = true; // и depth-варианты теней в тот же кадр
     composer.render();
@@ -705,7 +703,10 @@ function tick() {
   nearPile = camera.position.distanceTo(woodpile.position) < 2.3;
   handTarget = null;
   if (!player.carrying && !shovel.held && !axe.held) {
-    let bestDot = -1;
+    // Порог прицела: рука тянется к тому, на что игрок СМОТРИТ. Без него
+    // (bestDot = -1) единственный предмет рядом брался даже строго за спиной.
+    // У рубки такой порог свой и строже — AIM в lumber.js.
+    let bestDot = 0.3;
     camera.getWorldDirection(_dirTmp);
     const consider = (kind, x, y, z, ref) => {
       _aim.set(x - camera.position.x, y - camera.position.y, z - camera.position.z);
