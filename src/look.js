@@ -74,7 +74,11 @@ export class SmoothLook extends THREE.EventDispatcher {
   }
 
   lock() {
-    this.domElement.requestPointerLock();
+    // Браузер держит защитную задержку около секунды после выхода по Esc и
+    // отказывает в повторном захвате. Отказ не роняем: экран паузы остаётся
+    // открытым, второе нажатие кнопки сработает.
+    const p = this.domElement.requestPointerLock();
+    if (p && p.catch) p.catch(() => {});
   }
 
   unlock() {

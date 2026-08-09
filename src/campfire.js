@@ -46,6 +46,12 @@ export function loadFirepitModel() {
         });
         while (pitWaiting.length) pitWaiting.pop().add(pitProto.clone(true));
         return pitProto;
+      })
+      // кольцо камней не доехало — костёр горит и без него; тихий фолбэк,
+      // как у камина в cabin.js. Молчать нельзя только в консоли.
+      .catch((e) => {
+        console.warn('кольцо камней не загрузилось:', e);
+        return null;
       });
   }
   return pitLoading;
