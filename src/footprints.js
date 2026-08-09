@@ -358,7 +358,9 @@ export class Footprints {
   _inWindow(x, z, pad = 0.6) {
     const c = this._center;
     if (!c) return false;
-    return Math.max(Math.abs(x - c.x), Math.abs(z - c.z)) < HI_HALF + pad;
+    // Z центра лежит в `c.y`: центр — Vector2 (см. updateView), и `c.z` дал бы
+    // undefined, а с ним NaN, — окно детальной карты не принимало бы ничего.
+    return Math.max(Math.abs(x - c.x), Math.abs(z - c.y)) < HI_HALF + pad;
   }
 
   // общий путь штампа: в общую карту цветом (1, PACK, 0), в детальную — (1,0,0)

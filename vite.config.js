@@ -68,6 +68,17 @@ export function assetStamps(dir = 'public') {
 // (пути ассетов в коде идут через src/asset.js -> import.meta.env.BASE_URL).
 export default defineConfig(({ command, isPreview }) => ({
   base: command === 'build' || isPreview ? '/snowfall/' : '/',
-  build: { target: 'es2022' },
+  build: {
+    target: 'es2022',
+    rollupOptions: {
+      output: {
+        // three отдельным файлом от кода мира. Раньше они лежали вместе, и
+        // правка одной строки в игре меняла имя всего бандла: вернувшийся
+        // игрок перекачивал шестьсот килобайт движка, который не менялся
+        // месяцами. Теперь выкладка правит только свой кусок.
+        manualChunks: { three: ['three'] },
+      },
+    },
+  },
   plugins: [assetStamps()],
 }));

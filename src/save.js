@@ -19,6 +19,23 @@ const INTERVAL = 30_000; // автосейв, мс
 // (другой scatter/count) старые id указывают на другие деревья. При
 // несовпадении версий срубы пропускаются, остальной мир восстанавливается.
 const FOREST_V = 2;
+// Границы, в которых позиция игрока считается осмысленной. Террейн 400 м,
+// то есть ±200 по горизонтали; по высоте берём с запасом на пещеры и гребни.
+// Проверка не от недоверия к себе: NaN, однажды попавший в позицию (провал
+// сквозь мир, деление на ноль в физике), закреплялся автосейвом навсегда, и
+// каждый следующий запуск начинался падением.
+const POS_LIMIT = 210;
+const POS_LOW = -60;
+const POS_HIGH = 200;
+
+// Позиция из сейва, которой можно верить. Всё прочее (NaN, дыра под миром,
+// координата за краем террейна) молча отбрасывается: остальной мир при этом
+// восстанавливается, а игрок просто встаёт на место первой ночи.
+function sanePos(x, y, z) {
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+  if (Math.abs(x) > POS_LIMIT || Math.abs(z) > POS_LIMIT) return false;
+  return y > POS_LOW && y < POS_HIGH;
+}
 
 // простое RLE поверх байтов снапшота следов: карта в основном нули,
 // сжимается в десятки раз
@@ -112,19 +129,37 @@ export class SaveGame {
     const db = await this._open();
     // основной путь: запись в IndexedDB
     if (db) {
+      // Чтение и применение разведены НАМЕРЕННО. Стереть мир игрока можно
+      // только тогда, когда сама запись нечитаема: раньше под ту же гребёнку
+      // попадал сбой на полпути применения и любая случайная осечка хранилища,
+      // и ночь, прожитая человеком, исчезала из-за одной неудачной попытки.
+      let d;
       try {
-        const d = await idbReq(db.transaction(DB_STORE).objectStore(DB_STORE).get(DB_KEY));
-        if (d) {
+        d = await idbReq(db.transaction(DB_STORE).objectStore(DB_STORE).get(DB_KEY));
+      } catch (e) {
+        console.warn('сейв не прочитан, мир оставлен как есть:', e);
+        return false;
+      }
+      if (d) {
+        let normalized;
+        try {
           const entries = new Array(d.editsK.length);
           for (let i = 0; i < d.editsK.length; i++) entries[i] = [d.editsK[i], d.editsV[i]];
-          this._fpCache = d.fp || null;
-          this._apply({ ...d, edits: entries, fpBytes: d.fp ? unrle(d.fp, this.fpSize) : null });
-          return true;
+          normalized = { ...d, edits: entries, fpBytes: d.fp ? unrle(d.fp, this.fpSize) : null };
+        } catch (e) {
+          // запись прочиталась, но она не та — вот это и есть битый сейв
+          console.warn('сейв разобран не был, начинаем чистую ночь:', e);
+          try { await this._wipe(); } catch (e2) { /* ignore */ }
+          return false;
         }
-      } catch (e) {
-        // битая запись — начинаем чистую ночь, не ломая запуск
-        try { await this._wipe(); } catch (e2) { /* ignore */ }
-        return false;
+        this._fpCache = d.fp || null;
+        try {
+          this._apply(normalized);
+        } catch (e) {
+          // мир восстановлен наполовину: это плохо, но не повод забыть его
+          console.warn('сейв применён не целиком:', e);
+        }
+        return true;
       }
     }
     // миграция: старый localStorage-сейв (или фолбэк-среда без IndexedDB)
@@ -155,7 +190,7 @@ export class SaveGame {
     if (d.edits && d.edits.length) this.digger.load(d.edits);
     if (d.fpBytes) this.footprints.restore(d.fpBytes);
     if (typeof d.fuel === 'number') this.campfire.fuel = d.fuel;
-    if (typeof d.px === 'number') {
+    if (sanePos(d.px, d.py, d.pz)) {
       this.player.pos.set(d.px, d.py + 0.05, d.pz); // чуть выше — не провалиться
     }
     // лопата стоит там, где её оставили (или снова в руках)

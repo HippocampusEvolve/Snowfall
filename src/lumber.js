@@ -37,7 +37,13 @@ export class Lumber {
     this.colliders = colliders;
     this.groundLogs = groundLogs;
     this.deps = deps;
-    this.animating = false; // идёт валка/дрожь — main перерисовывает тени
+    this.animating = false; // идёт валка или дрожь кроны
+    // Только валка. Разделено ради карты теней: падающий ствол её правда
+    // меняет, а дрожь после удара топором — сотые доли радиана в кроне,
+    // и тень от неё не сдвигается ни на тексель. Раньше по одному флагу
+    // полная карта перерисовывалась 60 раз в секунду всю рубку — то есть
+    // ровно в те секунды, когда игрок занят делом (см. main.js).
+    this.felling = false;
     for (const p of pines) {
       p.state = 'up'; // 'up' | 'falling' | 'down' | 'gone' (разделан до конца)
       p.hits = 0; // зарубка на стоящем стволе
@@ -216,11 +222,18 @@ export class Lumber {
     }
   }
 
+  // Сколько поленьев выйдет из ствола. Отдельно от _crash, потому что это
+  // нужно знать и до удара о землю: сейв застаёт дерево в полёте (валка идёт
+  // две секунды с лишним, автосейв не спрашивает), а записать надо уже запас.
+  _woodFor(p) {
+    return p.sapling ? 1 : THREE.MathUtils.clamp(Math.round(p.h * 0.8), 4, 10);
+  }
+
   _crash(p, playerPos, quiet = false) {
     p.state = 'down';
     p.fallT = -1;
     this._write(p, FALL_END);
-    p.wood = p.sapling ? 1 : THREE.MathUtils.clamp(Math.round(p.h * 0.8), 4, 10);
+    p.wood = this._woodFor(p);
     p.chops = 0;
 
     // столб коллайдера → лежачий отрезок вдоль ствола (через него не пройти,
@@ -264,9 +277,11 @@ export class Lumber {
 
   update(dt, playerPos) {
     this.animating = false;
+    this.felling = false;
     for (const p of this.pines) {
       if (p.state === 'falling') {
         this.animating = true;
+        this.felling = true;
         p.fallT += dt;
         const t = Math.min(p.fallT / FALL_DUR, 1);
         // накрен разгоняется как настоящий рычаг: сперва еле заметно, у земли — ух
@@ -296,8 +311,13 @@ export class Lumber {
       if (p.state === 'up') {
         if (p.hits > 0) out.push([p.id, 0, p.hits]); // зарубки тоже память
       } else {
-        // падающее на момент сейва — уже лежит: [-1] маркер поваленного
-        out.push([p.id, 1, p.wood, Math.round(p.fallYaw * 100) / 100]);
+        // падающее на момент сейва — уже лежит: [-1] маркер поваленного.
+        // Запас берём считанным, а не из p.wood: у дерева в полёте он ещё
+        // нулевой (заполняется ударом о землю), и загрузка приняла бы такой
+        // ствол за разделанный до конца — сваленное дерево исчезало вместе со
+        // всеми дровами.
+        const wood = p.state === 'falling' ? this._woodFor(p) : p.wood;
+        out.push([p.id, 1, wood, Math.round(p.fallYaw * 100) / 100]);
       }
     }
     return out;

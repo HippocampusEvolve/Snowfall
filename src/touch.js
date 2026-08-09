@@ -34,10 +34,16 @@ export class TouchControls {
   // и подсказки без телефона; мышью взгляд не водится — pointer lock не нужен)
   static supported() {
     return (
-      new URLSearchParams(location.search).has('touch') ||
+      TouchControls.forced() ||
       matchMedia('(pointer: coarse)').matches ||
       'ontouchstart' in window
     );
+  }
+
+  // `?touch` — приказ, а не признак: раскладку кнопок смотрят мышью на
+  // десктопе, и выбор режима по нажатию (main.js) этот случай обязан пропустить.
+  static forced() {
+    return new URLSearchParams(location.search).has('touch');
   }
 
   constructor(player, look) {
@@ -86,6 +92,10 @@ export class TouchControls {
     addEventListener('touchmove', (e) => this._move(e), opts);
     addEventListener('touchend', (e) => this._end(e), opts);
     addEventListener('touchcancel', (e) => this._end(e), opts);
+    // Уход со страницы забирает пальцы вместе с событиями: `touchend` придёт
+    // не всегда, а оси останутся ненулевыми — клавиши сбрасываются так же
+    // (player.js).
+    addEventListener('blur', () => this.resetInput());
   }
 
   // кнопка: touchstart/touchend без прохода до канваса и без синтетики мыши
@@ -193,5 +203,19 @@ export class TouchControls {
         this._lookId = null;
       }
     }
+  }
+
+  /**
+   * Отпустить всё: пальцы забыты, оси в ноль. Нужно там, где `touchend` до нас
+   * не дойдёт, — системный жест увёл палец за пределы страницы (шторка,
+   * сворачивание), игрок замёрз и смотрит на экран смерти. Без этого тело
+   * продолжает идти само.
+   */
+  resetInput() {
+    this._moveId = this._lookId = null;
+    const p = this.player.touch;
+    p.f = p.r = 0;
+    p.run = false;
+    p.jump = false;
   }
 }

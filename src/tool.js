@@ -48,7 +48,8 @@ function track(kf, u) {
     const [t1, v1, e] = kf[i];
     if (u > t1) continue;
     const [t0, v0] = kf[i - 1];
-    return v0 + (v1 - v0) * EASE[e]((u - t0) / (t1 - t0));
+    // кривая входа необязательна: без неё кейфрейм едет плавным `io`
+    return v0 + (v1 - v0) * (EASE[e] || EASE.io)((u - t0) / (t1 - t0));
   }
   return kf[kf.length - 1][1];
 }

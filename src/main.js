@@ -46,6 +46,28 @@ import { createShell } from './shell.js';
   };
 }
 
+// ---------- предохранитель заставки ----------
+// Ставится ПЕРВЫМ, до единой загрузки, и в этом весь смысл. Ниже по файлу
+// модуль ждёт лес, дом и лопату через await: отказ любой из этих загрузок
+// обрывает разбор модуля целиком - вместе с таймером прогрева, который стоял
+// в самом низу и до этого места просто не доживал. Мир не появлялся никогда,
+// а игрок оставался перед дышащей полосой навсегда, без единого слова о том,
+// что случилось. Теперь слово есть.
+let bootDone = false;
+function bootFailed(e) {
+  if (bootDone) return;
+  bootDone = true;
+  console.error('мир не собрался:', e);
+  const el = document.getElementById('loading');
+  if (el) {
+    el.classList.add('failed'); // прячет полосу и распускает разрядку (index.html)
+    const label = el.querySelector('span');
+    if (label) label.textContent = 'Мир не загрузился. Проверь сеть и обнови страницу';
+  }
+}
+const bootGuard = setTimeout(() => bootFailed(new Error('загрузка не уложилась в 30 с')), 30000);
+addEventListener('unhandledrejection', (ev) => bootFailed(ev.reason));
+
 // ---------- рендерер ----------
 // Ярусы качества теней (?shadows=high|medium|low): размер карты, фильтр,
 // период обновления. Карта перерисовывается по таймеру и по событиям, а не
@@ -296,10 +318,19 @@ composer.addPass(new OutputPass());
 // Esc браузер обрабатывает сам: он отпускает курсор, а по этому событию
 // возвращается экран паузы.
 const loading = document.getElementById('loading');
-const shell = createShell(() => {
+const shell = createShell((ev) => {
   audio.init();
   audio.resume();
-  if (touch) {
+  // Чем вошли, тем и играем. Раньше выбор шёл по факту «тач вообще возможен»,
+  // а `'ontouchstart' in window` истинно на любом ноутбуке с сенсорным
+  // экраном: там мир уходил в тач-режим, pointer lock не запрашивался
+  // никогда — и мышь не могла повернуть взгляд вовсе. Спрашиваем само
+  // нажатие: палец это был или мышь. Синтетический клик (Enter с клавиатуры)
+  // pointerType не несёт — тогда решает тип указателя устройства.
+  const byFinger = TouchControls.forced() || (ev && ev.pointerType
+    ? ev.pointerType !== 'mouse'
+    : matchMedia('(pointer: coarse)').matches);
+  if (touch && byFinger) {
     touch.activate(); // на таче pointer lock нет — просто входим
     shell.close();
   } else player.controls.lock();
@@ -471,11 +502,11 @@ let warmed = false;
 function warmUp() {
   if (warmed) return;
   warmed = true;
+  bootDone = true; // мир собрался: предохранитель заставки больше не нужен
+  clearTimeout(bootGuard);
   requestAnimationFrame(() => {
     const culled = [];
     scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
-    // материал вырытого снега прогревать нечем: до первого копка в сцене нет
-    // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
     // материал вырытого снега прогревать нечем: до первого копка в сцене нет
     // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
     digger.primeStart();
@@ -535,6 +566,8 @@ let caveK = 0; // 0..1 — сглаженное «мы в вырытой пещ�
 let caveTarget = 0;
 let shelterAcc = 0;
 const promptEl = document.getElementById('prompt');
+let promptShown = false; // что уже стоит в DOM: класс видимости и сам текст
+let promptLast = null;
 const _toFire = new THREE.Vector3();
 const _camRight = new THREE.Vector3();
 const _dirTmp = new THREE.Vector3();
@@ -654,7 +687,10 @@ function tick() {
   if (axe.held && chopHeld) axe.trySwing('chop');
   axe.update(dt, onAxeImpact);
   lumber.update(dt, player.pos); // дрожь крон и валка — после ударов этого кадра
-  if (lumber.animating) shadowDirty = true; // падающее дерево тащит тень за собой
+  // Падающее дерево тащит тень за собой; дрожь кроны — нет. Разница в цене
+  // велика: дрожь длится около секунды после КАЖДОГО удара топором, и на этом
+  // флаге полная карта теней перерисовывалась каждый кадр всю рубку.
+  if (lumber.felling) shadowDirty = true;
   view.update(dt, player); // sway/bob/дыхание/просадка — общие для всего, что в руках
   if (dbg) _fm[3] = performance.now(); // ловец: конец лопаты/рук
 
@@ -670,7 +706,7 @@ function tick() {
   snow.update(dt, t, camera.position, audio.windLevel, blizzard, caveK);
   aurora.update(t, blizzard);
   breath.update(dt, player.exertion, audio.windLevel);
-  campfire.update(dt, t, audio.windLevel);
+  campfire.update(dt, t, audio.windLevel, player.locked);
   cabin.update(t, dt);
   critters.update(dt);
   if (dbg) _fm[4] = performance.now(); // ловец: конец мировых систем
@@ -705,7 +741,10 @@ function tick() {
   nearPile = camera.position.distanceTo(woodpile.position) < 2.3;
   handTarget = null;
   if (!player.carrying && !shovel.held && !axe.held) {
-    let bestDot = -1;
+    // Порог прицела: рука тянется к тому, на что игрок СМОТРИТ. Без него
+    // (bestDot = -1) единственный предмет рядом брался даже строго за спиной.
+    // У рубки такой порог свой и строже — AIM в lumber.js.
+    let bestDot = 0.3;
     camera.getWorldDirection(_dirTmp);
     const consider = (kind, x, y, z, ref) => {
       _aim.set(x - camera.position.x, y - camera.position.y, z - camera.position.z);
@@ -766,8 +805,17 @@ function tick() {
         ? 'кнопки справа — ' + (shovel.held ? 'копать и намыть' : 'рубить')
         : promptText.replace('F — ', '');
   }
-  promptEl.classList.toggle('show', !!promptText && player.locked);
-  if (promptText) promptEl.textContent = promptText;
+  // DOM трогаем только на смене. Раньше подсказка писалась каждый кадр:
+  // класс и текст переставлялись 60 раз в секунду, чтобы остаться теми же.
+  const promptOn = !!promptText && player.locked;
+  if (promptOn !== promptShown) {
+    promptShown = promptOn;
+    promptEl.classList.toggle('show', promptOn);
+  }
+  if (promptText && promptText !== promptLast) {
+    promptLast = promptText;
+    promptEl.textContent = promptText;
+  }
 
   // укрытие спасает от ветра: тепло утекает как в штиль
   const effBliz = blizzard * (1 - 0.75 * shelter);
@@ -783,16 +831,20 @@ function tick() {
     camera.position.y += (Math.sin(t * 41.9 + 0.7) + Math.sin(t * 27.3 + 2.1)) * 0.5 * a;
   }
 
-  // снег постепенно заметает следы; проталина у костра живёт, пока он горит
-  fadeAcc += dt;
-  if (fadeAcc > 0.25) {
-    fadeAcc = 0;
-    footprints.fade();
-  }
-  meltAcc += dt;
-  if (meltAcc > 3) {
-    meltAcc = 0;
-    footprints.stampCircle(FIRE.x, FIRE.z, 0.8 + 1.1 * campfire.burn, 0.09 * campfire.burn);
+  // Снег постепенно заметает следы; проталина у костра живёт, пока он горит.
+  // На паузе память мира стоит: вернуться и не найти собственной тропы -
+  // то же самое, что вернуться к погасшему костру (см. campfire.update).
+  if (player.locked) {
+    fadeAcc += dt;
+    if (fadeAcc > 0.25) {
+      fadeAcc = 0;
+      footprints.fade();
+    }
+    meltAcc += dt;
+    if (meltAcc > 3) {
+      meltAcc = 0;
+      footprints.stampCircle(FIRE.x, FIRE.z, 0.8 + 1.1 * campfire.burn, 0.09 * campfire.burn);
+    }
   }
 
   // Отдача от удара лопатой. Кладём её на камеру ровно на время кадра и снимаем
