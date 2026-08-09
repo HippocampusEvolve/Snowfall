@@ -193,7 +193,15 @@ export class Player {
     // направление взгляда в плоскости XZ
     this._fwd.set(0, 0, -1).applyQuaternion(cam.quaternion);
     this._fwd.y = 0;
-    if (this._fwd.lengthSq() < 1e-6) this._fwd.set(0, 0, -1);
+    // Запасной вариант на вырожденный взгляд (строго в зенит или в надир).
+    // Раньше здесь стоял ФИКСИРОВАННЫЙ вектор −Z, и движение прыгало на север
+    // независимо от того, куда игрок повёрнут. Берём курс из самого взгляда:
+    // он верен всегда. Сам случай теперь почти недостижим — тангаж зажат не
+    // доходя до зенита (look.js), — но запасной путь не должен врать.
+    if (this._fwd.lengthSq() < 1e-6) {
+      const y = this.controls.yaw;
+      this._fwd.set(-Math.sin(y), 0, -Math.cos(y));
+    }
     this._fwd.normalize();
     this._right.crossVectors(this._fwd, cam.up).normalize();
 
@@ -220,8 +228,12 @@ export class Player {
     const damp = 1 - Math.exp(-7.5 * dt);
     this.vel.lerp(this._wish, damp);
 
-    pos.x = THREE.MathUtils.clamp(pos.x + this.vel.x * dt, -BOUNDS, BOUNDS);
-    pos.z = THREE.MathUtils.clamp(pos.z + this.vel.z * dt, -BOUNDS, BOUNDS);
+    // Куда тело ХОТЕЛО прийти за этот кадр. Запоминаем, чтобы ниже сверить с
+    // тем, куда оно пришло на самом деле, и вернуть скорости честность.
+    const wantX = pos.x + this.vel.x * dt;
+    const wantZ = pos.z + this.vel.z * dt;
+    pos.x = THREE.MathUtils.clamp(wantX, -BOUNDS, BOUNDS);
+    pos.z = THREE.MathUtils.clamp(wantZ, -BOUNDS, BOUNDS);
 
     // выталкивание корпуса из стен пещер: сэмплим плотность на нескольких
     // высотах над ступнёй; внутри грунта — ньютоновский шаг наружу по градиенту
@@ -257,6 +269,30 @@ export class Player {
     // коллизии со структурами (стволы, стены, кромки, мебель, дверь):
     // итеративный решатель — в углах и узких проходах не осциллирует
     resolveColliders(pos, HEIGHT, RADIUS, this.obstacles);
+
+    // СКОРОСТЬ ДОЛЖНА ЗНАТЬ ПРО СТЕНУ. Решатель коллизий двигает позицию и не
+    // трогает vel, а по vel считается всё остальное: шаги, качка головы, крен
+    // камеры на стрейфе, направление следов на снегу. Упёршись в ствол, тело
+    // стояло на месте, а в числах продолжало идти: замер показал 0.000 м
+    // пройденного пути за три секунды при скорости 1.5 м/с, полной качке и
+    // пяти прозвучавших шагах.
+    //
+    // Гасим ровно составляющую скорости, направленную В поверхность: суммарное
+    // выталкивание за кадр и есть её нормаль. Вдоль стены движение остаётся -
+    // это то же самое, что делает octree-ветка Winter Tower, только нормаль
+    // приходит не от одного касания, а от всех сразу, включая границу мира.
+    const blockX = pos.x - wantX;
+    const blockZ = pos.z - wantZ;
+    const blockLen = Math.hypot(blockX, blockZ);
+    if (blockLen > 1e-6) {
+      const nx = blockX / blockLen;
+      const nz = blockZ / blockLen;
+      const into = this.vel.x * nx + this.vel.z * nz;
+      if (into < 0) {
+        this.vel.x -= nx * into;
+        this.vel.z -= nz * into;
+      }
+    }
 
     const speed = Math.hypot(this.vel.x, this.vel.z);
     const moving = speed > 0.35;

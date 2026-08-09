@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { VIEW_Z } from './viewmodel.js';
+import { stepSpring } from './spring.js';
 
 // Общий риг ручного инструмента (лопата, топор; дальше — фонарь, пила).
 // Инструмент живёт в мире (воткнут/лежит), F — взять в руки, F — оставить.
@@ -105,8 +106,12 @@ export class HeldTool {
     // к виду, своя отдача у него в кейфреймах. main.js накладывает punch на
     // камеру перед рендером и снимает сразу после — иначе viewmodel прочитал
     // бы его как угловую скорость взгляда (рывок sway).
+    //
+    // Живёт двумя пружинами, наружу отдаётся только угол: импульс удара
+    // кладётся в СКОРОСТЬ, а не в угол — старт мягкий, спад упругий.
     this.punch = { pitch: 0, roll: 0 };
-    this._punchV = { pitch: 0, roll: 0 };
+    this._pitchSpring = { x: 0, v: 0 };
+    this._rollSpring = { x: 0, v: 0 };
   }
 
   get busy() {
@@ -163,16 +168,15 @@ export class HeldTool {
 
   // отдача камеры: импульс в скорость (не в угол) — старт мягкий, спад упругий
   _kick({ pitch, roll }) {
-    this._punchV.pitch += pitch;
-    this._punchV.roll += roll * this.cross;
+    this._pitchSpring.v += pitch;
+    this._rollSpring.v += roll * this.cross;
   }
 
   _punchStep(dt) {
-    const w = PUNCH_W;
-    for (const c of ['pitch', 'roll']) {
-      this._punchV[c] += (-w * w * this.punch[c] - 2 * w * this._punchV[c]) * dt;
-      this.punch[c] += this._punchV[c] * dt;
-    }
+    stepSpring(this._pitchSpring, PUNCH_W, dt);
+    stepSpring(this._rollSpring, PUNCH_W, dt);
+    this.punch.pitch = this._pitchSpring.x;
+    this.punch.roll = this._rollSpring.x;
   }
 
   // onImpact(kind) зовётся один раз в момент врезания и возвращает, был ли

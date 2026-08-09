@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { stepSpring } from './spring.js';
 
 // Слой viewmodel: то, что игрок держит в руках, живёт в СВОЕЙ сцене со своей
 // камерой. Так устроен любой FPS, и ровно по двум причинам:
@@ -65,8 +66,7 @@ export class ViewModel {
     this.swayYaw = 0;
     this.swayPitch = 0;
     this.breathT = 0;
-    this.dip = 0; // просадка при приземлении
-    this.dipV = 0;
+    this.dip = { x: 0, v: 0 }; // просадка при приземлении (см. spring.js)
   }
 
   add(obj) {
@@ -84,7 +84,7 @@ export class ViewModel {
 
   // приземление: короткий провал рига вниз (импульс в пружину просадки)
   land(impact) {
-    this.dipV -= clamp(Math.abs(impact) * 0.05, 0.05, 0.40);
+    this.dip.v -= clamp(Math.abs(impact) * 0.05, 0.05, 0.40);
   }
 
   update(dt, player) {
@@ -126,14 +126,12 @@ export class ViewModel {
     const breathY = Math.sin(this.breathT) * bAmp;
     const breathZ = Math.sin(this.breathT * 0.5) * bAmp * 0.5;
 
-    // --- просадка при приземлении: критически задемпфированная пружина (без отскока)
-    const w = 16;
-    this.dipV += (-w * w * this.dip - 2 * w * this.dipV) * dt;
-    this.dip += this.dipV * dt;
+    // --- просадка при приземлении: критически задемпфированная пружина (см. spring.js)
+    stepSpring(this.dip, 16, dt);
 
     this.rig.position.set(
       bobX - this.swayYaw * 0.18,
-      bobY + breathY + this.dip + this.swayPitch * 0.18,
+      bobY + breathY + this.dip.x + this.swayPitch * 0.18,
       (bobZ + breathZ) * VIEW_Z
     );
     this.rig.rotation.set(

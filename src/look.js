@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { stepSpring } from './spring.js';
 
 // Взгляд от первого лица с ТЕЛОМ — замена PointerLockControls (API совместим:
 // lock()/unlock(), isLocked, события 'lock'/'unlock').
@@ -19,7 +20,12 @@ import * as THREE from 'three';
 // ?rawlook — сырой 1:1 взгляд без сглаживания и эффектов (если укачивает).
 
 const SENS = 0.002; // рад/пиксель — как у PointerLockControls
-const PI_2 = Math.PI / 2;
+// Тангаж зажимаем НЕ ДОХОДЯ до зенита. Ровно в ±90° разложение YXZ вырождается:
+// поворот вокруг вертикали и крен становятся одной осью, и при малейшем крене
+// взгляд рвёт по рысканью. Хуже того, ровно там горизонтальная составляющая
+// направления обнуляется, и player.js уходил в запасной вектор — движение
+// прыгало на фиксированный курс независимо от того, куда игрок смотрел.
+const PI_2 = Math.PI / 2 - 0.02;
 const clamp = THREE.MathUtils.clamp;
 
 export class SmoothLook extends THREE.EventDispatcher {
@@ -47,8 +53,7 @@ export class SmoothLook extends THREE.EventDispatcher {
     this.pitch = this.tPitch = e.x;
 
     this._roll = 0;
-    this._kick = 0; // клевок приземления (рад) и его скорость
-    this._kickV = 0;
+    this._kick = { x: 0, v: 0 }; // клевок приземления, рад (см. spring.js)
     this._accSm = 0; // сглаженное продольное ускорение тела
     this._prevFwd = 0;
     this._breathT = 0;
@@ -85,7 +90,7 @@ export class SmoothLook extends THREE.EventDispatcher {
   // приземление: клевок взгляда вниз, сила — по скорости касания
   land(impact) {
     if (this.cfg.raw) return;
-    this._kickV -= clamp(Math.abs(impact) * 0.12, 0.15, 0.9);
+    this._kick.v -= clamp(Math.abs(impact) * 0.12, 0.15, 0.9);
   }
 
   // звать РАНЬШЕ физики игрока: движение должно идти по свежему взгляду
@@ -119,10 +124,8 @@ export class SmoothLook extends THREE.EventDispatcher {
       c.strafeRoll * clamp(lat / 1.5, -1, 1);
     this._roll += (rollT - this._roll) * (1 - Math.exp(-c.rollRate * dt));
 
-    // клевок приземления: критически задемпфированная пружина
-    const w = 14;
-    this._kickV += (-w * w * this._kick - 2 * w * this._kickV) * dt;
-    this._kick += this._kickV * dt;
+    // клевок приземления: критически задемпфированная пружина (см. spring.js)
+    stepSpring(this._kick, 14, dt);
 
     // микронаклон при разгоне/торможении
     const acc = dt > 1e-4 ? (fwd - this._prevFwd) / dt : 0;
@@ -136,7 +139,7 @@ export class SmoothLook extends THREE.EventDispatcher {
     this._breathT += dt * Math.PI * 2 * (0.22 + 0.35 * player.exertion);
     const breath = Math.sin(this._breathT) * (0.0012 + 0.0035 * player.exertion) * idle * c.breath;
 
-    this._euler.set(this.pitch + this._kick + accP + breath, this.yaw, this._roll, 'YXZ');
+    this._euler.set(this.pitch + this._kick.x + accP + breath, this.yaw, this._roll, 'YXZ');
     this.camera.quaternion.setFromEuler(this._euler);
   }
 }
