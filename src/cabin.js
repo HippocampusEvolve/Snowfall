@@ -3,6 +3,7 @@ import { createGLTFLoader } from './gltfload.js';
 import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
 import { snowCap } from './snowcap.js';
+import { buildFirebox } from './firebox.js';
 
 // Домик: Scandinavian Log Cabin (rivetech, CC-BY). Масштаб к реальным метрам,
 // посадка в снег по рельефу, снег на крыше и кромках брёвен через snowTint.
@@ -315,7 +316,7 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
       syncDoor();
     }
 
-    interior.update(t);
+    interior.update(t, dt);
   }
 
   return {
@@ -429,30 +430,14 @@ function buildInterior(F) {
     })
     .catch(() => {}); // нет файла — огонь и свет всё равно на месте
 
-  // Топка: проём 1.12 шириной и 0.96 высотой, низ на подиуме (0.14), дно
-  // полости в 11.5 см от стены. Числа не на глаз — из стадии формы
-  // (temp/props/fireplace/stages/s1_form.py).
-  const mouth = { x: stove.x, y: F + 0.14, z: stove.z + 0.40 };
-  // Огонь в топке — светится и пульсирует. Пока это светящаяся плита,
-  // как было у каменки; настоящее шейдерное пламя из campfire.js сюда просится
-  // и подойдёт как есть, но это отдельный заход.
-  const emberMat = new THREE.MeshStandardMaterial({
-    color: 0x1a0d05,
-    emissive: 0xff5f1e,
-    emissiveIntensity: 1.5,
-    roughness: 0.6,
-  });
-  mesh(new THREE.BoxGeometry(0.62, 0.34, 0.04), emberMat, mouth.x, mouth.y + 0.17, mouth.z - 0.06);
-  // поленья в топке, на которых огонь и держится
-  const fireLogGeo = new THREE.CylinderGeometry(0.05, 0.055, 0.66, 7);
-  const fireLogMat = new THREE.MeshStandardMaterial({ color: 0x33210f, roughness: 0.95 });
-  for (const [dx, dy, dz, rz] of [[-0.06, 0.05, 0.02, 0.06], [0.08, 0.05, -0.06, -0.04], [0.0, 0.14, -0.02, 0.09]]) {
-    mesh(fireLogGeo, fireLogMat, mouth.x + dx, mouth.y + dy, mouth.z + dz, 0, Math.PI / 2 + rz);
-  }
-  // свет огня: у самого устья, чтобы он выходил в комнату, а не грел заднюю стенку
-  const ember = new THREE.PointLight(0xff8a40, 3.1, 8.5, 2);
-  ember.position.set(mouth.x, mouth.y + 0.28, mouth.z + 0.34);
-  g.add(ember);
+  // Нутро топки — в firebox.js: футеровка кирпичом, под с золой, угли,
+  // поленья, объёмное пламя и свет. Числа полости там же, они обмерены по самой
+  // модели лучом, а не взяты на глаз.
+  //
+  // До этого в топке стояла светящаяся плита 0.62 x 0.34 и три голых цилиндра —
+  // ровно то, что глаз читал как «яркий прямоугольник в нише», а не как огонь в
+  // горячей глубине.
+  const firebox = buildFirebox(g, { x: stove.x, y: F, z: stove.z });
   // Коллайдер — отрезок: камин это плита 2.32 на 1.18 у стены, и кругом её
   // не описать, не отобрав у комнаты угол.
   colliders.push({
@@ -590,11 +575,9 @@ function buildInterior(F) {
   hearth.position.set(lampX, lampY, lampZ);
   g.add(hearth);
 
-  // мерцание углей, свечи и тёплого фонаря
-  function update(t) {
-    const fk = 0.72 + 0.18 * Math.sin(t * 9.7) + 0.1 * Math.sin(t * 23.3 + 1.7);
-    ember.intensity = 2.4 * fk;
-    emberMat.emissiveIntensity = 1.8 * fk;
+  // мерцание огня в топке, свечи и тёплого фонаря
+  function update(t, dt = 0) {
+    firebox.update(dt, t);
     const ck = 0.8 + 0.13 * Math.sin(t * 12.7 + 2.1) + 0.07 * Math.sin(t * 31.7);
     candle.intensity = 1.15 * ck;
     flameMat.emissiveIntensity = 3.2 * ck;
@@ -607,7 +590,7 @@ function buildInterior(F) {
 
   // hearth — устье, а не середина печи: тепло считают от него. У буржуйки
   // разницы почти не было, у каменки середина приходится в толщу кладки.
-  return { group: g, colliders, stove, hearth: { x: mouth.x, z: mouth.z }, update };
+  return { group: g, colliders, stove, hearth: firebox.hearth, update };
 }
 
 // Реальные ассеты мебели (Poly Haven, CC0, glTF 1k) поверх процедурного

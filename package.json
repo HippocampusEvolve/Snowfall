@@ -14,7 +14,8 @@
   "dependencies": {
     "@capacitor/android": "^7.6.8",
     "@capacitor/core": "^7.6.8",
-    "three": "^0.170.0"
+    "three": "^0.170.0",
+    "world-core": "github:HippocampusEvolve/world-core"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.6.8",

@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { fbm } from 'world-core/materials';
 import { snowTint } from './snowtint.js';
 import { createGLTFLoader } from './gltfload.js';
 import { asset } from './asset.js';
+import { FlameSheets } from './flame.js';
 
 // Костёр: кольцо камней из Blender (firepit.glb), зола, поленья с процедурной
 // корой, тлеющие угли; пламя покадровой текстурой, искры, дым, мерцающий
@@ -58,62 +60,6 @@ export function loadFirepitModel() {
 }
 
 loadFirepitModel();
-
-// ---- шум для пламени ----
-// Пламя рисуется не шейдером, а покадрово в маленький canvas: так язычок
-// можно вести по высоте — сузить кверху, качнуть, разорвать турбулентностью.
-// Хеш целочисленный (без sin), value-шум сглажен, fbm складывает октавы.
-function hash2(x, y, s) {
-  let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(s | 0, 0x9e3779b1);
-  h ^= h >>> 15;
-  h = Math.imul(h, 0x2545f491);
-  h ^= h >>> 13;
-  h = Math.imul(h, 0x27d4eb2d);
-  h ^= h >>> 16;
-  return (h >>> 0) / 4294967296;
-}
-function wrapi(a, n) {
-  a %= n;
-  return a < 0 ? a + n : a;
-}
-// px/py — периоды решётки: шум замыкается сам на себя и не «расползается»
-function vnoise(x, y, px, py, s) {
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const fx = x - xi;
-  const fy = y - yi;
-  const u = fx * fx * (3 - 2 * fx);
-  const v = fy * fy * (3 - 2 * fy);
-  const x0 = wrapi(xi, px);
-  const x1 = wrapi(xi + 1, px);
-  const y0 = wrapi(yi, py);
-  const y1 = wrapi(yi + 1, py);
-  const a = hash2(x0, y0, s);
-  const b = hash2(x1, y0, s);
-  const c = hash2(x0, y1, s);
-  const d = hash2(x1, y1, s);
-  const t = a + (b - a) * u;
-  const q = c + (d - c) * u;
-  return t + (q - t) * v;
-}
-function fbm(x, y, px, py, oct, s) {
-  let amp = 1;
-  let f = 1;
-  let sum = 0;
-  let nrm = 0;
-  for (let i = 0; i < oct; i++) {
-    sum += amp * vnoise(x * f, y * f, px * f, py * f, s + i * 7919);
-    nrm += amp;
-    amp *= 0.5;
-    f *= 2;
-  }
-  return sum / nrm;
-}
-const cl01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
-function ss(e0, e1, x) {
-  const t = cl01((x - e0) / (e1 - e0));
-  return t * t * (3 - 2 * t);
-}
 
 // размер полотна пламени: мельче — видно ступеньки, крупнее — дорого на телефоне
 const FLAME_W = 72;
@@ -233,41 +179,20 @@ export class Campfire {
     this.group.add(new THREE.Mesh(mergeGeometries(emberGeos), this.emberMat));
 
     // ---- пламя: три скрещенных полотна с покадровой текстурой ----
-    // Полотен три, под 60 градусов: с любой стороны огонь читается объёмным,
-    // а ребро полотна не поймать (на двух крестом оно ловилось и огонь
-    // схлопывался в плоскую картинку).
-    const flameCanvas = document.createElement('canvas');
-    flameCanvas.width = FLAME_W;
-    flameCanvas.height = FLAME_H;
-    this.fctx = flameCanvas.getContext('2d');
-    this.fimg = this.fctx.createImageData(FLAME_W, FLAME_H);
-    this.ftex = new THREE.CanvasTexture(flameCanvas);
-    this.ftex.colorSpace = THREE.SRGBColorSpace;
-    this._fAcc = 0; // накопитель кадров текстуры
-    const flameMat = new THREE.MeshBasicMaterial({
-      map: this.ftex,
-      // чуть выше единицы: ядро перешагивает порог bloom (0.82) и обрастает
-      // ореолом, а тонмаппинг его не съедает (toneMapped: false). Выше 1.2
-      // язычки сливаются в белое пятно — проверено на снегу у избы
+    // Устройство и форма — в flame.js: тот же огонь горит в камине, только
+    // вытянутый. Цвет чуть выше единицы: ядро перешагивает порог bloom (0.82)
+    // и обрастает ореолом. Выше 1.2 язычки сливаются в белое пятно —
+    // проверено на снегу у избы.
+    this.flame = new FlameSheets({
+      w: FLAME_PW,
+      h: FLAME_PH,
+      texW: FLAME_W,
+      texH: FLAME_H,
+      fps: FLAME_FPS,
       color: new THREE.Color(1.15, 1.08, 1),
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      toneMapped: false,
-      fog: false,
-    });
-    const flameGeo = new THREE.PlaneGeometry(FLAME_PW, FLAME_PH);
-    this.flames = [];
-    for (let i = 0; i < 3; i++) {
-      const f = new THREE.Mesh(flameGeo, flameMat);
-      f.position.y = 0.095 + FLAME_PH / 2;
-      f.rotation.y = (i * Math.PI) / 3;
-      f.renderOrder = 3;
-      this.flames.push(f);
-      this.group.add(f);
-    }
-    this._drawFlame(0, 1); // первый кадр — чтобы прогрев сцены увидел пламя, а не пустоту
+    }).addTo(this.group);
+    this.flames = this.flame.sheets;
+    for (const f of this.flames) f.position.y = 0.095 + FLAME_PH / 2;
 
     // ---- угли-искры ----
     // Каждая искра живёт сама по себе: рождается над углями, всплывает,
@@ -378,40 +303,6 @@ export class Campfire {
     return 0.12 + 0.88 * this.burn;
   }
 
-  // Кадр пламени: снизу широкое, кверху сужается и рвётся турбулентностью,
-  // ядро выбелено. Всё полотно медленно качает вбок — огонь «дышит».
-  // b — сила горения: на углях язычки истаивают в ноль.
-  _drawFlame(t, b) {
-    const d = this.fimg.data;
-    const k = ss(0.12, 0.45, b);
-    let i = 0;
-    for (let y = 0; y < FLAME_H; y++) {
-      const v = 1 - y / FLAME_H; // 0 у углей, 1 на верхушке
-      const taper = Math.pow(1 - v, 0.62); // кверху язычок тоньше
-      const sway = Math.sin(t * 2.1 + v * 3.6) * 0.1 * v + Math.sin(t * 3.7 + v * 6) * 0.045 * v;
-      for (let x = 0; x < FLAME_W; x++, i++) {
-        const u = x / FLAME_W - 0.5;
-        const turb = fbm((x / FLAME_W) * 3.2, (y / FLAME_H) * 3.4 + t * 1.35, 8, 64, 4, 1451) - 0.5;
-        const dist = Math.abs(u - sway) / (taper * 0.6 + 0.02);
-        const val = 1 - dist + turb * (0.45 + v * 1.05) - v * 0.42;
-        // сверху язычок тает, у самого низа — уходит в угли, а не режется краем
-        const a = ss(0.26, 0.58, val) * (1 - ss(0.56, 0.95, v)) * ss(0, 0.045, v);
-        const core = ss(0.55, 0.92, val) * (1 - ss(0.2, 0.72, v)) * 0.95;
-        const m = ss(0.3, 0.7, val);
-        const r = 186 + (255 - 186) * m;
-        const g = 30 + (146 - 30) * m;
-        const bl = 4 + (26 - 4) * m;
-        const o = i * 4;
-        d[o] = r + (255 - r) * core;
-        d[o + 1] = g + (240 - g) * core;
-        d[o + 2] = bl + (196 - bl) * core;
-        d[o + 3] = a * 255 * k;
-      }
-    }
-    this.fctx.putImageData(this.fimg, 0, 0);
-    this.ftex.needsUpdate = true;
-  }
-
   // spend — идёт ли игра. На паузе огонь живёт (пламя дрожит, свет качается:
   // мир за полупрозрачным гейтом остаётся живым), но запас не тратит. Так же
   // устроено тепло игрока в stats.js: уйти на десять минут и вернуться к
@@ -456,11 +347,7 @@ export class Campfire {
     }
     // текстуру пламени пересчитываем 30 раз в секунду: покадрово на телефоне
     // это заметный кусок кадра, а разницы на глаз нет
-    this._fAcc += dt;
-    if (this._fAcc >= 1 / FLAME_FPS) {
-      this._fAcc = 0;
-      this._drawFlame(t, b);
-    }
+    this.flame.frame(dt, t, b);
 
     // искры
     const pos = this.sparkPos;
