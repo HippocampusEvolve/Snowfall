@@ -55,11 +55,16 @@ export class GameAudio {
     // живёт своей жизнью: ветер и костёр закольцованы и продолжали бы выть в
     // наушниках соседней вкладки. Возврат заодно лечит контекст, заглохший не
     // по нашей воле (звонок на телефоне уводит его в interrupted).
-    document.addEventListener('visibilitychange', () => {
-      if (!this.ctx) return;
-      if (document.hidden) this.ctx.suspend();
-      else this.resume();
-    });
+    //
+    // Проверка на DOM не лишняя: этот же модуль считается на Node в проверке
+    // звука (`tools/sound-check-kit`), где вкладок нет вовсе.
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (!this.ctx) return;
+        if (document.hidden) this.ctx.suspend();
+        else this.resume();
+      });
+    }
   }
 
   // ---------- пространство ----------
