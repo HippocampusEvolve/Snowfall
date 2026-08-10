@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { makeSet, material, planeUV, cylinderUV, boxUV, quadGeometry } from 'world-core/materials';
+import { material, planeUV, cylinderUV, boxUV, quadGeometry } from 'world-core/materials';
+import { matsets } from './matsets.js';
 import { FlameSheets, FLAME_HEARTH } from './flame.js';
 
 // Нутро топки камина: футеровка, под с золой, угли, поленья, пламя, свет.
@@ -87,19 +88,16 @@ export const CHIPS = [
 ];
 
 // Наборы карт считаются один раз на всю игру и раздаются материалам: клон
-// текстуры ради своего числа повторов ничего не стоит (см. world-core).
-let sets = null;
+// текстуры ради своего числа повторов ничего не стоит (см. world-core). Кэш
+// общий с камином снаружи — он же берёт кирпич и брус (см. `matsets.js`).
 function loadSets() {
-  if (!sets) {
-    sets = {
-      brick: makeSet('brick'), // огнеупорный кирпич, сажа кверху гуще
-      hearth: makeSet('hearth'), // плиты пода
-      bark: makeSet('bark'),
-      logend: makeSet('logend'),
-      beam: makeSet('beam'),
-    };
-  }
-  return sets;
+  return matsets(
+    'brick', // огнеупорный кирпич, сажа кверху гуще
+    'hearth', // плиты пода
+    'bark',
+    'logend',
+    'beam',
+  );
 }
 
 /** Мягкое круглое пятно: контактная тень под поленом и сияние над углями. */

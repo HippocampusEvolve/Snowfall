@@ -22,9 +22,9 @@
  * Порог здесь общий и жёсткий (MIN_GAP), под конкретную деталь он не
  * подкручивается: претензия гасится правкой сцены, а не допуском в проверке.
  */
-import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readGLB } from './glb.mjs'
 import {
   CAVITY,
   sideAt,
@@ -45,46 +45,32 @@ const GLB = path.join(here, '..', 'public', 'models', 'props', 'fireplace.glb')
 const MIN_GAP = 0.008
 
 // ---------------------------------------------------------------------------
-// разбор .glb: позиции и треугольники, без зависимостей
-function readGLB(file) {
-  const buf = fs.readFileSync(file)
-  const total = buf.readUInt32LE(8)
-  let off = 12
-  let js = null
-  let bin = null
-  while (off < total) {
-    const len = buf.readUInt32LE(off)
-    const kind = buf.readUInt32LE(off + 4)
-    const body = buf.subarray(off + 8, off + 8 + len)
-    if (kind === 0x4e4f534a) js = JSON.parse(body.toString('utf8'))
-    else if (kind === 0x004e4942) bin = body
-    off += 8 + len
-  }
-  const acc = (i) => {
-    const a = js.accessors[i]
-    const v = js.bufferViews[a.bufferView]
-    const start = (v.byteOffset || 0) + (a.byteOffset || 0)
-    const comps = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }[a.type]
-    const out = new Float64Array(a.count * comps)
-    const readers = {
-      5121: (o) => bin.readUInt8(o),
-      5123: (o) => bin.readUInt16LE(o),
-      5125: (o) => bin.readUInt32LE(o),
-      5126: (o) => bin.readFloatLE(o),
+// Вся геометрия модели, ВСЕМИ примитивами.
+//
+// Раньше здесь брался `meshes[0].primitives[0]` - пока камин был одним мешем с
+// одним запечённым атласом, это была вся модель. После перевода на тайлящиеся
+// материалы (`fireplace-retile.mjs`) он разложен по ролям: камень, кирпич
+// топки, брус полки - три примитива. Проверка, читающая первый, перестаёт
+// видеть заднюю стенку и свод полости и меряет расстояние до наружной кладки:
+// «задняя стенка 0.357 вместо 0.115». Симптом выглядит как поехавшая модель, а
+// поехала - проверка.
+function loadModel(file) {
+  const { json, accessor } = readGLB(file)
+  const pos = []
+  const idx = []
+  for (const mesh of json.meshes) {
+    for (const prim of mesh.primitives) {
+      const p = accessor(prim.attributes.POSITION)
+      const i = accessor(prim.indices)
+      const base = pos.length / 3
+      for (const v of p) pos.push(v)
+      for (const v of i) idx.push(v + base)
     }
-    const size = { 5121: 1, 5123: 2, 5125: 4, 5126: 4 }[a.componentType]
-    const read = readers[a.componentType]
-    const stride = v.byteStride || size * comps
-    for (let k = 0; k < a.count; k++) {
-      for (let c = 0; c < comps; c++) out[k * comps + c] = read(start + k * stride + c * size)
-    }
-    return out
   }
-  const prim = js.meshes[0].primitives[0]
-  return { pos: acc(prim.attributes.POSITION), idx: acc(prim.indices) }
+  return { pos: Float64Array.from(pos), idx: Float64Array.from(idx) }
 }
 
-const { pos, idx } = readGLB(GLB)
+const { pos, idx } = loadModel(GLB)
 const TRIS = idx.length / 3
 
 /** Ближайшее пересечение луча с моделью, или null. Мёллер-Трумбор. */
