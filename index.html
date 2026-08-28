@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SNOWFALL</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>❄️</text></svg>" />
   <!-- ПРЕЛОАДА ЗДЕСЬ БОЛЬШЕ НЕТ, и это результат замера, а не забывчивость.
@@ -28,7 +28,7 @@
       color-scheme: dark;
       --bg: #04060c;      /* фон мира: тот же цвет, что у неба в кадре */
       --ink: #cfd8ea;     /* основной текст */
-      --dim: #62719a;     /* тихий текст: подписи и тихие ссылки */
+      --dim: #7182ad;     /* тихий текст: подписи и тихие ссылки */
       --accent: #ffb163;  /* акцент мира — тот же, что на карточке витрины */
       --edge: rgba(255, 177, 99, 0.45); /* та же краска в рамке кнопки */
       --glow: rgba(255, 177, 99, 0.12); /* и в её подсветке под курсором */
@@ -56,7 +56,7 @@
       font-size: 0.8rem; letter-spacing: 0.4em; text-indent: 0.4em; color: var(--dim);
       transition: opacity 0.6s ease;
     }
-    #loading.hidden { opacity: 0; pointer-events: none; }
+    #loading.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
 
     /* Загрузка не состоялась: полоса врёт о продолжении, и её не остаётся.
        Разрядка тоже уходит - она хороша для двух слов, а не для просьбы
@@ -66,6 +66,7 @@
       letter-spacing: 0.08em; text-indent: 0; text-align: center;
       max-width: 22rem; line-height: 1.7;
     }
+    #loading .boot-retry { margin-top: 0.4rem; }
 
     /* Пока модуль игры не разобран, о долях ничего не известно — полоса просто
        «дышит» на CSS-анимации, без единой строчки JS. Как только main.js
@@ -96,7 +97,7 @@
       backdrop-filter: blur(6px);
       transition: opacity 0.5s ease;
     }
-    #gate.hidden { opacity: 0; pointer-events: none; }
+    #gate.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
     /* Кегль ведёт себя от ширины экрана осторожно: имя мира — одно длинное
        слово с большим трекингом, и на 360 px оно упиралось в края. */
     #gate h1 {
@@ -119,13 +120,16 @@
       cursor: pointer; transition: all 0.25s ease;
     }
     .btn:hover { background: var(--glow); border-color: var(--accent); }
+    .btn:focus-visible, .quiet:focus-visible, #exit:focus-visible, .tbtn:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 4px;
+    }
 
     /* Тихие ссылки под кнопкой: выход из мира и всё, что мир добавит от себя. */
     .quiet {
       margin-top: 1.8rem;
       font: inherit; font-size: 0.68rem;
       letter-spacing: 0.28em; text-indent: 0.28em; text-transform: uppercase;
-      color: var(--dim); opacity: 0.75; text-decoration: none;
+      color: var(--dim); opacity: 1; text-decoration: none;
       background: transparent; border: none; cursor: pointer;
       transition: opacity 0.25s ease, color 0.25s ease;
     }
@@ -186,9 +190,10 @@
       position: fixed; inset: 0; z-index: 30;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       background: rgba(3, 4, 10, 0.92);
-      opacity: 0; pointer-events: none; transition: opacity 3.5s ease;
+      opacity: 0; visibility: hidden; pointer-events: none;
+      transition: opacity 3.5s ease, visibility 0s linear 3.5s;
     }
-    #death.show { opacity: 1; pointer-events: auto; }
+    #death.show { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
     #death h2 {
       font-size: clamp(1.6rem, 4.5vw, 3rem); font-weight: 200;
       letter-spacing: 0.5em; text-indent: 0.5em; color: #b9c9ea;
@@ -226,21 +231,26 @@
       touch-action: none; user-select: none; -webkit-user-select: none;
       -webkit-touch-callout: none;
     }
+    @media (prefers-reduced-motion: reduce) {
+      #loadFill { animation: none; left: 0; }
+      #loading, #gate, #death, #frost, #prompt, .tbtn, #exit { transition: none; }
+      #gate { backdrop-filter: none; }
+    }
   </style>
 </head>
 <body>
   <div id="vignette"></div>
 
-  <div id="loading">
+  <div id="loading" role="status" aria-live="polite" aria-busy="true">
     <span>СНЕГ ИДЁТ…</span>
-    <div id="loadBar"><div id="loadFill"></div></div>
+    <div id="loadBar" role="progressbar" aria-label="Загрузка ресурсов"><div id="loadFill"></div></div>
   </div>
 
   <a id="exit" href="https://find-the-end.fun/" aria-label="Выйти на витрину">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
   </a>
 
-  <div id="gate" class="hidden">
+  <div id="gate" class="hidden" inert aria-hidden="true">
     <h1>SNOWFALL</h1>
     <p class="mood">Минус четырнадцать. Свет в окне горит не для тебя.</p>
     <button id="enter" class="btn" type="button" data-resume="продолжить">войти в ночь</button>
@@ -252,12 +262,13 @@
 
   <div id="frost"></div>
 
-  <div id="death">
-    <h2>ВЫ ЗАМЁРЗЛИ</h2>
+  <div id="death" role="alertdialog" aria-modal="true" aria-labelledby="death-title" inert aria-hidden="true">
+    <h2 id="death-title">ВЫ ЗАМЁРЗЛИ</h2>
     <p>ночь оказалась длиннее вас</p>
     <button id="retry" class="btn" type="button">ещё раз</button>
   </div>
 
+  <script type="module" src="/boot.js"></script>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

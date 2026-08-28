@@ -102,22 +102,26 @@ export class SaveGame {
     this.disabled = false; // взводит reset(): не дать автосейву записать мир обратно
     this.fpSize = 384 * 384 * 4; // размер снапшота следов (footprints.SNAP)
     this._db = null; // кэш соединения; null после неудачи → фолбэк на localStorage
-    this._dbTried = false;
+    this._dbPromise = null; // один общий open: параллельный вызов не получает ложный null
     this._fpCache = null; // последний RLE-снапшот следов — для sync-сейва (pagehide)
-    this._saving = false; // защёлка от наложения автосейвов (sync-сейв игнорирует)
+    this._saving = false;
+    this._savingPromise = Promise.resolve();
+    this._saveGeneration = 0; // более новый pagehide-сейв отменяет старый async snapshot
   }
 
-  async _open() {
-    if (this._dbTried) return this._db;
-    this._dbTried = true;
-    try {
-      const rq = indexedDB.open(DB_NAME, 1);
-      rq.onupgradeneeded = () => rq.result.createObjectStore(DB_STORE);
-      this._db = await idbReq(rq);
-    } catch (e) {
-      this._db = null; // приватный режим/старый браузер — живём на localStorage
-    }
-    return this._db;
+  _open() {
+    if (this._dbPromise) return this._dbPromise;
+    this._dbPromise = (async () => {
+      try {
+        const rq = indexedDB.open(DB_NAME, 1);
+        rq.onupgradeneeded = () => rq.result.createObjectStore(DB_STORE);
+        this._db = await idbReq(rq);
+      } catch (e) {
+        this._db = null; // приватный режим/старый браузер — живём на localStorage
+      }
+      return this._db;
+    })();
+    return this._dbPromise;
   }
 
   // читает сохранение и восстанавливает мир; вернуть false — мир новый
@@ -256,39 +260,63 @@ export class SaveGame {
     return data;
   }
 
-  // sync: путь pagehide/скрытой вкладки — ничего не ждём перед записью
-  // (снапшот следов берётся из кэша прошлого автосейва), транзакция
-  // стартует до смерти страницы. Обычный автосейв обновляет снапшот
-  // асинхронным readback'ом — без стойла GPU в кадре.
-  async save({ sync = false } = {}) {
-    if (this.disabled) return;
-    if (this._saving && !sync) return; // прошлый ещё пишется — интервал догонит
-    this._saving = true;
-    try {
-      if (!sync) {
-        try {
-          this._fpCache = rle(await this.footprints.snapshotAsync());
-        } catch (e) {
-          this._fpCache = rle(this.footprints.snapshot()); // нет PBO — раз в 30с терпимо
-        }
-      } else if (!this._fpCache) {
-        this._fpCache = rle(this.footprints.snapshot()); // самый первый сейв — синхронно
-      }
-      const data = this._collect();
-      const db = await this._open();
-      if (db) {
-        const tx = db.transaction(DB_STORE, 'readwrite');
-        tx.objectStore(DB_STORE).put(data, DB_KEY);
-        await new Promise((resolve, reject) => {
-          tx.oncomplete = resolve;
-          tx.onerror = () => reject(tx.error);
-          tx.onabort = () => reject(tx.error);
-        });
-      } else {
+  _write(data, generation) {
+    if (generation !== this._saveGeneration || this.disabled) return Promise.resolve(false);
+
+    const write = (db) => {
+      if (generation !== this._saveGeneration || this.disabled) return Promise.resolve(false);
+      if (!db) {
         this._saveLS(data);
+        return Promise.resolve(true);
       }
+      // Когда соединение уже открыто, транзакция создаётся синхронно. Это
+      // важно для pagehide: до первого await браузер успевает принять запись.
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).put(data, DB_KEY);
+      return new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    };
+
+    return this._db ? write(this._db) : this._open().then(write);
+  }
+
+  // sync: путь pagehide/скрытой вкладки. Состояние снимается и транзакция
+  // начинается без предварительного await. Номер поколения не даёт старому
+  // async snapshot перезаписать более свежую запись после возвращения GPU.
+  save({ sync = false } = {}) {
+    if (this.disabled) return Promise.resolve(false);
+    // Обычный таймер не должен инвалидировать уже запущенную запись: он
+    // просто дожидается её. Синхронный pagehide-снимок, напротив, получает
+    // новое поколение и не даёт старому async-снапшоту записаться поверх.
+    if (!sync && this._saving) return this._savingPromise;
+
+    const generation = ++this._saveGeneration;
+
+    if (sync) {
+      if (!this._fpCache) this._fpCache = rle(this.footprints.snapshot());
+      return this._write(this._collect(), generation).catch(() => false);
+    }
+    this._saving = true;
+    this._savingPromise = this._saveAsync(generation);
+    return this._savingPromise;
+  }
+
+  async _saveAsync(generation) {
+    try {
+      try {
+        this._fpCache = rle(await this.footprints.snapshotAsync());
+      } catch (e) {
+        this._fpCache = rle(this.footprints.snapshot()); // нет PBO — раз в 30с терпимо
+      }
+      if (generation !== this._saveGeneration || this.disabled) return false;
+      const data = this._collect();
+      return await this._write(data, generation);
     } catch (e) {
       // квота/приватный режим: игра живёт дальше без памяти
+      return false;
     } finally {
       this._saving = false;
     }
@@ -330,6 +358,8 @@ export class SaveGame {
   // глушится: иначе pagehide перед перезагрузкой записал бы мир обратно.
   async reset() {
     this.disabled = true;
+    this._saveGeneration++;
+    try { await this._savingPromise; } catch (e) { /* старый сейв уже не важен */ }
     await this._wipe();
     location.reload();
   }

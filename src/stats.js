@@ -46,6 +46,9 @@ export class Stats {
   _die(player) {
     this.dead = true;
     this.els.death.classList.add('show');
+    this.els.death.inert = false;
+    this.els.death.setAttribute('aria-hidden', 'false');
+    document.getElementById('retry').focus({ preventScroll: true });
     // Тот же класс, что на паузе: игра встала, курсор свободен, и в углу
     // появляется выход на витрину (см. shell.js).
     document.body.classList.add('paused');

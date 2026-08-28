@@ -33,6 +33,10 @@
  *      связные детали, каждая получает роль по своему месту в камине (те же
  *      правила, что в стадии формы `tools/blender-prop/props/fireplace`), и
  *      уезжает в свой примитив со своим материалом.
+ *   3. ОРИЕНТАЦИЯ. Каждая грань смотрит лицом в воздух, а не в камень. У
+ *      исходной модели дымосборник вывернут целиком, и пока материал был
+ *      двусторонним, этого не было видно; материал ядра односторонний, и
+ *      вывернутая грань в нём - дыра (см. шаг «ориентация» ниже).
  *
  * Blender для этого не нужен: запекания больше нет, а всё остальное -
  * арифметика. Запечённую занятость (aoMap) не жаль: three.js применяет её
@@ -76,10 +80,25 @@ const MATERIAL = { rubble: 'stone', flue: 'stone', brick: 'firebrick', beam: 'ti
 
 // ---------------------------------------------------------------------------
 // разбор
+// Все примитивы, а не `meshes[0].primitives[0]`. После первого прогона модель
+// разложена по ролям на три примитива, и скрипт, читающий только первый,
+// при повторном запуске потерял бы кирпич и брус - молча, с зелёными
+// проверками по камню. Роли назначаются заново по геометрии, а не по старым
+// именам, поэтому прогон по собственному результату даёт тот же файл.
 const { json, accessor, bytes } = readGLB(GLB)
-const prim = json.meshes[0].primitives[0]
-const pos = accessor(prim.attributes.POSITION)
-const idx = accessor(prim.indices)
+const posList = []
+const idxList = []
+for (const mesh of json.meshes) {
+  for (const prim of mesh.primitives) {
+    const p = accessor(prim.attributes.POSITION)
+    const i = accessor(prim.indices)
+    const base = posList.length / 3
+    for (const v of p) posList.push(v)
+    for (const v of i) idxList.push(v + base)
+  }
+}
+const pos = Float64Array.from(posList)
+const idx = Float64Array.from(idxList)
 const TRIS = idx.length / 3
 
 const box = (list) => {
@@ -158,6 +177,133 @@ for (const [root, p] of parts) {
   roleOf.set(root, role)
   counts[role]++
 }
+
+// ---------------------------------------------------------------------------
+// ориентация: лицо грани смотрит в воздух, а не в камень
+//
+// В исходной модели дымосборник (трапеция над полкой, y 1.53..3.3) вывернут
+// целиком: передняя грань смотрит нормалью в стену, боковые - внутрь, задняя -
+// в комнату. Пока модель была одним материалом с `doubleSided`, three
+// дорисовывал изнанку, и этого никто не видел. Материал ядра односторонний, и
+// вывернутые грани отсекаются: у камина пропадает передняя стенка
+// дымосборника, а сквозь неё видно изнанку боковых и заднюю стенку у сруба.
+// В кадре это выглядело как «верх камина прозрачный, боковые камни странные».
+//
+// Критерий - ровно тот, по которому грань становится дырой в кадре: её лицо
+// (сторона нормали) упирается в геометрию, а изнанка выходит в воздух.
+// Меряется лучами по всей модели: из точки чуть перед гранью по нормали и из
+// точки чуть за ней против нормали; «воздух» - луч не встретил ничего. Грань,
+// у которой в геометрию упираются обе стороны, - внутренняя (верх
+// дымосборника под дымоходом, его же низ на теле камина): её не видно ни с
+// какой стороны, и она остаётся как есть.
+//
+// Почему не чётность пересечений, как в проверке тел `world-check-kit`: блоки
+// кладки лежат вплотную и друг в друге, и чётность по всей модели врёт (первый
+// заход насчитал 890 вывернутых из 1920), а по своей детали спотыкается о
+// склейки - дымосборник сварен с дымоходом в одну деталь через общую грань.
+//
+// Точек на грань три, и ни одна не в центре: центр треугольника, которым
+// разрезан прямоугольник, лежит ровно на другой диагонали того же
+// прямоугольника, и луч из него в параллельную грань попадает в её шов между
+// треугольниками - оба отказываются, и грань «висит в воздухе».
+const triAt = (t) =>
+  [0, 1, 2].map((k) => {
+    const v = idx[t * 3 + k]
+    return [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]]
+  })
+const triNormal = (P) => {
+  const e1 = [P[1][0] - P[0][0], P[1][1] - P[0][1], P[1][2] - P[0][2]]
+  const e2 = [P[2][0] - P[0][0], P[2][1] - P[0][1], P[2][2] - P[0][2]]
+  const n = [
+    e1[1] * e2[2] - e1[2] * e2[1],
+    e1[2] * e2[0] - e1[0] * e2[2],
+    e1[0] * e2[1] - e1[1] * e2[0],
+  ]
+  const len = Math.hypot(...n) || 1
+  return n.map((c) => c / len)
+}
+
+/** Встречает ли луч (o, d) хоть одну грань модели, кроме `skip`. Мёллер-Трумбор. */
+function blocked(o, d, skip) {
+  for (let f = 0; f < TRIS; f++) {
+    if (f === skip) continue
+    const [a, b, c] = triAt(f)
+    const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+    const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+    const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]]
+    const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2]
+    if (Math.abs(det) < 1e-12) continue
+    const inv = 1 / det
+    const s = [o[0] - a[0], o[1] - a[1], o[2] - a[2]]
+    const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv
+    if (u < 0 || u > 1) continue
+    const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]]
+    const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * inv
+    if (v < 0 || u + v > 1) continue
+    const t = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv
+    if (t > 1e-6) return true
+  }
+  return false
+}
+
+/** Барицентрические веса точек замера - в стороне от центра и от диагоналей. */
+const SAMPLES = [
+  [0.5, 0.3, 0.2],
+  [0.2, 0.5, 0.3],
+  [0.3, 0.2, 0.5],
+]
+const EPS = 1e-5
+
+/**
+ * Вывернутые грани: лицо в геометрию, изнанка в воздух, и так во всех точках,
+ * где хоть одна сторона выходит в воздух. `enclosed` - внутренние грани,
+ * `unclear` - те, у которых точки не сошлись (тонкий лист, прикрытый с одного
+ * бока): их не трогаем и называем в отчёте.
+ */
+function inwardFaces() {
+  const flipped = []
+  let enclosed = 0
+  let unclear = 0
+  for (let t = 0; t < TRIS; t++) {
+    const P = triAt(t)
+    const n = triNormal(P)
+    let faceOpen = false
+    let backOnly = false
+    for (const w of SAMPLES) {
+      const c = [0, 1, 2].map((k) => P[0][k] * w[0] + P[1][k] * w[1] + P[2][k] * w[2])
+      const front = !blocked(c.map((x, k) => x + n[k] * EPS), n, t)
+      const back = !blocked(c.map((x, k) => x - n[k] * EPS), n.map((x) => -x), t)
+      if (front) faceOpen = true
+      else if (back) backOnly = true
+    }
+    if (backOnly && !faceOpen) flipped.push(t)
+    else if (backOnly) unclear++
+    else if (!faceOpen) enclosed++
+  }
+  return { flipped, enclosed, unclear }
+}
+
+const orientation = inwardFaces()
+for (const t of orientation.flipped) {
+  const b = idx[t * 3 + 1]
+  idx[t * 3 + 1] = idx[t * 3 + 2]
+  idx[t * 3 + 2] = b
+}
+const flippedBox = (() => {
+  if (!orientation.flipped.length) return null
+  const lo = [Infinity, Infinity, Infinity]
+  const hi = [-Infinity, -Infinity, -Infinity]
+  for (const t of orientation.flipped) {
+    for (const p of triAt(t)) {
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], p[k])
+        hi[k] = Math.max(hi[k], p[k])
+      }
+    }
+  }
+  return { lo, hi }
+})()
+const orientationAfter = inwardFaces()
 
 // ---------------------------------------------------------------------------
 // развёртка в метрах, кубической проекцией
@@ -293,7 +439,11 @@ for (const [mat, g] of out) {
   )
   materials.push({
     name: mat,
-    doubleSided: true,
+    // Односторонний: все грани смотрят наружу (шаг «ориентация»), а
+    // `doubleSided` только прятал бы вывернутые. Игра ставит свой материал, и
+    // он односторонний по умолчанию; флаг здесь - для любого другого
+    // просмотрщика, чтобы тот показывал то же, что игра.
+    doubleSided: false,
     pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 1 },
   })
   primitives.push({
@@ -352,6 +502,15 @@ claim(
   `x ${whole.lo[0].toFixed(3)}..${whole.hi[0].toFixed(3)}, y ${whole.lo[1].toFixed(3)}..${whole.hi[1].toFixed(3)}, z ${whole.lo[2].toFixed(3)}..${whole.hi[2].toFixed(3)}`,
 )
 claim(counts.beam > 0, 'полка нашлась', `${counts.beam} дет.`)
+claim(
+  orientationAfter.flipped.length === 0 && orientationAfter.unclear === 0,
+  'все грани смотрят лицом в воздух: вывернутых нет',
+  `перевёрнуто ${orientation.flipped.length}` +
+    (flippedBox
+      ? ` (y ${flippedBox.lo[1].toFixed(2)}..${flippedBox.hi[1].toFixed(2)})`
+      : '') +
+    `, внутренних ${orientation.enclosed}, неясных ${orientation.unclear}`,
+)
 claim(counts.brick > 0, 'нутро топки нашлось', `${counts.brick} дет.`)
 claim(counts.flue > 0, 'дымосборник нашёлся', `${counts.flue} дет.`)
 claim(

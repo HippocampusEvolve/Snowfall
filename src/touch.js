@@ -66,18 +66,20 @@ export class TouchControls {
     document.body.appendChild(ui);
     this.ui = ui;
 
-    const mk = (id, icon) => {
+    const mk = (id, icon, label) => {
       const b = document.createElement('button');
       b.id = id;
+      b.type = 'button';
       b.className = 'tbtn hide';
-      b.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[icon]}</svg>`;
+      b.setAttribute('aria-label', label);
+      b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[icon]}</svg>`;
       ui.appendChild(b);
       return b;
     };
-    this.bJump = mk('tbJump', 'jump');
-    this.bAct = mk('tbAct', 'act');
-    this.bTool1 = mk('tbTool1', 'shovel');
-    this.bTool2 = mk('tbTool2', 'build');
+    this.bJump = mk('tbJump', 'jump', 'Прыгнуть');
+    this.bAct = mk('tbAct', 'act', 'Взаимодействовать');
+    this.bTool1 = mk('tbTool1', 'shovel', 'Использовать инструмент');
+    this.bTool2 = mk('tbTool2', 'build', 'Насыпать снег');
     this._tool = null;
 
     // прыжок: держим факт нажатия — фронт ловит player (_jumpHeld)
@@ -98,20 +100,35 @@ export class TouchControls {
     addEventListener('blur', () => this.resetInput());
   }
 
-  // кнопка: touchstart/touchend без прохода до канваса и без синтетики мыши
+  // Pointer Events покрывают палец, стилус и мышь; click с detail=0 оставляет
+  // ту же кнопку доступной клавиатуре, switch control и экранному диктору.
   _press(btn, fn) {
-    btn.addEventListener('touchstart', (e) => {
+    let pressed = false;
+    btn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      pressed = true;
+      try { btn.setPointerCapture(e.pointerId); } catch (_) { /* capture необязателен */ }
       fn(true);
-    }, { passive: false });
+    });
     const up = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (!pressed) return;
+      pressed = false;
       fn(false);
     };
-    btn.addEventListener('touchend', up, { passive: false });
-    btn.addEventListener('touchcancel', up, { passive: false });
+    btn.addEventListener('pointerup', up);
+    btn.addEventListener('pointercancel', up);
+    btn.addEventListener('lostpointercapture', up);
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.detail === 0) {
+        fn(true);
+        fn(false);
+      }
+    });
   }
 
   // войти в игру (кнопка меню): pointer lock на таче нет — просто включаемся
@@ -135,6 +152,7 @@ export class TouchControls {
       this.bTool2.classList.toggle('hide', tool !== 'shovel');
       if (tool)
         this.bTool1.querySelector('svg').innerHTML = ICONS[tool === 'axe' ? 'axe' : 'shovel'];
+      this.bTool1.setAttribute('aria-label', tool === 'axe' ? 'Рубить топором' : 'Копать лопатой');
     }
   }
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { material, planeUV, cylinderUV, boxUV, quadGeometry } from 'world-core/materials';
+import { material, planeUV, cylinderUV, discUV, boxUV, quadGeometry } from 'world-core/materials';
 import { matsets } from './matsets.js';
 import { FlameSheets, FLAME_HEARTH } from './flame.js';
 
@@ -264,6 +264,10 @@ export function buildFirebox(parent, { x, y, z }) {
   for (const l of LOGS) {
     const geo = new THREE.CylinderGeometry(l.r, l.r * 1.08, l.len, 10);
     cylinderUV(geo, l.r, l.len, 2.6);
+    // Торец — вся карта колец на круг. Метровая развёртка крышки при радиусе
+    // в пять сантиметров показывала четверть карты вокруг её угла, то есть
+    // кору вместо колец; полено с торца читалось тёмной колбасой.
+    discUV(geo, l.r);
     const m = new THREE.Mesh(geo, [l.charred ? charMat : barkMat, endMat, endMat]);
     if (l.along === 'z') {
       m.rotation.x = Math.PI / 2 + l.tilt;

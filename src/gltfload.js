@@ -4,7 +4,7 @@ import { asset } from './asset.js';
 
 // Общий GLTFLoader с Draco-декодером: геометрия всех моделей сжата
 // KHR_draco_mesh_compression (gltf-transform), текстуры — WebP.
-// Декодер (wasm + js-фолбэк) лежит в public/draco/ — скопирован из
+// WASM-декодер лежит в public/draco/ — скопирован из
 // node_modules/three/examples/jsm/libs/draco/gltf/.
 const draco = new DRACOLoader().setDecoderPath(asset('draco/'));
 

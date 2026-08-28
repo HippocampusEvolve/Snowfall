@@ -5,13 +5,17 @@ import { snowTint } from './snowtint.js';
 import { snowCap } from './snowcap.js';
 import { buildFirebox } from './firebox.js';
 import { material } from 'world-core/materials';
+import { bed, table, stool, rug, shelfWithBooks, logStack } from 'world-core/props';
 import { matset } from './matsets.js';
 
 // Домик: Scandinavian Log Cabin (rivetech, CC-BY). Масштаб к реальным метрам,
 // посадка в снег по рельефу, снег на крыше и кромках брёвен через snowTint.
 // В домик можно войти: дверь (узел Cabin_Door_3) открывается по F, стены —
 // коллизия-отрезки с проёмом, деревянный пол и ступенька на крыльцо.
-// Внутри — процедурный уют: печка с углями, дрова, стол со свечой, кровать.
+// Внутри — процедурный уют: камин, дрова, стол со свечой, кровать, коврик,
+// полка с книгами. Мебель — предметы каталога ядра (world-core/props):
+// геометрия из примитивов, поверхность из наборов ядра, здесь только
+// расстановка и коллайдеры.
 
 const LENGTH = 9.6; // длина домика по большей стороне, м (дверь ≈ 2.1 м)
 const DOOR_OPEN = 2.2; // рад — дверь распахивается НАРУЖУ, на крыльцо (по-северному)
@@ -331,23 +335,19 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Интерьер: печка-буржуйка с трубой и углями, дрова, стол со свечой,
-// табуретки, кровать с одеялом, коврик, полка с книгами. Всё — примитивы
-// в локали gltf.scene (1 ед. ≈ 1 м). F — реальный Y пола, замеренный
-// raycast'ом снаружи: база мебели ставится ровно на доски.
+// Интерьер: камин с топкой, стопка дров, стол со свечой, табуретки, кровать с
+// пледом, коврик, полка с книгами. Всё в локали gltf.scene (1 ед. ≈ 1 м).
+// F — реальный Y пола, замеренный raycast'ом снаружи: база мебели ставится
+// ровно на доски.
+//
+// Мебель — предметы каталога ядра (`world-core/props`). До этого она была
+// коробками с одной канвовой текстурой доски на всё дерево и заливками вместо
+// ткани и ковра; глаз цеплялся за неё как за заглушки. Предмет ядра знает свои
+// материалы сам (кровать: брус, ткань, шерстяной плед), здесь остаются только
+// место, коллайдер и свет.
 function buildInterior(F) {
   const g = new THREE.Group();
 
-  // общая процедурная текстура доски (волокно + швы) — та же на всей мебели,
-  // так что материалов по-прежнему два: draw call'ы не растут, а дерево уже
-  // не плоская заливка, а с волокном и рельефом (виден вблизи внутри дома)
-  const grain = makeWoodTexture();
-  const wood = new THREE.MeshStandardMaterial({
-    map: grain, bumpMap: grain, bumpScale: 0.006, color: 0xcaa06e, roughness: 0.72,
-  });
-  const woodDark = new THREE.MeshStandardMaterial({
-    map: grain, bumpMap: grain, bumpScale: 0.006, color: 0x8a5f38, roughness: 0.82,
-  });
   const iron = new THREE.MeshStandardMaterial({ color: 0x23252b, roughness: 0.55, metalness: 0.7 });
 
   const colliders = []; // {x,z,r} или {x1,z1,x2,z2,r} — в локали модели
@@ -374,6 +374,18 @@ function buildInterior(F) {
     g.add(grp);
     dest = grp;
     return grp;
+  };
+  // предмет каталога: поставить базой на пол в (x, z), тени — как у mesh()
+  const adopt = (prop, x, z, ry = 0) => {
+    prop.group.position.set(x, F, z);
+    prop.group.rotation.y = ry;
+    prop.group.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = false;
+      o.receiveShadow = true;
+    });
+    dest.add(prop.group);
+    return prop;
   };
 
   // ---- камин у задней стены ----
@@ -421,6 +433,13 @@ function buildInterior(F) {
   // Материал по имени из .glb. Имена ставит `fireplace-retile.mjs`, разбирая
   // модель по ролям: наружная кладка и дымосборник — тёсаный камень, нутро
   // топки — тот же кирпич, что у футеровки, полка — брус.
+  //
+  // Материал ядра ОДНОСТОРОННИЙ, и это обязывает модель: каждая её грань
+  // должна смотреть лицом в комнату. В исходной модели дымосборник был
+  // вывернут целиком, и пока .glb нёс свой двусторонний материал, three
+  // дорисовывал изнанку; с материалом ядра у камина пропала передняя стенка
+  // дымосборника, а сквозь неё было видно изнанку боковых. За ориентацией
+  // теперь следит сам `fireplace-retile.mjs` (шаг «ориентация»).
   const STOVE_MATS = { stone: 'ashlar', firebrick: 'brick', timber: 'beam' };
   // Развёртка у модели одна на все роли — один тайл на метр, — а размер рисунка
   // у материалов разный по их природе. Дереву метровый тайл мелок вдвое: у него
@@ -472,114 +491,73 @@ function buildInterior(F) {
     x1: stove.x - 0.62, z1: stove.z + 0.55, x2: stove.x + 0.62, z2: stove.z + 0.55, r: 0.62,
   });
 
-  // ---- поленница сбоку от камина ----
-  // Переехала вправо: камин занимает заднюю стену до x 0.16, и на прежнем
-  // месте поленья наполовину сидели бы в кладке.
-  const logGeo = new THREE.CylinderGeometry(0.055, 0.06, 0.52, 7);
-  const logMat = new THREE.MeshStandardMaterial({ color: 0x5c4126, roughness: 0.9 });
-  const logs = [
-    [0.62, 0.06, -2.12], [0.74, 0.06, -2.12], [0.50, 0.06, -2.12],
-    [0.68, 0.165, -2.12], [0.56, 0.165, -2.12], [0.62, 0.27, -2.12],
-  ];
-  for (const [lx, ly, lz] of logs) mesh(logGeo, logMat, lx, F + ly, lz, 0, Math.PI / 2);
+  // ---- стопка колотых дров сбоку от камина ----
+  // Справа: камин занимает заднюю стену до x 0.16. Поленья лежат ТОРЦАМИ в
+  // комнату: торец с кольцами — самая светлая и самая узнаваемая часть полена,
+  // а сложенная вдоль стены стопка показывала комнате одну тёмную кору и
+  // сливалась с брёвнами. Прежние шесть цилиндров «по x» вдобавок лежали друг
+  // в друге по оси.
+  adopt(logStack({ r: 0.055, len: 0.52, rows: [3, 2, 1] }), 0.62, -2.06, Math.PI / 2);
 
   // ---- стол у правого окна + свеча ----
   // Каркас стола — в группе 'table' (её прячет модельный стол WoodenTable_02).
-  const table = { x: 1.75, z: 1.35 };
+  const tableAt = { x: 1.75, z: 1.35 };
   const TABLE_TOP = F + 0.755; // верх столешницы (свеча стоит на нём)
   groupNamed('table');
-  mesh(new THREE.BoxGeometry(1.15, 0.07, 0.75), wood, table.x, F + 0.72, table.z);
-  for (const [dx, dz] of [[-0.5, -0.3], [0.5, -0.3], [-0.5, 0.3], [0.5, 0.3]]) {
-    mesh(new THREE.BoxGeometry(0.07, 0.72, 0.07), woodDark, table.x + dx, F + 0.36, table.z + dz);
-  }
+  adopt(table({ w: 1.15, d: 0.75, h: 0.755 }), tableAt.x, tableAt.z);
   dest = g;
-  colliders.push({ x: table.x, z: table.z, r: 0.6 });
+  colliders.push({ x: tableAt.x, z: tableAt.z, r: 0.6 });
   // блюдце, свеча, огонёк — в группе candleSet (её переставим на верх модели стола)
   groupNamed('candleSet');
-  mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.02, 12), iron, table.x + 0.2, TABLE_TOP + 0.01, table.z);
+  mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.02, 12), iron, tableAt.x + 0.2, TABLE_TOP + 0.01, tableAt.z);
   mesh(
     new THREE.CylinderGeometry(0.033, 0.036, 0.15, 10),
     new THREE.MeshStandardMaterial({ color: 0xf3e3c3, roughness: 0.5 }),
-    table.x + 0.2, TABLE_TOP + 0.095, table.z
+    tableAt.x + 0.2, TABLE_TOP + 0.095, tableAt.z
   );
   const flameMat = new THREE.MeshStandardMaterial({
     color: 0xffe0a0,
     emissive: 0xffc86e,
     emissiveIntensity: 3.2,
   });
-  const flame = mesh(new THREE.ConeGeometry(0.02, 0.07, 8), flameMat, table.x + 0.2, TABLE_TOP + 0.205, table.z);
+  const flame = mesh(new THREE.ConeGeometry(0.02, 0.07, 8), flameMat, tableAt.x + 0.2, TABLE_TOP + 0.205, tableAt.z);
   flame.castShadow = false;
   const candle = new THREE.PointLight(0xffc070, 1.15, 4, 2);
-  candle.position.set(table.x + 0.2, TABLE_TOP + 0.265, table.z);
+  candle.position.set(tableAt.x + 0.2, TABLE_TOP + 0.265, tableAt.z);
   dest.add(candle);
   dest = g;
 
   // ---- табуретки (каждая в группе 'seatN' — её заменит модель стула) ----
-  [[1.15, 0.7], [2.4, 0.85]].forEach(([sx, sz], i) => {
+  [[1.15, 0.7], [2.3, 0.9]].forEach(([sx, sz], i) => {
     groupNamed('seat' + i);
-    mesh(new THREE.CylinderGeometry(0.19, 0.21, 0.055, 10), wood, sx, F + 0.45, sz);
-    for (const a of [0.4, 2.5, 4.6]) {
-      mesh(
-        new THREE.CylinderGeometry(0.024, 0.03, 0.45, 6), woodDark,
-        sx + Math.cos(a) * 0.13, F + 0.22, sz + Math.sin(a) * 0.13
-      );
-    }
+    adopt(stool({ r: 0.19, h: 0.45 }), sx, sz, i * 1.3);
     dest = g;
     colliders.push({ x: sx, z: sz, r: 0.24 });
   });
 
   // ---- кровать вдоль правой стены, ближе к дальнему углу ----
-  const bed = { x: 2.12, z: -1.5 };
-  mesh(new THREE.BoxGeometry(1.02, 0.26, 2.1), woodDark, bed.x, F + 0.2, bed.z);
-  mesh(new THREE.BoxGeometry(1.02, 0.5, 0.07), woodDark, bed.x, F + 0.42, bed.z - 1.03); // изголовье
-  mesh(
-    new THREE.BoxGeometry(0.94, 0.13, 1.98),
-    new THREE.MeshStandardMaterial({ color: 0xd9cfba, roughness: 0.95 }),
-    bed.x, F + 0.39, bed.z
-  );
-  mesh(
-    new THREE.BoxGeometry(0.97, 0.09, 1.25),
-    new THREE.MeshStandardMaterial({ color: 0x7c3a2b, roughness: 0.95 }),
-    bed.x, F + 0.46, bed.z + 0.35
-  ); // одеяло
-  mesh(
-    new THREE.BoxGeometry(0.52, 0.11, 0.34),
-    new THREE.MeshStandardMaterial({ color: 0xe9e1cf, roughness: 0.95 }),
-    bed.x, F + 0.5, bed.z - 0.78
-  ); // подушка
-  colliders.push({ x1: bed.x, z1: bed.z - 0.85, x2: bed.x, z2: bed.z + 0.85, r: 0.5 });
+  // Изголовье стоит у самой стены: её брёвна выпирают внутрь до z ≈ −2.35
+  // (см. BACK_WALL), и кровать, поставленная по ROOM, изголовьем сидела в
+  // брёвнах. То же с правой стеной — кровать сдвинута к середине.
+  const bedAt = { x: 2.0, z: -1.25 };
+  adopt(bed({ w: 1.02, l: 2.1 }), bedAt.x, bedAt.z);
+  colliders.push({ x1: bedAt.x, z1: bedAt.z - 0.85, x2: bedAt.x, z2: bedAt.z + 0.85, r: 0.5 });
 
   // ---- круглый плетёный коврик по центру ----
-  const rug = mesh(
-    new THREE.CylinderGeometry(0.85, 0.85, 0.014, 24),
-    new THREE.MeshStandardMaterial({ color: 0x8a5030, roughness: 1 }),
-    0.25, F + 0.007, 0
-  );
-  rug.castShadow = false;
-  const rugIn = mesh(
-    new THREE.CylinderGeometry(0.55, 0.55, 0.02, 24),
-    new THREE.MeshStandardMaterial({ color: 0xa8703f, roughness: 1 }),
-    0.25, F + 0.011, 0
-  );
-  rugIn.castShadow = false;
+  adopt(rug({ r: 0.85 }), 0.25, 0);
 
   // ---- полка на задней стене: книги и кружка ----
-  mesh(new THREE.BoxGeometry(1.2, 0.05, 0.24), wood, 0.9, F + 1.5, -2.72);
-  const bookCols = [0x6b3434, 0x35502f, 0x2f3f5c, 0x77582a, 0x4c3355];
-  let bx = 0.45;
-  for (let i = 0; i < 5; i++) {
-    const h = 0.2 + (i % 3) * 0.03;
-    const w = 0.045 + (i % 2) * 0.02;
-    mesh(
-      new THREE.BoxGeometry(w, h, 0.16),
-      new THREE.MeshStandardMaterial({ color: bookCols[i], roughness: 0.9 }),
-      bx, F + 1.525 + h / 2, -2.72, 0, i === 4 ? 0.22 : 0
-    );
-    bx += w + 0.012;
-  }
-  mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.09, 10),
-    new THREE.MeshStandardMaterial({ color: 0x9c4a2f, roughness: 0.7 }),
-    1.32, F + 1.57, -2.72);
+  // Задняя кромка полки — на линии выпуклости брёвен (BACK_WALL); прежняя
+  // полка стояла на z −2.72, то есть целиком в толще стены, и книг в комнате
+  // видно не было.
+  const shelf = shelfWithBooks({ width: 1.2, depth: 0.24, n: 5 });
+  shelf.group.position.set(0.9, F + 1.5, BACK_WALL + 0.12);
+  shelf.group.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = false;
+    o.receiveShadow = true;
+  });
+  g.add(shelf.group);
 
   // ---- подвесной масляный фонарь по центру ----
   // Мягкий тёплый свет наполняет комнату и — главное — читается сквозь
@@ -675,52 +653,4 @@ async function loadInteriorProps(g, F, colliders) {
     }
     if (p.col) colliders.push({ x: p.x, z: p.z, r: p.col });
   }
-}
-
-// Процедурная текстура строганой доски: тёплая база, продольное волокно
-// лёгкими безье-штрихами и тёмные швы между досками. Одна на всю мебель —
-// служит и как map, и как bumpMap (рельеф волокна). Дёшево, без внешних файлов.
-function makeWoodTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const x = c.getContext('2d');
-  x.fillStyle = '#b38551'; // тёплая база доски
-  x.fillRect(0, 0, 256, 256);
-  // продольное волокно
-  for (let i = 0; i < 700; i++) {
-    const y = Math.random() * 256;
-    const dark = Math.random() < 0.78;
-    x.strokeStyle = dark
-      ? `rgba(70, 45, 22, ${0.05 + Math.random() * 0.13})`
-      : `rgba(210, 176, 130, ${0.05 + Math.random() * 0.12})`;
-    x.lineWidth = 0.4 + Math.random() * 1.6;
-    x.beginPath();
-    x.moveTo(0, y);
-    x.bezierCurveTo(85, y + (Math.random() - 0.5) * 7, 170, y + (Math.random() - 0.5) * 7, 256, y + (Math.random() - 0.5) * 5);
-    x.stroke();
-  }
-  // сучки — редкие тёмные завихрения
-  for (let i = 0; i < 5; i++) {
-    const kx = Math.random() * 256, ky = Math.random() * 256;
-    for (let r = 1; r < 6; r++) {
-      x.strokeStyle = `rgba(50, 30, 14, ${0.28 - r * 0.04})`;
-      x.beginPath();
-      x.ellipse(kx, ky, r * 1.8, r, Math.random(), 0, Math.PI * 2);
-      x.stroke();
-    }
-  }
-  // швы между досками
-  x.strokeStyle = 'rgba(24, 13, 5, 0.6)';
-  x.lineWidth = 2;
-  for (let py = 40; py < 256; py += 42) {
-    x.beginPath();
-    x.moveTo(0, py + (Math.random() - 0.5) * 3);
-    x.lineTo(256, py + (Math.random() - 0.5) * 3);
-    x.stroke();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 4;
-  return t;
 }

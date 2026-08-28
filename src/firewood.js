@@ -1,4 +1,12 @@
 import * as THREE from 'three';
+import { cylinderUV, discUV } from 'world-core/materials';
+import {
+  splitLogGeometry,
+  roundLogGeometry,
+  logMaterials,
+  splitLogMaterials,
+  roundLogMaterials,
+} from 'world-core/props';
 import { snowTint } from './snowtint.js';
 import { snowCap } from './snowcap.js';
 
@@ -8,64 +16,23 @@ import { snowCap } from './snowcap.js';
 // в костёр — или приносят НОВОЕ (нарубленное в лесу) и кладут в штабель.
 // Запас КОНЕЧЕН: сколько лежит — столько и есть, цифр поверх не будет.
 
-// процедурная кора: тёмная база + продольные борозды (как у поленьев костра)
-function makeBarkTexture() {
-  const c = document.createElement('canvas');
-  c.width = 128;
-  c.height = 64;
-  const x = c.getContext('2d');
-  x.fillStyle = '#1c110a';
-  x.fillRect(0, 0, 128, 64);
-  for (let i = 0; i < 80; i++) {
-    const px = Math.random() * 128;
-    const light = Math.random() < 0.22;
-    x.strokeStyle = light
-      ? `rgba(72, 50, 30, ${0.2 + Math.random() * 0.25})`
-      : `rgba(7, 4, 2, ${0.3 + Math.random() * 0.35})`;
-    x.lineWidth = 0.5 + Math.random() * 1.8;
-    x.beginPath();
-    x.moveTo(px, 0);
-    x.bezierCurveTo(px + 3, 20, px - 3, 44, px + Math.random() * 4 - 2, 64);
-    x.stroke();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+// Полено — колотая половинка из ядра (world-core/props): кора по дуге, торец
+// с кольцами, светлая плоскость раскола. Раньше это были цилиндры с канвовой
+// корой по кругу, и поленница читалась как штабель труб: у настоящих дров
+// половина поверхности — светлый раскол, он и делает дрова дровами.
+// Материалы — наборы ядра, считаются один раз на игру.
+//
+// Снаружи кора несёт снежный налёт (snowTint) — та же метель, что на всём
+// остальном; в руках полено «домашнее», без снега.
+function outdoorLogMaterials() {
+  const m = logMaterials();
+  snowTint(m.bark, '0.82, 0.86, 0.96', 0.55, 0.35);
+  return m;
 }
 
-function makeEndTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 64;
-  const x = c.getContext('2d');
-  const g = x.createRadialGradient(32, 32, 3, 32, 32, 32);
-  g.addColorStop(0, '#8a6a42');
-  g.addColorStop(0.75, '#5e422a');
-  g.addColorStop(1, '#241610');
-  x.fillStyle = g;
-  x.fillRect(0, 0, 64, 64);
-  x.strokeStyle = 'rgba(30, 16, 8, 0.5)';
-  for (let r = 6; r < 30; r += 5 + Math.random() * 3) {
-    x.beginPath();
-    x.arc(32, 32, r, 0, Math.PI * 2);
-    x.stroke();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-
-function logMaterials() {
-  const bark = makeBarkTexture();
-  const side = new THREE.MeshStandardMaterial({
-    map: bark,
-    bumpMap: bark,
-    bumpScale: 0.012,
-    roughness: 0.95,
-  });
-  const end = new THREE.MeshStandardMaterial({ map: makeEndTexture(), roughness: 0.9 });
-  return [side, end, end];
-}
+/** Радиус и длина полена в штабеле и на земле. */
+const LOG_R = 0.075;
+const LOG_LEN = 0.62;
 
 // Поленница: штабель колотых поленьев у стены, сверху присыпаны снегом.
 // КОНЕЧНАЯ: слоты построены заранее, видимы первые `count` — взял полено,
@@ -79,16 +46,17 @@ export class Woodpile {
     this.position = new THREE.Vector3(x, y, z);
     this.obstacle = { x, z, r: 0.5 };
 
-    const mats = logMaterials();
-    // снег на верхних поленьях — та же метель, что на всём остальном
-    snowTint(mats[0], '0.82, 0.86, 0.96', 0.55, 0.35);
-    const geo = new THREE.CylinderGeometry(0.062, 0.066, 0.62, 8);
+    const mats = outdoorLogMaterials();
+    const geo = splitLogGeometry(LOG_R, LOG_LEN, Math.PI, 8);
+    const halfMats = splitLogMaterials(mats);
 
     // подкладки-лежни поперёк штабеля: дрова не лежат в снегу, и место
     // поленницы видно, даже когда сожгли всё до полена
-    const bearerGeo = new THREE.CylinderGeometry(0.042, 0.042, 0.72, 7);
+    const BEARER_R = 0.042;
+    const bearerGeo = roundLogGeometry(BEARER_R, 0.72, 7);
+    const bearerMats = roundLogMaterials(mats);
     for (const bx of [-0.18, 0.18]) {
-      const b = new THREE.Mesh(bearerGeo, mats);
+      const b = new THREE.Mesh(bearerGeo, bearerMats);
       b.rotation.x = Math.PI / 2; // вдоль Z — поперёк будущих поленьев
       b.position.set(bx, 0.03, 0);
       b.castShadow = true;
@@ -97,36 +65,45 @@ export class Woodpile {
       this.group.add(b);
     }
 
-    // Слоты снизу вверх «в замок», ряды 5/4/5/4. Полено после rotation.z=π/2
-    // лежит ВДОЛЬ локальной X — значит, ряд раскладываем ПОПЕРЁК, по Z
-    // (раньше слоты шли по X, и поленья входили друг в друга торцами).
-    // Соседние поленья строго через одно перевёрнуты комлем — как кладут
-    // вручную; тогда сумма радиусов боковых соседей постоянна (0.128).
-    // Просветы из худшего случая (комель к комлю, 0.132): STEP с боковым
-    // зазором, LIFT = sqrt(0.132² − (STEP/2)²) + зазор. Разнобой — только
-    // сдвиг торцов ВДОЛЬ оси бревна: он живой и не создаёт пересечений.
+    // Слоты снизу вверх, ряды 4/3/4/3/4: семь поленьев - это уже два ряда, а
+    // не плот из пяти в один слой. Полено после rotation.z=π/2 лежит
+    // ВДОЛЬ локальной X — значит, ряд раскладываем ПОПЕРЁК, по Z (раньше
+    // слоты шли по X, и поленья входили друг в друга торцами).
+    //
+    // Половинки лежат кто расколом кверху, кто корой: штабель из одних
+    // плоскостей раскола в первом же кадре читался плотом из досок. Высота
+    // ряда честная: верх любого полена ряда — на радиус выше пола ряда, будь
+    // то макушка коры или плоскость раскола, поэтому следующий ряд ложится на
+    // оба одинаково, а ряд поднимается ровно на радиус. Ось полена лежит в
+    // плоскости раскола: у лежащего расколом кверху она на радиус выше пола
+    // ряда, у лежащего корой кверху — на самом полу ряда. Касание по линии
+    // или по плоскости, тел друг в друге нет (та же укладка у стопки в
+    // world-core, её считает world-check-kit). Разнобой — только сдвиг торцов
+    // ВДОЛЬ оси бревна: он живой и не создаёт пересечений.
     this.slots = [];
     let n = 0;
-    const ROWS = [5, 4, 5, 4]; // capacity = 18 (совместимо с сейвами)
-    const STEP = 0.132;
-    const LIFT = 0.116;
-    const BASE = 0.138; // лежень (центр 0.03, r 0.042) + радиус комля 0.066
+    const ROWS = [4, 3, 4, 3, 4]; // capacity = 18 (совместимо с сейвами)
+    const STEP = 2 * LOG_R + 0.012;
+    const LIFT = LOG_R;
+    const FLOOR0 = 0.03 + BEARER_R; // пол нижнего ряда: верх лежней
+    const ROLLS = [Math.PI, 0, Math.PI, Math.PI, 0, Math.PI, 0]; // π — раскол кверху, 0 — кора
     for (let row = 0; row < ROWS.length; row++) {
       const count = ROWS[row];
       for (let i = 0; i < count; i++) {
-        const m = new THREE.Mesh(geo, mats);
-        m.rotation.z = Math.PI / 2;
-        m.rotation.y = n % 2 ? Math.PI : 0; // переворот комля через одно
+        const m = new THREE.Mesh(geo, halfMats);
+        const roll = ROLLS[n % ROLLS.length];
+        // порядок ZYX: сперва поворот вокруг своей оси (Y), потом укладка вдоль X
+        m.rotation.set(0, roll, Math.PI / 2, 'ZYX');
         m.position.set(
           Math.sin(n * 7.3) * 0.03, // торцы не подровнены — сложено руками
-          BASE + row * LIFT,
+          FLOOR0 + row * LIFT + (roll === Math.PI ? LOG_R : 0),
           (i - (count - 1) / 2) * STEP
         );
         m.castShadow = true;
         m.receiveShadow = true;
         this.group.add(m);
-        // верхние ряды открыты небу — несут снежную шапку по верхней дуге
-        if (row > 0) snowCap(m, 0.024);
+        // шапка на каждом: какой ряд окажется верхним, решает счётчик дров
+        snowCap(m, 0.024);
         this.slots.push(m);
         n++;
       }
@@ -213,7 +190,11 @@ export class Woodpile {
 // пока он не в руках. Хозяйство стояло тут до игрока (VISION: «кто здесь жил?»)
 export function createChoppingBlock(terrain, x, z) {
   const y = terrain.getHeight(x, z);
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.185, 0.44, 10), logMaterials());
+  const R = 0.1725; // средний из радиусов верха и низа
+  const geo = new THREE.CylinderGeometry(0.16, 0.185, 0.44, 10);
+  cylinderUV(geo, R, 0.44, 2.6);
+  discUV(geo, R); // срез — вся карта колец на круг
+  const m = new THREE.Mesh(geo, roundLogMaterials(outdoorLogMaterials()));
   m.position.set(x, y + 0.19, z);
   m.rotation.y = 0.7;
   m.castShadow = true;
@@ -229,17 +210,18 @@ export class GroundLogs {
   constructor(scene) {
     this.scene = scene;
     this.list = []; // {mesh, x, y, z, yaw}
-    this.geo = new THREE.CylinderGeometry(0.055, 0.062, 0.55, 8);
-    this.mats = logMaterials();
+    this.geo = splitLogGeometry(0.055, 0.55, Math.PI, 8);
     // лежит под снегопадом — припорашивается, как и поленница
-    snowTint(this.mats[0], '0.82, 0.86, 0.96', 0.5, 0.4);
+    this.mats = splitLogMaterials(outdoorLogMaterials());
   }
 
   drop(x, y, z, yaw) {
     const m = new THREE.Mesh(this.geo, this.mats);
-    // лёгкий разнобой наклона: брошено, а не выложено
+    // Половинка ложится расколом вниз, корой вверх — так она и падает; ось
+    // полена лежит в плоскости раскола, то есть на самом снегу.
+    // Лёгкий разнобой наклона: брошено, а не выложено
     m.rotation.set((Math.random() - 0.5) * 0.14, yaw, Math.PI / 2 + (Math.random() - 0.5) * 0.12);
-    m.position.set(x, y + 0.055, z);
+    m.position.set(x, y, z);
     m.castShadow = true;
     m.receiveShadow = true;
     this.scene.add(m);
@@ -265,13 +247,13 @@ export class GroundLogs {
 }
 
 // Полено в руках: крепится к камере, покачивается в такт ходьбе (main.js
-// только показывает/прячет). Своя пара материалов без snowTint — в руках
+// только показывает/прячет). Своя тройка материалов без snowTint — в руках
 // полено «домашнее», не заснеженное.
 export function createCarriedLog() {
   const holder = new THREE.Group();
   const log = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.055, 0.062, 0.55, 8),
-    logMaterials()
+    splitLogGeometry(0.055, 0.55, Math.PI, 8),
+    splitLogMaterials(logMaterials())
   );
   log.rotation.z = Math.PI / 2 - 0.18;
   log.rotation.y = 0.35;

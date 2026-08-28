@@ -40,49 +40,52 @@ import { createShell } from './shell.js';
   const bar = document.getElementById('loadBar');
   const fill = document.getElementById('loadFill');
   THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
-    if (!bar || !total) return;
+    if (!bar || !fill || !total) return;
     bar.classList.add('known');
     fill.style.width = `${Math.min(1, loaded / total) * 100}%`;
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', String(total));
+    bar.setAttribute('aria-valuenow', String(loaded));
+    bar.setAttribute('aria-valuetext', `${loaded} из ${total} ресурсов`);
   };
 }
 
-// ---------- предохранитель заставки ----------
-// Ставится ПЕРВЫМ, до единой загрузки, и в этом весь смысл. Ниже по файлу
-// модуль ждёт лес, дом и лопату через await: отказ любой из этих загрузок
-// обрывает разбор модуля целиком - вместе с таймером прогрева, который стоял
-// в самом низу и до этого места просто не доживал. Мир не появлялся никогда,
-// а игрок оставался перед дышащей полосой навсегда, без единого слова о том,
-// что случилось. Теперь слово есть.
-let bootDone = false;
-function bootFailed(e) {
-  if (bootDone) return;
-  bootDone = true;
-  console.error('мир не собрался:', e);
-  const el = document.getElementById('loading');
-  if (el) {
-    el.classList.add('failed'); // прячет полосу и распускает разрядку (index.html)
-    const label = el.querySelector('span');
-    if (label) label.textContent = 'Мир не загрузился. Проверь сеть и обнови страницу';
-  }
-}
-const bootGuard = setTimeout(() => bootFailed(new Error('загрузка не уложилась в 30 с')), 30000);
-addEventListener('unhandledrejection', (ev) => bootFailed(ev.reason));
-
 // ---------- рендерер ----------
-// Ярусы качества теней (?shadows=high|medium|low): размер карты, фильтр,
-// период обновления. Карта перерисовывается по таймеру и по событиям, а не
-// каждый кадр — луна за интервал сдвигается на сотые доли градуса.
+// Автоматический ярус можно переопределить через ?quality=high|medium|low.
+// Отдельный ?shadows=... сохранён для замеров карты теней.
+const params = new URLSearchParams(location.search);
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const memory = navigator.deviceMemory || 4;
+const cores = navigator.hardwareConcurrency || 4;
+const coarse = matchMedia('(pointer: coarse)').matches;
+const requestedQuality = params.get('quality');
+const autoQuality =
+  reducedMotion || memory <= 2 || cores <= 2
+    ? 'low'
+    : coarse || memory <= 4 || cores <= 4 || devicePixelRatio > 1.75
+      ? 'medium'
+      : 'high';
+const qualityName = ['high', 'medium', 'low'].includes(requestedQuality)
+  ? requestedQuality
+  : autoQuality;
+const QUALITY = {
+  high: { dpr: 1.75, shadow: 'high', bloom: 0.45 },
+  medium: { dpr: 1.35, shadow: 'medium', bloom: 0.38 },
+  low: { dpr: 1, shadow: 'low', bloom: 0.28 },
+}[qualityName];
+
 const SHADOW_TIER =
   {
     high: { size: 2048, soft: true, interval: 0.25 },
     medium: { size: 1024, soft: false, interval: 0.5 },
     low: { size: 512, soft: false, interval: 1.0 },
-  }[new URLSearchParams(location.search).get('shadows')] ||
-  { size: 2048, soft: true, interval: 0.25 };
+  }[params.get('shadows') || QUALITY.shadow];
 const SHADOW_HALF = 38; // полуразмер окна карты теней вокруг игрока, м
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+// При EffectComposer MSAA сглаживает только финальный quad и зря держит
+// дополнительный буфер. Края смягчаются постобработкой и разрешением яруса.
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY.dpr));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = SHADOW_TIER.soft ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
@@ -306,7 +309,7 @@ const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.45,
+  QUALITY.bloom,
   0.65,
   0.82
 );
@@ -502,8 +505,7 @@ let warmed = false;
 function warmUp() {
   if (warmed) return;
   warmed = true;
-  bootDone = true; // мир собрался: предохранитель заставки больше не нужен
-  clearTimeout(bootGuard);
+  window.__FTE_BOOT__?.ready();
   requestAnimationFrame(() => {
     const culled = [];
     scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
@@ -517,6 +519,9 @@ function warmUp() {
     view.render(renderer);
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
     loading.classList.add('hidden');
+    loading.removeAttribute('aria-busy');
+    loading.setAttribute('aria-hidden', 'true');
+    loading.setAttribute('inert', '');
     if (player.debug) {
       // ?debug идёт мимо экрана входа: звук заводится первой же клавишей.
       const initAudio = () => {
@@ -528,6 +533,7 @@ function warmUp() {
     } else {
       shell.open(); // мир готов — можно звать внутрь
     }
+    startLoop();
   });
 }
 THREE.DefaultLoadingManager.onLoad = warmUp;
@@ -548,6 +554,15 @@ window.addEventListener('resize', () => {
 
 // ---------- цикл ----------
 const clock = new THREE.Clock();
+let loopStarted = false;
+let lastFrameAt = 0;
+
+function startLoop() {
+  if (loopStarted) return;
+  loopStarted = true;
+  clock.start();
+  requestAnimationFrame(tick);
+}
 let fadeAcc = 0;
 let meltAcc = 0;
 let blizzard = 0; // 0..1 — сглаженная сила метели
@@ -636,8 +651,12 @@ function sampleCave() {
   return 0.4 + 0.6 * (solid / 8);
 }
 
-function tick() {
+function tick(frameAt) {
   requestAnimationFrame(tick);
+  // На gate/паузе атмосфера остаётся живой, но десять полных кадров в секунду
+  // достаточно и заметно экономит GPU и батарею.
+  if (document.body.classList.contains('paused') && frameAt - lastFrameAt < 100) return;
+  lastFrameAt = frameAt;
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
   const dbg = player.debug;
@@ -899,4 +918,3 @@ function tick() {
     }
   }
 }
-tick();

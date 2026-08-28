@@ -23,15 +23,22 @@ export function createShell(onEnter) {
   return {
     /** Показать экран: до первого входа и на каждой паузе. */
     open() {
+      gate.inert = false;
+      gate.setAttribute('aria-hidden', 'false');
       gate.classList.remove('hidden');
       document.body.classList.add('paused');
+      requestAnimationFrame(() => button.focus({ preventScroll: true }));
     },
     /** Убрать экран: игрок в мире. */
     close() {
       gate.classList.add('hidden');
+      gate.inert = true;
+      gate.setAttribute('aria-hidden', 'true');
       document.body.classList.remove('paused');
       // После первого входа кнопка зовёт не в мир, а обратно в мир.
       if (button.dataset.resume) button.textContent = button.dataset.resume;
+      document.body.tabIndex = -1;
+      document.body.focus({ preventScroll: true });
     },
   };
 }
