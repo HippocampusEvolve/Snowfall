@@ -65,8 +65,11 @@
     #gate {
       position: fixed; inset: 0; z-index: 10;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: rgba(4, 8, 14, 0.62);
-      backdrop-filter: blur(6px);
+      /* Тонировка поверх готового мира. Пока мир не собран, её не видно вовсе:
+         сверху лежит сплошной туман (#fog). `backdrop-filter` отсюда убран
+         намеренно - он размывал ЖИВОЙ кадр мира на весь экран каждый кадр, и
+         за это платило меню: наведение и нажатие отвечали с запозданием. */
+      background: rgba(4, 8, 14, 0.55);
       transition: opacity 0.5s ease;
       /* Первое появление - мягкое: витрина гаснет полсекунды, и титул мира
          проступает ей навстречу, а не выпрыгивает готовым. */
@@ -74,6 +77,57 @@
     }
     @keyframes gate-in { from { opacity: 0; } to { opacity: 1; } }
     #gate.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
+    /* --- туман экрана входа ---
+       Пока мир собирается, за меню не должно быть видно ничего: ни того, как
+       мир встаёт по кускам, ни того, как он одевается. Раньше здесь стояло
+       стекло (`backdrop-filter`), то есть КАЖДЫЙ кадр мира ещё и размывался во
+       весь экран - самая дорогая из возможных подложек, и меню вязло именно на
+       ней.
+       Теперь подложка своя и мира не касается: сплошной слой цвета неба и
+       три размытых пятна на нём. Пятна нарисованы градиентом один раз и потом
+       только ездят - анимируется `transform`, то есть работа композитора, а не
+       перерисовка страницы. Главный поток на туман не тратит ничего.
+       Когда мир готов, `boot.js` вешает на body класс `unveiled`: туман
+       расходится за две секунды и открывает мир за меню, а меню остаётся
+       поверх с одной лишь тонировкой. Через те же две секунды слой снимается
+       из потока совсем (`#fog.gone`), чтобы анимации не крутились впустую.
+       Это НЕ пробуждение (`awaken.js`): туман - это меню, пробуждение - мир. */
+    #fog {
+      position: absolute; inset: 0; z-index: -1; overflow: hidden;
+      background: var(--bg);
+      transition: opacity 2s ease;
+    }
+    #fog i {
+      position: absolute; display: block; border-radius: 50%;
+      background: radial-gradient(closest-side, rgba(62, 86, 130, 0.5), rgba(62, 86, 130, 0));
+      will-change: transform;
+    }
+    #fog i:nth-child(1) {
+      left: -30%; top: -35%; width: 110vmax; height: 110vmax;
+      animation: fog-a 46s ease-in-out infinite alternate;
+    }
+    #fog i:nth-child(2) {
+      right: -35%; top: 8%; width: 92vmax; height: 92vmax;
+      background: radial-gradient(closest-side, rgba(26, 42, 74, 0.6), rgba(26, 42, 74, 0));
+      animation: fog-b 62s ease-in-out infinite alternate;
+    }
+    #fog i:nth-child(3) {
+      left: 12%; bottom: -45%; width: 80vmax; height: 80vmax;
+      background: radial-gradient(closest-side, rgba(98, 122, 170, 0.28), rgba(98, 122, 170, 0));
+      animation: fog-c 54s ease-in-out infinite alternate;
+    }
+    @keyframes fog-a { from { transform: translate3d(-6%, -3%, 0) scale(1); } to { transform: translate3d(7%, 5%, 0) scale(1.12); } }
+    @keyframes fog-b { from { transform: translate3d(5%, 4%, 0) scale(1.08); } to { transform: translate3d(-6%, -5%, 0) scale(1); } }
+    @keyframes fog-c { from { transform: translate3d(-4%, 6%, 0) scale(1); } to { transform: translate3d(6%, -4%, 0) scale(1.15); } }
+    body.unveiled #fog { opacity: 0; }
+    #fog.gone { display: none; }
+    /* Телефон: одним пятном меньше и ход вдвое медленнее - туман там не должен
+       стоить дороже, чем на десктопе. */
+    @media (max-width: 560px) {
+      #fog i:nth-child(3) { display: none; }
+      #fog i { animation-duration: 90s; }
+    }
 
     /* Кегль ведёт себя от ширины экрана осторожно: имя мира — одно длинное
        слово с большим трекингом, и на 360 px оно упиралось в края. */
@@ -94,7 +148,10 @@
       letter-spacing: 0.3em; text-indent: 0.3em; text-transform: uppercase;
       color: var(--ink); background: transparent;
       border: 1px solid var(--edge); border-radius: 2px;
-      cursor: pointer; transition: all 0.25s ease;
+      cursor: pointer;
+      /* Именно перечислением, а не `all`: `all` тянет за собой и те свойства,
+         что двигают раскладку, и наведение на кнопку стоило бы перерисовки. */
+      transition: background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease;
     }
     .btn:hover { background: var(--glow); border-color: var(--accent); }
     .btn:focus-visible, .quiet:focus-visible, #exit:focus-visible, .tbtn:focus-visible {
@@ -262,7 +319,9 @@
     @media (prefers-reduced-motion: reduce) {
       #loadFill { animation: none; left: 0; }
       #gate, #boot, #death, #frost, #prompt, .tbtn, #exit { transition: none; }
-      #gate { animation: none; backdrop-filter: none; }
+      #gate { animation: none; }
+      #fog { transition: none; }
+      #fog i { animation: none; }
     }
   </style>
 </head>
@@ -276,6 +335,8 @@
   <!-- Экран входа виден СРАЗУ, без ожидания мира: ни class="hidden", ни inert.
        Мир собирается за ним и проступает сквозь него по мере готовности. -->
   <div id="gate">
+    <!-- Туман: подложка меню, пока мир не собран. Три пятна, ездят transform'ом. -->
+    <div id="fog" aria-hidden="true"><i></i><i></i><i></i></div>
     <h1>SNOWFALL</h1>
     <p class="mood">Минус четырнадцать. Свет в окне горит не для тебя.</p>
     <button id="enter" class="btn" type="button" data-resume="продолжить">войти в ночь</button>

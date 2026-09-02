@@ -40,23 +40,14 @@ const mark = (n) => window.__FTE_BOOT__?.mark(n);
 mark('модуль разобран');
 
 // ---------- прогресс заставки ----------
-// Полоса в index.html до этого момента «дышала» вслепую: доли известны только
-// отсюда, когда модуль разобран и лоадеры three начали считать элементы.
-// Один общий DefaultLoadingManager обслуживает и glTF, и текстуры, так что
-// счётчик покрывает всю загрузку мира до первого кадра.
-{
-  const bar = document.getElementById('loadBar');
-  const fill = document.getElementById('loadFill');
-  THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
-    if (!bar || !fill || !total) return;
-    bar.classList.add('known');
-    fill.style.width = `${Math.min(1, loaded / total) * 100}%`;
-    bar.setAttribute('aria-valuemin', '0');
-    bar.setAttribute('aria-valuemax', String(total));
-    bar.setAttribute('aria-valuenow', String(loaded));
-    bar.setAttribute('aria-valuetext', `${loaded} из ${total} ресурсов`);
-  };
-}
+// Саму полосу ведёт `boot.js`: он знает и ход по вехам, и вот эти доли, и
+// берёт из них большее. Отсюда уходит только доля загрузчика - один общий
+// DefaultLoadingManager обслуживает и glTF, и текстуры, так что счёт покрывает
+// всю загрузку мира до первого кадра.
+THREE.DefaultLoadingManager.onProgress = (_url, loaded, total) => {
+  if (!total) return;
+  window.__FTE_BOOT__?.progress(loaded / total);
+};
 
 // ---------- рендерер ----------
 // Автоматический ярус можно переопределить через ?quality=high|medium|low.
@@ -936,6 +927,13 @@ function tick(frameAt) {
   // этом экране. Десять кадров в секунду сделали бы движение дёрганым, а
   // потолок на dt (0.05 с) вдобавок растянул бы его вдвое против настоящего
   // времени — первая проверка так и показала недоведённый до конца взгляд.
+  //
+  // И отдельно: пока туман экрана входа сплошной, мира за ним не видно вовсе -
+  // рисовать его значит греть видеокарту в пустоту и отбирать кадры у меню.
+  // Прогревочные кадры (`warmSpread`, `primeStart`/`primeEnd`) идут мимо этой
+  // проверки: они рисуют сами, не через цикл, и нужны для компиляции шейдеров.
+  const unveiled = document.body.classList.contains('unveiled');
+  if (!unveiled && !awakening.holds()) return;
   if (
     document.body.classList.contains('paused') &&
     !awakening.holds() &&
