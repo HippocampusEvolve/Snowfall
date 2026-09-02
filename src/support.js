@@ -68,7 +68,9 @@ export function createSupport({ terrain, digger, colliders, getFloor }) {
     // отнимет ту её часть, что смотрит в поверхность, по суммарному смещению.
     resolve(pos, radius, height) {
       const dig = digger;
-      if (dig && dig.edits.size > 0) {
+      // объём есть, если есть природные пещеры или правки: до этапа 4 стены
+      // были только выкопанными, и без правок сэмплить было нечего
+      if (dig && (dig.caves || dig.edits.size > 0)) {
         const e = 0.15;
         // сэмплим ТОЛЬКО выше высоты шага: то, на что можно зашагнуть (уступ,
         // кромка ямы), не считается стеной и не отпихивает — иначе не выбраться
@@ -107,7 +109,7 @@ export function createSupport({ terrain, digger, colliders, getFloor }) {
     // возвращаем null, и ядро оставляет near как есть.
     clearance(eye) {
       const dig = digger;
-      if (!dig || dig.edits.size === 0) return null;
+      if (!dig || !(dig.caves || dig.edits.size > 0)) return null;
 
       const e = 0.12;
       const f = dig.densityAt(eye.x, eye.y, eye.z);

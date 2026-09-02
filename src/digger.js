@@ -1,30 +1,47 @@
 import * as THREE from 'three';
-import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import { edgeTable, triTable } from './mctables.js';
 import { SNOW_CONST, createDiggerMaterial } from './snowmaterial.js';
 import { PIT_DEPTH } from './growth.js';
+import { compose, DEPTH_MIN, Y_FLOOR } from './caves.js';
+import { meshChunk, VN, VS, SW } from './mesher.worker.js';
 
-// Воксельное копание в духе Digger Pro, адаптированное под heightmap-движок.
+// Воксельный объём мира: природные пещеры от семени плюс раскоп игрока.
 //
-// Идея: базовый снежный террейн (быстрый heightmap) остаётся как есть. Там, где
-// игрок копает, «материализуется» воксельное SDF-поле, разбитое на чанки, и
-// перестраивается в меш алгоритмом Marching Cubes. Плоский террейн под чанком
-// вырезается через coverage-маску, а воксельный меш заново воссоздаёт поверхность
-// (его края точно совпадают с heightmap) + вырытый объём: ямы, тоннели, навесы.
+// Идея: базовый снежный террейн (быстрый heightmap) остаётся как есть. Под ним
+// живёт процедурное поле пещер (caves.js), а поверх - разреженная карта правок
+// игрока. Плотность узла собирается ОДНОЙ формулой compose(base, y, cave, edit)
+// - той же самой, что считает воркер, физика и тесты. Всё, где поле меняет знак,
+// режется marching cubes на чанки 16³ по 0.25 м.
 //
-// Ключ к бесшовности: правки хранятся в sparse-карте по АБСОЛЮТНЫМ индексам
-// вокселей. Общая граница двух чанков — это одни и те же воксели, поэтому их
-// значения всегда согласованы независимо от того, в каком порядке чанки созданы.
+// Что здесь главное:
+//
+// 1. Мешинг уехал в воркер (mesher.worker.js). Главный поток только собирает
+//    задание (высоты колонки и правки чанка), а обратно получает готовые
+//    буферы. За кадр он ставит не больше двух чанков.
+// 2. Чанки живут в радиусе R от игрока и выгружаются за R + гистерезис.
+//    Правки при выгрузке никуда не деваются: они в edits, а не в мешах.
+// 3. Вырез террейна (coverage) режет колонку НЕ по «есть непустой чанк», как
+//    раньше, а по «в приповерхностной полосе колонки есть пещера или правка».
+//    Иначе любой глубокий зал вырезал бы дырку в небо на поверхности.
+//
+// Ключ к бесшовности прежний: правки хранятся в sparse-карте по АБСОЛЮТНЫМ
+// индексам вокселей. Общая граница двух чанков - это одни и те же воксели,
+// поэтому их значения согласованы независимо от порядка создания чанков.
 
 const CHUNK = SNOW_CONST.CUTCOL; // ребро чанка, м (= колонка coverage-выреза)
-const VN = 16; // вокселей на ребро чанка
-const VS = CHUNK / VN; // ребро вокселя = 0.25 м
 const S = VN + 1; // сэмплов на ребро (перекрытие границ)
 
 const CLAMP = 4.0; // предел накопленной правки на воксель (м)
 const CORE = 0.6; // доля радиуса с полной силой, дальше — плавный спад
 const EDGE_BLEND = 0.6; // ширина сшивки с мешем террейна у границы чанка, м
 const SKIRT = 0.35; // юбка по периметру выреза: лента вниз от кромки меша, м
+
+// Потоковая загрузка: радиус жизни чанков и гистерезис выгрузки. Гистерезис
+// нужен, чтобы игрок, топчущийся на самой кромке, не гонял туда-сюда мешинг
+// одной и той же колонки.
+const R_LOAD = 40;
+const R_KEEP = R_LOAD + 8;
+const INSTALL_PER_FRAME = 2; // готовых чанков в кадр (см. рамку 4 мс на чанк)
+const PLAN_PER_FRAME = 4; // колонок, разбираемых на чанки за кадр
 
 // Копок лопатой: половина бокса штыка, сила и кромка осыпания. Вынесены из
 // shovelEdit, потому что теми же числами копок воспроизводит журнал (save.js),
@@ -33,17 +50,6 @@ const SKIRT = 0.35; // юбка по периметру выреза: лента
 const SHOVEL_HALF = { x: 0.34, y: 0.24, z: 0.34 };
 const SHOVEL_STRENGTH = 2.4;
 const SHOVEL_FALLOFF = 0.1;
-
-// раскладка Marching Cubes (Paul Bourke): 8 углов + 12 рёбер
-const CORNER = [
-  [0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1],
-  [0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1],
-];
-const EDGE = [
-  [0, 1], [1, 2], [2, 3], [3, 0],
-  [4, 5], [5, 6], [6, 7], [7, 4],
-  [0, 4], [1, 5], [2, 6], [3, 7],
-];
 
 // Ключ вокселя/чанка — SMI-число (упаковка умножением), не строка: editAt зовёт
 // Map.get до 8 раз на сэмпл, а физика игрока сэмплит SDF сотнями раз за кадр —
@@ -65,56 +71,52 @@ const unY = (k) => (k >>> 22) - 256;
 const COLM = KY - 1;
 const colKey = (cx, cz) => cx + 1024 + (cz + 1024) * KZ;
 
-// общий буфер сэмплов _remesh: размер фиксирован, заполняется целиком — незачем
-// выделять 20 КБ на каждый перестраиваемый чанк
-const FIELD = new Float32Array(S * S * S);
+// нижняя и верхняя границы вертикали чанков: пещер ниже Y_FLOOR нет
+const CY_FLOOR = Math.floor(Y_FLOOR / CHUNK);
 
 export class Digger {
-  constructor(scene, terrain, snowPatch, footprints) {
+  constructor(scene, terrain, snowPatch, footprints, caves) {
     this.terrain = terrain;
     this.terrainMesh = terrain.mesh;
     this.footprints = footprints; // правка у поверхности стирает следы на ней
+    this.caves = caves;
 
     this.edits = new Map(); // key(ix,iy,iz) -> накопленная дельта плотности
     this.chunks = new Map(); // key(cx,cy,cz) -> THREE.Mesh (только непустые)
-    // colKey(cx,cz) -> {h, hMin, hMax} — кэш baseHeight по узлам колонки чанков.
-    // Рельеф статичен (копание живёт в edits, heightmap не меняется) → кэш вечный;
-    // повторные копки в тех же колонках не пересчитывают террейн вовсе (~1.2 КБ
-    // на колонку — раскоп в десятки колонок стоит копейки)
+    // colKey(cx,cz) -> {h, hMin, hMax} — кэш baseHeight по узлам колонки чанков
+    // (сетка SW² с кольцом в один сэмпл: кольцо уезжает в воркер под градиент).
+    // Рельеф статичен → кэш вечный, но при выгрузке колонки он тоже уходит,
+    // иначе на прогулке по миру карта разрослась бы на весь мир.
     this._heightCache = new Map();
-    this.onChanged = null; // зовётся после перестройки мешей (main: перерисовать тени)
+    // colKey -> {jmin, jmax} диапазон правок по вертикали: по нему колонка
+    // решает, режет ли она террейн, и какие чанки вообще стоит трогать
+    this._editCols = new Map();
+    this._cutCols = new Set(); // колонки, вырезающие террейн
+    this._plan = new Map(); // colKey -> Set(cy), какие чанки колонке положены
+    this.onChanged = null; // зовётся после установки чанков (main: перерисовать тени)
     this.onStroke = null; // зовётся на каждый копок лопатой (журнал в save.js)
     // Тихий режим воспроизведения: правки копятся, чанки не перестраиваются.
-    // Тысяча записанных взмахов иначе перестроила бы одни и те же чанки
-    // тысячу раз - на входе в мир это секунды на пустом месте.
     this._quiet = false;
 
     this.group = new THREE.Group();
     scene.add(this.group);
 
-    // единый со снегом материал: трипланарная текстура + переход в фирн вглубь
     this.material = createDiggerMaterial({
       textures: terrain.textures,
       heightTex: terrain.heightTex,
       footprints,
     });
 
-    // Юбка по периметру выреза. Кромка воксельного меша пришита к поверхности
-    // ПАТЧА (см. baseHeight), поэтому внутри его зоны стык точный; но вне её
-    // сосед за линией выреза — голый террейн: он ниже на LIFT=0.03 и считает
-    // высоту по треугольникам (±~2 см «твиста» к билинейной). Где сосед ниже
-    // кромки, под скользящим углом видна щель — юбка закрывает её изнутри.
-    // Геометрия — в _rebuildSkirt().
+    // Юбка по периметру выреза (см. _rebuildSkirt).
     this.skirt = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
     this.skirt.castShadow = this.skirt.receiveShadow = true;
-    this.skirt.visible = false; // включается в _rebuildSkirt; bbox считается там же
-    this._primeKeep = null; // юбка, отложенная на время прогревочного кадра
+    this.skirt.visible = false;
+    this._primeKeep = null;
     this.group.add(this.skirt);
 
     // coverage-маска в плоскости XZ: где воксельный меш заменяет плоский террейн.
     // 1 тексель = 1 колонка чанков — при NearestFilter вырез в террейне совпадает
-    // с границей чанка ТОЧНО (маска произвольного разрешения резала с запасом
-    // почти в тексель, и в щель между мешем и террейном было видно небо)
+    // с границей чанка ТОЧНО.
     this.area = SNOW_CONST.WORLD;
     const RES = Math.round(this.area / CHUNK);
     this.covCanvas = document.createElement('canvas');
@@ -127,7 +129,6 @@ export class Digger {
     this.covTex.minFilter = this.covTex.magFilter = THREE.NearestFilter;
     this.covTex.needsUpdate = true;
 
-    // подключаем маску к материалам снега (вырезание дырки под воксельным мешем)
     for (const u of [terrain.uniforms, snowPatch && snowPatch.uniforms].filter(Boolean)) {
       u.uCut.value = this.covTex;
       u.uCutArea.value = this.area;
@@ -136,16 +137,44 @@ export class Digger {
 
     this._ray = new THREE.Raycaster();
     this._dir = new THREE.Vector3();
+
+    // ---- очередь мешинга ----
+    this._queue = []; // ключи грязных чанков, ближние впереди
+    this._queued = new Set();
+    this._ver = new Map(); // ключ чанка -> счётчик версии
+    this._busy = []; // по воркеру: ключ чанка в работе или null
+    this._ready = []; // готовые результаты, ждут установки
+    this._colQueue = []; // колонки, которые ещё не разобраны на чанки
+    this._colQueued = new Set();
+    this._lastPlanAt = null;
+    this._covDirty = false;
+
+    this._workers = [];
+    try {
+      const n = Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 2) >= 4 ? 2 : 1));
+      for (let i = 0; i < n; i++) {
+        const w = new Worker(new URL('./mesher.worker.js', import.meta.url), { type: 'module' });
+        w.onmessage = (ev) => this._onWorkerMessage(i, ev.data);
+        w.postMessage({ kind: 'init', seed: caves.seed, avoid: caves.avoid });
+        this._workers.push(w);
+        this._busy.push(null);
+      }
+    } catch (e) {
+      // Воркеров нет (старый браузер, file://) — мешаем на главном потоке.
+      // Мир от этого не разваливается, только подрагивает на входе.
+      console.warn('[digger] воркер не завёлся, мешинг на главном потоке', e);
+      this._workers = [];
+    }
   }
+
+  // ---------------- поле ----------------
 
   // Базовая высота снега для SDF. У границ чанков (там воксельный меш встречается
   // с окружающим снегом) — ТА ЖЕ поверхность, которую рисует деформируемый патч:
   // билинейная heightmap в точности текстуры (Terrain.getPatchHeight) — стык
   // с патчем вершина-в-вершину. В глубине чанка — гладкий аналитический шум;
   // между ними плавная сшивка. Вес зависит только от мировой позиции, поэтому
-  // соседние чанки всегда согласованы. Плюс LIFT: патч приподнят над террейном
-  // ровно на LIFT. Вне зоны патча сосед кромки — голый террейн (без LIFT,
-  // треугольная интерполяция): та ступенька прячется юбкой (_rebuildSkirt).
+  // соседние чанки всегда согласованы.
   baseHeight(x, z) {
     const dx = Math.abs(x - Math.round(x / CHUNK) * CHUNK);
     const dz = Math.abs(z - Math.round(z / CHUNK) * CHUNK);
@@ -156,21 +185,23 @@ export class Digger {
     return (w > 0 ? hm + (this.terrain.getHeight(x, z) - hm) * w : hm) + SNOW_CONST.LIFT;
   }
 
-  // Высоты колонки чанков (cx,cz): baseHeight в S×S узлах + min/max, из кэша
-  // (см. _heightCache). h[z*S + x] — порядок обхода как в сэмплах _remesh.
+  // Высоты колонки чанков (cx,cz): baseHeight в SW² узлах (кольцо в один сэмпл
+  // с каждой стороны — воркеру оно нужно под центральную разность градиента)
+  // плюс min/max по внутренним узлам.
   _columnHeights(cx, cz) {
     const ck = colKey(cx, cz);
     let c = this._heightCache.get(ck);
     if (c) return c;
-    const h = new Float32Array(S * S);
+    const h = new Float32Array(SW * SW);
     let hMin = Infinity, hMax = -Infinity;
-    let q = 0;
-    for (let z = 0; z <= VN; z++) {
-      for (let x = 0; x <= VN; x++) {
-        const v = this.baseHeight((cx * VN + x) * VS, (cz * VN + z) * VS);
-        h[q++] = v;
-        if (v < hMin) hMin = v;
-        if (v > hMax) hMax = v;
+    for (let k = -1; k <= VN + 1; k++) {
+      for (let i = -1; i <= VN + 1; i++) {
+        const v = this.baseHeight((cx * VN + i) * VS, (cz * VN + k) * VS);
+        h[(k + 1) * SW + (i + 1)] = v;
+        if (i >= 0 && i <= VN && k >= 0 && k <= VN) {
+          if (v < hMin) hMin = v;
+          if (v > hMax) hMax = v;
+        }
       }
     }
     c = { h, hMin, hMax };
@@ -178,20 +209,20 @@ export class Digger {
     return c;
   }
 
-  // плотность в воксельном узле: >0 — грунт, <0 — воздух. Нулевая изоповерхность
-  // изначально совпадает с heightmap, поэтому воксельный меш стыкуется с террейном.
+  // плотность в воксельном узле: >0 — грунт, <0 — воздух
   density(ix, iy, iz) {
-    const base = this.baseHeight(ix * VS, iz * VS) - iy * VS;
-    const e = this.edits.get(key(ix, iy, iz));
-    return e ? base + e : base;
+    const x = ix * VS, y = iy * VS, z = iz * VS;
+    const base = this.baseHeight(x, z);
+    const e = this.edits.get(key(ix, iy, iz)) || 0;
+    return compose(base, y, this.caves.sdf(x, y, z, base - y), e);
   }
 
   // Непрерывная плотность SDF в произвольной мировой точке (для физики игрока).
-  // Базовый член H(x,z)-y — аналитический (точно совпадает с heightmap), правки
-  // трилинейно интерполируются между узлами вокселей → поле гладкое и совпадает
-  // с видимым мешем в узлах. Без правок (edits пуст) сводится ровно к heightmap.
+  // Базовый член H(x,z)-y — аналитический (точно совпадает с heightmap), пещера
+  // — поле caves, правки трилинейно интерполируются между узлами вокселей.
   densityAt(x, y, z) {
-    return this.baseHeight(x, z) - y + this.editAt(x, y, z);
+    const base = this.baseHeight(x, z);
+    return compose(base, y, this.caves.sdf(x, y, z, base - y), this.editAt(x, y, z));
   }
 
   // трилинейная интерполяция накопленных правок в произвольной точке.
@@ -219,20 +250,20 @@ export class Digger {
 
   // Высота ближайшей опоры под ногами: марш вниз от yTop до yBottom, ищем переход
   // воздух(<0)→грунт(≥0). Возвращает Y поверхности (лин. интерполяция) или null.
-  // Если старт оказался внутри грунта (шаг вверх на уступ) — чуть поднимаемся до
-  // воздуха, но не больше ~0.6 м, чтобы не пробить потолок пещеры наверх.
   surfaceBelow(x, z, yTop, yBottom, ds = 0.1) {
     // Марш идёт по вертикали, а (x, z) на нём не меняются — значит и высота
-    // рельефа под колонкой одна на весь марш. Раньше её считал каждый шаг:
-    // `densityAt` звал `baseHeight`, а тот — шум террейна, и на кадр стоя
-    // на месте выходило под полторы сотни вызовов шума впустую.
+    // рельефа под колонкой одна на весь марш; пещера же меняется каждый шаг,
+    // её приходится звать по-настоящему (у неё свой быстрый выход по глубине:
+    // на поверхности она не стоит ни одного вызова шума).
     const base = this.baseHeight(x, z);
+    const C = this.caves;
+    const f = (y) => compose(base, y, C.sdf(x, y, z, base - y), this.editAt(x, y, z));
 
-    let py = yTop, pd = base - py + this.editAt(x, py, z);
+    let py = yTop, pd = f(py);
     let guard = 0;
-    while (pd >= 0 && guard++ < 6) { py += ds; pd = base - py + this.editAt(x, py, z); }
+    while (pd >= 0 && guard++ < 6) { py += ds; pd = f(py); }
     for (let y = py - ds; y >= yBottom; y -= ds) {
-      const d = base - y + this.editAt(x, y, z);
+      const d = f(y);
       if (pd < 0 && d >= 0) {
         const t = pd / (pd - d); // доля пути [py→y], где плотность = 0
         return py + (y - py) * t;
@@ -242,6 +273,8 @@ export class Digger {
     }
     return null;
   }
+
+  // ---------------- правки игрока ----------------
 
   // копание (sign=-1) или намыв (sign=+1) сферой в мировой точке center
   edit(center, radius, sign, strength = 3.0) {
@@ -272,15 +305,12 @@ export class Digger {
       }
     }
 
+    this._noteEdits(imin, imax, jmin, jmax, kmin, kmax);
     this._remeshRange(imin, imax, jmin, jmax, kmin, kmax);
   }
 
   // Копок лопатой: ориентированный по yaw бокс с РЕЗКИМ профилем спада —
-  // плоское дно, ровные стенки (marching cubes воспроизводит плоскость точно;
-  // «мыльность» старых ям давала сферическая кисть с плавным спадом, не сетка).
-  // half = {x, y, z} — полуразмеры бокса в его локальных осях; falloff — узкая
-  // кромка осыпания (м). Стыки соседних копков оставляют лёгкие гребни —
-  // это и есть следы штыка.
+  // плоское дно, ровные стенки (marching cubes воспроизводит плоскость точно).
   editBox(center, yaw, half, sign, strength = 2.4, falloff = 0.1) {
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
@@ -317,147 +347,202 @@ export class Digger {
         }
       }
     }
+    this._noteEdits(imin, imax, jmin, jmax, kmin, kmax);
     this._remeshRange(imin, imax, jmin, jmax, kmin, kmax);
   }
 
-  // перестроить чанки, затронутые правкой в диапазоне воксельных индексов
-  _remeshRange(imin, imax, jmin, jmax, kmin, kmax) {
-    if (this._quiet) return; // воспроизведение журнала перестроит всё разом в конце
-    // грязные чанки: диапазон индексов + нижний сосед по общей границе
-    const cmin = (i) => {
-      let c = Math.floor(i / VN);
-      if (((i % VN) + VN) % VN === 0) c -= 1; // сэмпл на границе принадлежит и нижнему чанку
-      return c;
-    };
-    // По вертикали мало взять диапазон правки: колонка, попавшая в coverage-маску,
-    // вырезает террейн ЦЕЛИКОМ, поэтому воксельный меш обязан замостить всю
-    // поверхность колонки — включая чанки выше/ниже правки, куда уходит рельеф
-    // на склоне (иначе в вырезе видно небо).
-    const dirty = [];
-    for (let cz = cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
-      for (let cx = cmin(imin); cx <= Math.floor(imax / VN); cx++) {
-        const { hMin, hMax } = this._columnHeights(cx, cz);
-        const jlo = Math.min(jmin, Math.floor(hMin / VS) - 1);
-        const jhi = Math.max(jmax, Math.ceil(hMax / VS) + 1);
-        for (let cy = cmin(jlo); cy <= Math.floor(jhi / VN); cy++) dirty.push([cx, cy, cz]);
-      }
-    }
+  // ---------------- учёт правок по колонкам ----------------
 
-    let columnsChanged = false;
-    for (const [cx, cy, cz] of dirty) columnsChanged = this._remesh(cx, cy, cz) || columnsChanged;
-    if (columnsChanged) this._updateCoverage();
-    if (this.onChanged) this.onChanged();
+  // Сэмпл на границе чанка принадлежит и нижнему соседу.
+  static _cmin(i) {
+    let c = Math.floor(i / VN);
+    if (((i % VN) + VN) % VN === 0) c -= 1;
+    return c;
   }
 
-  // Marching Cubes одного чанка. Возвращает true, если набор колонок изменился.
-  _remesh(cx, cy, cz) {
-    const k = key(cx, cy, cz);
-    const had = this.chunks.has(k);
-
-    // Сэмплы плотности S³ (с перекрытием границ соседей). Развёрнутый density():
-    // базовая высота зависит только от колонки — берём из вечного кэша, а не
-    // пересчитываем на каждом из S³ узлов; ключ правки вдоль x — инкремент
-    const field = FIELD;
-    const ox = cx * VN, oy = cy * VN, oz = cz * VN;
-    const colH = this._columnHeights(cx, cz).h;
-    const E = this.edits;
-    let p = 0;
-    for (let z = 0; z < S; z++) {
-      const zRow = z * S;
-      for (let y = 0; y < S; y++) {
-        const yw = (oy + y) * VS;
-        let k = key(ox, oy + y, oz + z);
-        for (let x = 0; x < S; x++, k++) {
-          const e = E.get(k);
-          field[p++] = colH[zRow + x] - yw + (e || 0);
-        }
+  // Запомнить, что в этих колонках появились правки и на каких высотах: по
+  // этому потом решается, режет ли колонка террейн и какие чанки ей положены.
+  _noteEdits(imin, imax, jmin, jmax, kmin, kmax) {
+    for (let cz = Digger._cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
+      for (let cx = Digger._cmin(imin); cx <= Math.floor(imax / VN); cx++) {
+        const ck = colKey(cx, cz);
+        const c = this._editCols.get(ck);
+        if (!c) this._editCols.set(ck, { jmin, jmax });
+        else { c.jmin = Math.min(c.jmin, jmin); c.jmax = Math.max(c.jmax, jmax); }
+        this._plan.delete(ck); // раскладка чанков колонки устарела
       }
     }
-    const at = (x, y, z) => field[x + S * (y + S * z)];
+  }
 
-    const pos = [];
-    const ev = new Array(12); // интерполированные вершины рёбер
-    for (let z = 0; z < VN; z++) {
-      for (let y = 0; y < VN; y++) {
-        for (let x = 0; x < VN; x++) {
-          const val = [
-            at(x, y, z), at(x + 1, y, z), at(x + 1, y, z + 1), at(x, y, z + 1),
-            at(x, y + 1, z), at(x + 1, y + 1, z), at(x + 1, y + 1, z + 1), at(x, y + 1, z + 1),
-          ];
-          let ci = 0;
-          for (let c = 0; c < 8; c++) if (val[c] < 0) ci |= 1 << c;
-          const edges = edgeTable[ci];
-          if (edges === 0) continue;
+  // ---------------- раскладка колонки ----------------
 
-          for (let e = 0; e < 12; e++) {
-            if (!(edges & (1 << e))) continue;
-            const a = EDGE[e][0], b = EDGE[e][1];
-            const va = val[a], vb = val[b];
-            const t = va / (va - vb); // точка пересечения нуля вдоль ребра
-            const ca = CORNER[a], cb = CORNER[b];
-            ev[e] = [
-              (ox + x + ca[0] + (cb[0] - ca[0]) * t) * VS,
-              (oy + y + ca[1] + (cb[1] - ca[1]) * t) * VS,
-              (oz + z + ca[2] + (cb[2] - ca[2]) * t) * VS,
-            ];
-          }
+  // Подходит ли пещера к диапазону высот колонки ближе чем на margin.
+  //
+  // Сетка редкая (2 м по всем трём осям), но решение принимается не по знаку, а
+  // по ЗАПАСУ: sdf пещеры мерян в метрах, поэтому «ближайшая пустота дальше
+  // 2 м от каждого узла сетки 2 м» - честное доказательство, что чанк сплошной.
+  // Полного marching cubes такая проверка не стоит.
+  _caveNear(cx, cz, yLo, yHi, margin = 2.0) {
+    const C = this.caves;
+    const { h } = this._columnHeights(cx, cz);
+    for (let i = 0; i <= VN; i += VN / 2) {
+      const x = (cx * VN + i) * VS;
+      for (let k = 0; k <= VN; k += VN / 2) {
+        const z = (cz * VN + k) * VS;
+        const base = h[(k + 1) * SW + (i + 1)];
+        for (let y = yLo; y <= yHi + 1e-6; y += 2) {
+          if (C.sdf(x, y, z, base - y) < margin) return true;
+        }
+        if (C.sdf(x, yHi, z, base - yHi) < margin) return true;
+      }
+    }
+    return false;
+  }
 
-          const row = ci * 16;
-          for (let n = 0; triTable[row + n] !== -1; n += 3) {
-            const A = ev[triTable[row + n]];
-            const B = ev[triTable[row + n + 1]];
-            const C = ev[triTable[row + n + 2]];
-            // порядок A,C,B: при нашей конвенции знака (<0 — воздух) таблицы дают
-            // нормали внутрь грунта; переворачиваем, чтобы смотрели в воздух
-            pos.push(A[0], A[1], A[2], C[0], C[1], C[2], B[0], B[1], B[2]);
+  // Какие чанки колонки положено мешить и режет ли она террейн.
+  //
+  // Правило выреза: колонка режет террейн, только если её ПРИПОВЕРХНОСТНАЯ
+  // полоса содержит пещеру или правку. Тогда, как и раньше, воксельный меш
+  // обязан замостить всю поверхность колонки — иначе в вырезе видно небо.
+  // Если полоса чиста, террейн остаётся на месте, а мешатся лишь внутренние
+  // чанки: чанк, пересекающий поверхность, в неразрезанной колонке не мешится
+  // никогда — иначе в одном месте оказались бы две поверхности и мерцание.
+  _columnPlan(cx, cz) {
+    const ck = colKey(cx, cz);
+    const had = this._plan.get(ck);
+    if (had) return had;
+
+    const { hMin, hMax } = this._columnHeights(cx, cz);
+    const bandLo = hMin - 1, bandHi = hMax + 1;
+    const ed = this._editCols.get(ck);
+    const edLo = ed ? ed.jmin * VS : Infinity;
+    const edHi = ed ? ed.jmax * VS : -Infinity;
+
+    const cut =
+      (ed && edHi >= bandLo && edLo <= bandHi) || this._caveNear(cx, cz, bandLo, bandHi);
+
+    const set = new Set();
+    const cyTop = Math.floor(bandHi / CHUNK);
+    const cyBottom = Math.min(CY_FLOOR, ed ? Digger._cmin(ed.jmin) : CY_FLOOR);
+    for (let cy = cyBottom; cy <= cyTop; cy++) {
+      const lo = cy * CHUNK, hi = (cy + 1) * CHUNK;
+      const nearSurface = hi > bandLo && lo < bandHi;
+      if (nearSurface) {
+        if (cut) set.add(cy); // разрезанная колонка мостится целиком
+        continue;
+      }
+      if (lo > bandHi) continue; // выше рельефа мешить нечего
+      const hasEdit = ed && edHi >= lo - VS && edLo <= hi + VS;
+      if (hasEdit || this._caveNear(cx, cz, lo, hi)) set.add(cy);
+    }
+
+    // Раскладка могла смениться (правка открыла или закрыла чанк) - меши,
+    // которым в ней больше нет места, надо снять со сцены: иначе колонка,
+    // перестав резать террейн, оставила бы вторую поверхность поверх первой.
+    for (let cy = cyBottom - 1; cy <= cyTop + 1; cy++) {
+      if (set.has(cy)) continue;
+      const k = key(cx, cy, cz);
+      const m = this.chunks.get(k);
+      if (!m) continue;
+      this.group.remove(m);
+      m.geometry.dispose();
+      this.chunks.delete(k);
+      this._ver.set(k, (this._ver.get(k) || 0) + 1);
+    }
+
+    const plan = { cut, set };
+    this._plan.set(ck, plan);
+    if (cut) {
+      if (!this._cutCols.has(ck)) { this._cutCols.add(ck); this._covDirty = true; }
+    } else if (this._cutCols.delete(ck)) this._covDirty = true;
+    return plan;
+  }
+
+  // ---------------- очередь и воркеры ----------------
+
+  _enqueue(k, front = false) {
+    this._ver.set(k, (this._ver.get(k) || 0) + 1);
+    if (this._queued.has(k)) {
+      if (!front) return;
+      const i = this._queue.indexOf(k);
+      if (i > 0) this._queue.splice(i, 1); else return;
+    }
+    this._queued.add(k);
+    if (front) this._queue.unshift(k); else this._queue.push(k);
+  }
+
+  // задание воркеру: высоты колонки (с кольцом) и правки чанка
+  _job(k) {
+    const cx = unX(k), cy = unY(k), cz = unZ(k);
+    const { h } = this._columnHeights(cx, cz);
+    let edits = null;
+    if (this._editCols.has(colKey(cx, cz))) {
+      const E = this.edits;
+      const ox = cx * VN, oy = cy * VN, oz = cz * VN;
+      const list = [];
+      for (let kk = -1; kk <= VN + 1; kk++) {
+        for (let j = -1; j <= VN + 1; j++) {
+          let vk = key(ox - 1, oy + j, oz + kk);
+          for (let i = -1; i <= VN + 1; i++, vk++) {
+            const v = E.get(vk);
+            if (v) list.push([((kk + 1) * SW + (j + 1)) * SW + (i + 1), v]);
           }
         }
       }
+      if (list.length) edits = list;
     }
+    return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits };
+  }
 
+  _onWorkerMessage(i, msg) {
+    if (msg.kind === 'ready') return;
+    this._busy[i] = null;
+    this._ready.push(msg);
+  }
+
+  _pump() {
+    if (this._workers.length === 0) {
+      // без воркеров мешаем прямо здесь, но не больше двух чанков за кадр
+      for (let n = 0; n < INSTALL_PER_FRAME && this._queue.length; n++) {
+        const k = this._queue.shift();
+        this._queued.delete(k);
+        const job = this._job(k);
+        const out = meshChunk(job, this.caves);
+        this._ready.push(out ? { ...job, ...out } : { ...job, empty: true });
+      }
+      return;
+    }
+    for (let i = 0; i < this._workers.length; i++) {
+      while (this._busy[i] === null && this._queue.length) {
+        const k = this._queue.shift();
+        this._queued.delete(k);
+        this._busy[i] = k;
+        this._workers[i].postMessage(this._job(k));
+      }
+    }
+  }
+
+  // Поставить готовый чанк в сцену. Устаревший результат (правка обогнала
+  // мешинг) выбрасывается по счётчику версии.
+  _install(msg) {
+    const k = key(msg.cx, msg.cy, msg.cz);
+    if (msg.ver !== this._ver.get(k)) return;
     const old = this.chunks.get(k);
-    if (pos.length === 0) {
+    if (msg.empty) {
       if (old) {
         this.group.remove(old);
         old.geometry.dispose();
         this.chunks.delete(k);
       }
-      return had; // колонки меняются, только если чанк был и исчез
+      return;
     }
-
-    let geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo = mergeVertices(geo); // сшиваем совпадающие вершины
-
-    // Нормали — из градиента SDF, а не из треугольников: поле глобальное, поэтому
-    // нормали гладко продолжаются через границы чанков (computeVertexNormals на
-    // открытом краю меша «заваливал» их — тёмный шов по контуру выреза). Базовый
-    // член — та же blended-высота, что и у позиций (baseHeight): у кромки нормаль
-    // сходится с нормалями патча (он тоже дифференцирует билинейную heightmap),
-    // без тонального скачка на линии выреза; в глубине — гладкий аналитический
-    // рельеф, как нормали террейна.
-    const pAttr = geo.attributes.position;
-    const nrm = new Float32Array(pAttr.count * 3);
-    const eps = VS * 0.5;
-    const df = (x, y, z) => this.baseHeight(x, z) - y + this.editAt(x, y, z);
-    for (let i = 0; i < pAttr.count; i++) {
-      const x = pAttr.getX(i), y = pAttr.getY(i), z = pAttr.getZ(i);
-      const nx = df(x - eps, y, z) - df(x + eps, y, z);
-      const ny = df(x, y - eps, z) - df(x, y + eps, z);
-      const nz = df(x, y, z - eps) - df(x, y, z + eps);
-      const l = Math.hypot(nx, ny, nz);
-      if (l > 1e-6) {
-        nrm[i * 3] = nx / l; nrm[i * 3 + 1] = ny / l; nrm[i * 3 + 2] = nz / l;
-      } else {
-        nrm[i * 3 + 1] = 1;
-      }
-    }
-    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(msg.position, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(msg.normal, 3));
+    geo.setIndex(new THREE.BufferAttribute(msg.index, 1));
     // позиции в мировых координатах, матрица меша единичная — сфера честная;
-    // считаем её здесь, чтобы чанк проходил frustum culling (камеры И теней),
-    // а не рисовался всегда, как раньше с frustumCulled=false
+    // считаем её здесь, чтобы чанк проходил frustum culling (камеры И теней)
     geo.computeBoundingSphere();
-
     if (old) {
       old.geometry.dispose();
       old.geometry = geo;
@@ -467,32 +552,137 @@ export class Digger {
       this.chunks.set(k, mesh);
       this.group.add(mesh);
     }
-    return !had; // новый непустой чанк → колонки могли расшириться
   }
 
-  // перерисовываем coverage-маску по колонкам (cx,cz), где есть непустые чанки
+  /**
+   * Кадр потоковой загрузки: колонки вокруг игрока разбираются на чанки,
+   * очередь уезжает в воркеры, готовое ставится в сцену (не больше двух за
+   * кадр), ушедшее за радиус выгружается.
+   *
+   * Зовётся из тика мира один раз за кадр. onChanged дёргается тоже один раз,
+   * а не на каждый чанк: за ним стоит перерисовка карты теней.
+   */
+  update(pos) {
+    if (this._quiet) return;
+    this._stream(pos);
+
+    // разобрать несколько колонок из очереди
+    for (let n = 0; n < PLAN_PER_FRAME && this._colQueue.length; n++) {
+      const ck = this._colQueue.shift();
+      this._colQueued.delete(ck);
+      const cx = unX(ck), cz = unZ(ck);
+      const { set } = this._columnPlan(cx, cz);
+      for (const cy of set) {
+        const k = key(cx, cy, cz);
+        if (!this.chunks.has(k)) this._enqueue(k);
+      }
+    }
+
+    this._pump();
+
+    let installed = 0;
+    while (installed < INSTALL_PER_FRAME && this._ready.length) {
+      this._install(this._ready.shift());
+      installed++;
+    }
+    if (this._covDirty) {
+      this._covDirty = false;
+      this._updateCoverage();
+      installed++;
+    }
+    if (installed && this.onChanged) this.onChanged();
+  }
+
+  // Колонки в радиусе R_LOAD ставятся в очередь, за R_KEEP — выгружаются.
+  _stream(pos) {
+    if (!pos) return;
+    if (this._lastPlanAt && Math.hypot(pos.x - this._lastPlanAt.x, pos.z - this._lastPlanAt.z) < 2)
+      return;
+    this._lastPlanAt = { x: pos.x, z: pos.z };
+
+    const c0x = Math.floor(pos.x / CHUNK), c0z = Math.floor(pos.z / CHUNK);
+    const rad = Math.ceil(R_LOAD / CHUNK);
+    for (let cz = c0z - rad; cz <= c0z + rad; cz++) {
+      for (let cx = c0x - rad; cx <= c0x + rad; cx++) {
+        const d = Math.hypot((cx + 0.5) * CHUNK - pos.x, (cz + 0.5) * CHUNK - pos.z);
+        if (d > R_LOAD) continue;
+        const ck = colKey(cx, cz);
+        if (this._plan.has(ck) || this._colQueued.has(ck)) continue;
+        this._colQueued.add(ck);
+        this._colQueue.push(ck);
+      }
+    }
+    // ближние колонки разбираются первыми
+    this._colQueue.sort((a, b) => {
+      const da = Math.hypot((unX(a) + 0.5) * CHUNK - pos.x, (unZ(a) + 0.5) * CHUNK - pos.z);
+      const db = Math.hypot((unX(b) + 0.5) * CHUNK - pos.x, (unZ(b) + 0.5) * CHUNK - pos.z);
+      return da - db;
+    });
+
+    // выгрузка: правки остаются в edits, уходят только меши и кэши колонки
+    for (const ck of [...this._plan.keys()]) {
+      const d = Math.hypot((unX(ck) + 0.5) * CHUNK - pos.x, (unZ(ck) + 0.5) * CHUNK - pos.z);
+      if (d <= R_KEEP) continue;
+      this._unloadColumn(ck);
+    }
+  }
+
+  _unloadColumn(ck) {
+    const plan = this._plan.get(ck);
+    if (plan) {
+      const cx = unX(ck), cz = unZ(ck);
+      for (const cy of plan.set) {
+        const k = key(cx, cy, cz);
+        const m = this.chunks.get(k);
+        if (m) {
+          this.group.remove(m);
+          m.geometry.dispose();
+          this.chunks.delete(k);
+        }
+        this._ver.set(k, (this._ver.get(k) || 0) + 1); // задания в полёте протухли
+        if (this._queued.delete(k)) {
+          const i = this._queue.indexOf(k);
+          if (i >= 0) this._queue.splice(i, 1);
+        }
+      }
+    }
+    this._plan.delete(ck);
+    this._heightCache.delete(ck);
+    if (this._cutCols.delete(ck)) this._covDirty = true;
+  }
+
+  // перестроить чанки, затронутые правкой в диапазоне воксельных индексов:
+  // теперь это только постановка в очередь, в голову — копок игрока обязан
+  // появиться в кадре через два-три кадра, а не через полный обход очереди
+  _remeshRange(imin, imax, jmin, jmax, kmin, kmax) {
+    if (this._quiet) return; // воспроизведение журнала поставит всё разом в конце
+    for (let cz = Digger._cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
+      for (let cx = Digger._cmin(imin); cx <= Math.floor(imax / VN); cx++) {
+        const { set } = this._columnPlan(cx, cz);
+        // правка могла и открыть новые чанки, и попасть в уже размеченные
+        const jlo = Digger._cmin(jmin), jhi = Math.floor(jmax / VN);
+        for (let cy = jlo; cy <= jhi; cy++) set.add(cy);
+        for (const cy of set) this._enqueue(key(cx, cy, cz), true);
+      }
+    }
+  }
+
+  // перерисовываем coverage-маску по колонкам, режущим террейн
   _updateCoverage() {
-    const cols = new Set();
-    for (const k of this.chunks.keys()) cols.add(k & COLM); // нижние биты = colKey
+    const cols = this._cutCols;
     const RES = this.covCanvas.width; // 1 тексель = 1 колонка чанков
     const ctx = this.covCtx;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, RES, RES);
     ctx.fillStyle = '#fff';
-    for (const c of cols) {
-      ctx.fillRect(unX(c) + RES / 2, unZ(c) + RES / 2, 1, 1);
-    }
+    for (const c of cols) ctx.fillRect(unX(c) + RES / 2, unZ(c) + RES / 2, 1, 1);
     this.covTex.needsUpdate = true;
     this._rebuildSkirt(cols);
   }
 
   // Юбка: по каждому наружному ребру покрытых колонок — вертикальная лента от
-  // кромки меша вниз на SKIRT. На плоскости выреза правки всегда нулевые (иначе
-  // соседняя колонка тоже была бы покрыта), поэтому кромка MC-меша проходит
-  // точно через baseHeight в узлах решётки 0.25 м — верх юбки совпадает с ней
-  // вершина в вершину. Нормаль наружу и горизонтальна: шейдер красит юбку как
-  // «стенку» среза (трипланар по нужной оси, холодный тинт) — видимая полоска
-  // в щели читается как снежный уступ. Перестройка только при смене колонок.
+  // кромки меша вниз на SKIRT. Кромка MC-меша проходит точно через baseHeight
+  // в узлах решётки 0.25 м — верх юбки совпадает с ней вершина в вершину.
   _rebuildSkirt(cols) {
     const pos = [];
     const nrm = [];
@@ -535,13 +725,8 @@ export class Digger {
   // ---- прогрев материала под заставкой ----
   // Программа снежного среза (digger-snow) в three собирается лениво: ровно
   // тогда, когда меш с этим материалом ВПЕРВЫЕ попадает в список отрисовки.
-  // До первого копка в сцене нет ни одного такого меша (юбка есть, но она
-  // пустая и visible=false), поэтому вся компиляция приходилась на кадр
-  // сразу после первого удара лопатой — замерено 211 мс в composer.render()
-  // при одной новой программе. Лечение: на время прогревочного кадра (main.js,
-  // под заставкой) подкладываем этим же материалом вырожденный треугольник
-  // глубоко под миром. В кадр он не приносит ни пикселя, но программу и её
-  // depth-вариант для карты теней заставляет собрать заранее.
+  // Лечение: на время прогревочного кадра подкладываем этим же материалом
+  // вырожденный треугольник глубоко под миром.
   primeStart() {
     const geo = new THREE.BufferGeometry();
     const y = -80; // ниже любого рельефа: даже без куллинга ничего не видно
@@ -551,10 +736,6 @@ export class Digger {
     );
     geo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
     geo.computeBoundingSphere();
-    // Юбка к этому моменту может быть НЕ пустой: сейв загружается раньше
-    // прогрева и успевает построить её по всему периметру раскопа. Прячем её
-    // на один кадр, а не выбрасываем, — иначе обжитый мир каждый запуск
-    // встречал бы игрока щелью по краю ямы, ради которой юбка и написана.
     this._primeKeep = { geometry: this.skirt.geometry, visible: this.skirt.visible };
     this.skirt.geometry = geo;
     this.skirt.visible = true;
@@ -581,9 +762,6 @@ export class Digger {
   }
 
   // Копок лопатой из камеры: штык входит по взгляду в точку прицела.
-  // sign=-1 — снять штык снега, sign=+1 — уложить/намыть. Бокс ориентирован
-  // по азимуту взгляда, оси вертикальны: вертикальные стенки, плоское дно.
-  // Возвращает точку врезания (для брызг/звука) или null (промах).
   shovelEdit(camera, sign, reach = 3.4) {
     const hit = this._aim(camera, reach);
     if (!hit) return null;
@@ -591,8 +769,6 @@ export class Digger {
     c.y += sign > 0 ? 0.1 : -0.08; // укладка растёт над точкой, копок — вглубь
     const yaw = Math.atan2(this._dir.x, this._dir.z);
     this.shovelStroke(c, yaw, sign);
-    // правка у поверхности снимает/засыпает и следы на ней: свежий срез чист,
-    // а под глубоким тоннелем поверхностные следы не трогаем
     if (
       this.footprints &&
       Math.abs(hit.point.y - this.baseHeight(hit.point.x, hit.point.z)) < 1.2
@@ -604,11 +780,8 @@ export class Digger {
 
   /**
    * Правка одного копка без камеры: центр бокса штыка, азимут, знак, сила.
-   *
    * Через неё копает лопата (shovelEdit) и через неё же журнал воспроизводит
-   * записанные взмахи - формула правки одна на оба пути. В тихом режиме
-   * (см. replayBegin) копок ничего не перестраивает и в журнал не попадает:
-   * он оттуда и пришёл.
+   * записанные взмахи - формула правки одна на оба пути.
    */
   shovelStroke(center, yaw, sign, strength = SHOVEL_STRENGTH) {
     this.editBox(center, yaw, SHOVEL_HALF, sign, strength, SHOVEL_FALLOFF);
@@ -620,7 +793,7 @@ export class Digger {
     this._quiet = true;
   }
 
-  /** Журнал воспроизведён - перестроить всё затронутое разом. */
+  /** Журнал воспроизведён - поставить всё затронутое в очередь. */
   replayEnd() {
     this._quiet = false;
     this._remeshEdits();
@@ -628,9 +801,7 @@ export class Digger {
 
   /**
    * Осадка правок у поверхности (growth.js): всё, что лежит не глубже depth
-   * метров под базовой поверхностью снега, умножается на k. Глубже не
-   * трогаем: тоннели и пещеры остаются как выкопаны, затягивает только ямы.
-   * Мешей не касается - зовётся до перестройки, на загрузке.
+   * метров под базовой поверхностью снега, умножается на k.
    */
   settle(k, depth) {
     if (!(k < 1)) return;
@@ -646,8 +817,6 @@ export class Digger {
       }
       if (unY(kk) * VS < h - depth) continue;
       const nv = v * k;
-      // выцветшую в ноль правку выбрасываем совсем: колонка выходит из
-      // coverage-выреза, и заровнявшаяся яма перестаёт стоить чанка
       if (Math.abs(nv) < 0.01) this.edits.delete(kk);
       else this.edits.set(kk, nv);
     }
@@ -657,13 +826,11 @@ export class Digger {
     return [...this.chunks.values()];
   }
 
-  // Восстановление правок из кэша вокселей (см. save.js): заполняем edits
-  // разом и перестраиваем всё затронутое. fill < 1 - множитель осадки ям за
-  // время отсутствия игрока (growth.js); применяется до перестройки.
+  // Восстановление правок из кэша вокселей (см. save.js). fill < 1 - множитель
+  // осадки ям за время отсутствия игрока (growth.js).
   load(entries, { fill = 1 } = {}) {
     // сейвы старого формата хранили ключ строкой "ix|iy|iz" — конвертируем на
-    // месте; узлы вне домена упаковки отбрасываем, чтобы битый сейв не породил
-    // фантомный чанк из-за переполнившегося ключа
+    // месте; узлы вне домена упаковки отбрасываем
     if (entries.length && typeof entries[0][0] === 'string') {
       const conv = [];
       for (const [k, v] of entries) {
@@ -674,52 +841,30 @@ export class Digger {
       entries = conv;
     }
     this.edits = new Map(entries);
-    // ямы затянуло, пока игрока не было (growth.js) - до перестройки мешей,
-    // иначе пришлось бы строить их дважды
     if (fill < 1) this.settle(fill, PIT_DEPTH);
     this._remeshEdits();
   }
 
-  // Перестройка всех чанков по накопленным правкам: та же логика «грязных»
-  // колонок, что в edit(), - колонка в coverage-маске вырезает террейн
-  // целиком, поэтому замащиваем весь диапазон высот её поверхности, не
-  // только слой правок.
+  // Разметка колонок по накопленным правкам: раскладка колонки устаревает,
+  // а сами чанки поставит очередь потоковой загрузки.
   _remeshEdits() {
     if (this.edits.size === 0) return;
-
-    // диапазон iy правок по колонкам (cx,cz); сэмпл на границе чанка
-    // принадлежит и нижнему соседу (как cmin() в edit())
     const span = (i) => {
       const c = Math.floor(i / VN);
       return ((i % VN) + VN) % VN === 0 ? [c - 1, c] : [c];
     };
-    const cols = new Map();
     for (const k of this.edits.keys()) {
       const ix = unX(k), iy = unY(k), iz = unZ(k);
       for (const cx of span(ix)) {
         for (const cz of span(iz)) {
           const ck = colKey(cx, cz);
-          const c = cols.get(ck);
-          if (!c) cols.set(ck, { cx, cz, jmin: iy, jmax: iy });
-          else {
-            c.jmin = Math.min(c.jmin, iy);
-            c.jmax = Math.max(c.jmax, iy);
-          }
+          const c = this._editCols.get(ck);
+          if (!c) this._editCols.set(ck, { jmin: iy, jmax: iy });
+          else { c.jmin = Math.min(c.jmin, iy); c.jmax = Math.max(c.jmax, iy); }
+          this._plan.delete(ck);
+          if (!this._colQueued.has(ck)) { this._colQueued.add(ck); this._colQueue.push(ck); }
         }
       }
     }
-
-    let changed = false;
-    for (const { cx, cz, jmin, jmax } of cols.values()) {
-      const { hMin, hMax } = this._columnHeights(cx, cz);
-      const jlo = Math.min(jmin, Math.floor(hMin / VS) - 1);
-      const jhi = Math.max(jmax, Math.ceil(hMax / VS) + 1);
-      const cyLo = Math.floor(jlo / VN) - (((jlo % VN) + VN) % VN === 0 ? 1 : 0);
-      for (let cy = cyLo; cy <= Math.floor(jhi / VN); cy++) {
-        changed = this._remesh(cx, cy, cz) || changed;
-      }
-    }
-    if (changed) this._updateCoverage();
-    if (this.onChanged) this.onChanged();
   }
 }
