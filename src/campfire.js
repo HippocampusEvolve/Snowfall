@@ -78,6 +78,7 @@ export class Campfire {
     scene.add(this.group);
 
     this.burnU = { value: 1 }; // сила горения наружу (звук треска)
+    this.onFuel = null; // подброшенное полено слушает журнал (save.js)
     this.fuel = 0.8; // 0..1 — запас дров
     this.burn = 1; // 0..1 — сглаженная сила горения (BURN_MIN на углях)
     this._flare = 0; // вспышка при подброшенном полене
@@ -296,6 +297,7 @@ export class Campfire {
   addFuel() {
     this.fuel = Math.min(1, this.fuel + 0.34);
     this._flare = 1;
+    if (this.onFuel) this.onFuel();
   }
 
   // тепло для Stats/проталины: угли греют еле-еле, полный костёр — как раньше

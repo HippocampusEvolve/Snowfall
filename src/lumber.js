@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 
+import { regrowScale } from './growth.js';
+
 // Рубка леса (VISION.md: «дерево валится по-настоящему — скрип, треск, ух
 // в сугроб, облако снежной пыли»). Стоящая сосна принимает удары топора:
 // дрожит крона, летит щепа; после последнего удара — скрип, накрен и падение
@@ -25,6 +27,7 @@ const _rot = new THREE.Matrix4();
 const _t = new THREE.Matrix4();
 const _tinv = new THREE.Matrix4();
 const _m = new THREE.Matrix4();
+const _scl = new THREE.Vector3();
 
 export class Lumber {
   // pines — записи trees.js; colliders — общий реестр (валка подменяет столб
@@ -44,6 +47,9 @@ export class Lumber {
     // полная карта перерисовывалась 60 раз в секунду всю рубку — то есть
     // ровно в те секунды, когда игрок занят делом (см. main.js).
     this.felling = false;
+    // Что случилось со стволом: 'chop' | 'fell' | 'split'. Слушает журнал
+    // (save.js) - рубка сама о памяти мира ничего не знает.
+    this.onEvent = null;
     this.setForest(pines);
   }
 
@@ -61,8 +67,12 @@ export class Lumber {
       p.hits = 0; // зарубка на стоящем стволе
       p.chops = 0; // удары разделки лежащего
       p.wood = 0; // сколько поленьев осталось в лежащем стволе
-      // ударов до валки; хлыстик-саженец срубается одним
-      p.need = p.sapling ? 1 : THREE.MathUtils.clamp(Math.round(3 + p.h * 0.4), 5, 9);
+      // Отросшая из пня сосна (growth.js): 1 - взрослая, иначе доля роста.
+      // Живёт в записи, а не в отдельном меше: масштаб уходит прямо в матрицу
+      // инстанса, а от него зависят и запас дров, и длина лежащего ствола.
+      p.grow = 1;
+      p.regrow = null; // 'young' | 'grown' - стадия отрастания
+      p.need = this._needFor(p);
       p.fallYaw = 0;
       p.fallT = -1;
       p.lieOb = null; // коллайдер лежащего ствола (снимается при исчезновении)
@@ -94,8 +104,8 @@ export class Lumber {
       } else {
         if (p.wood <= 0) continue; // голый ствол — древесина вышла
         // ближайшая точка лежащего ствола (отрезок комель → крона)
-        const ex = p.x + Math.sin(p.fallYaw) * p.h * 0.75;
-        const ez = p.z + Math.cos(p.fallYaw) * p.h * 0.75;
+        const ex = p.x + Math.sin(p.fallYaw) * this._len(p) * 0.75;
+        const ez = p.z + Math.cos(p.fallYaw) * this._len(p) * 0.75;
         const abx = ex - p.x;
         const abz = ez - p.z;
         const k = THREE.MathUtils.clamp(
@@ -140,6 +150,7 @@ export class Lumber {
       p.wobT = 0;
       this.animating = true;
       if (p.hits >= p.need) this._startFall(p, playerPos);
+      else if (this.onEvent) this.onEvent('chop', p); // валку запишет _startFall
       return { kind: 'trunk', point, out };
     }
 
@@ -158,6 +169,7 @@ export class Lumber {
       this.groundLogs.drop(lx, this.deps.groundAt(lx, lz), lz, p.fallYaw + Math.PI / 2 + (Math.random() - 0.5) * 0.5);
       // с последним поленом голый ствол рассыпается — лес не захламляется
       if (p.wood <= 0) this._vanish(p);
+      if (this.onEvent) this.onEvent('split', p);
     }
     return { kind: 'log', point, out, split };
   }
@@ -170,8 +182,8 @@ export class Lumber {
     fx /= d;
     fz /= d;
     for (const av of this.deps.avoid) {
-      const ex = p.x + fx * p.h;
-      const ez = p.z + fz * p.h;
+      const ex = p.x + fx * this._len(p);
+      const ez = p.z + fz * this._len(p);
       if ((ex - av.x) ** 2 + (ez - av.z) ** 2 < av.r * av.r) {
         fx = p.x - av.x;
         fz = p.z - av.z;
@@ -187,6 +199,7 @@ export class Lumber {
     p.wobA = 0;
     this.animating = true;
     this.deps.audio.treeCreak(FALL_DUR);
+    if (this.onEvent) this.onEvent('fell', p);
   }
 
   // матрица инстанса: поворот на angle вокруг горизонтальной оси через комель
@@ -195,6 +208,9 @@ export class Lumber {
     const fz = Math.cos(p.fallYaw);
     _axis.set(fz, 0, -fx); // вершина уходит в сторону (fx, fz)
     _rot.makeRotationAxis(_axis, angle);
+    // Масштаб отрастания едет в той же матрице: без него первый же удар по
+    // молодой сосне (дрожь кроны идёт через _write) вернул бы ей взрослый рост.
+    if (p.grow !== 1) _rot.scale(_scl.set(p.grow, p.grow, p.grow));
     _t.makeTranslation(p.x, p.y, p.z);
     _tinv.makeTranslation(-p.x, -p.y, -p.z);
     _m.copy(p.base).premultiply(_tinv).premultiply(_rot).premultiply(_t).multiply(p.pre);
@@ -226,19 +242,36 @@ export class Lumber {
     // облачко трухи и снега вдоль лежавшего ствола
     const fx = Math.sin(p.fallYaw);
     const fz = Math.cos(p.fallYaw);
+    const len = this._len(p);
     for (let i = 0; i < 3; i++) {
       const k = 0.2 + (i / 3) * 0.6;
-      _to.set(p.x + fx * p.h * k, p.y + 0.3, p.z + fz * p.h * k);
+      _to.set(p.x + fx * len * k, p.y + 0.3, p.z + fz * len * k);
       _dir.set(0, 0.9, 0);
       this.deps.dust.spawn(_to, _dir, 10);
     }
+  }
+
+  // Ударов до валки. Хлыстик-подлесок и молодняк, отросший из пня, валятся
+  // с одного: рубить их всерьёз нечего.
+  _needFor(p) {
+    if (p.sapling || p.regrow === 'young') return 1;
+    return THREE.MathUtils.clamp(Math.round(3 + p.h * 0.4), 5, 9);
+  }
+
+  // Длина ствола с учётом роста: у отросшей сосны лежачий отрезок должен
+  // совпадать с тем, что видно, иначе игрок упрётся в невидимую половину.
+  _len(p) {
+    return p.h * p.grow;
   }
 
   // Сколько поленьев выйдет из ствола. Отдельно от _crash, потому что это
   // нужно знать и до удара о землю: сейв застаёт дерево в полёте (валка идёт
   // две секунды с лишним, автосейв не спрашивает), а записать надо уже запас.
   _woodFor(p) {
-    return p.sapling ? 1 : THREE.MathUtils.clamp(Math.round(p.h * 0.8), 4, 10);
+    if (p.sapling || p.regrow === 'young') return 1;
+    const full = THREE.MathUtils.clamp(Math.round(p.h * 0.8), 4, 10);
+    // подросшая из пня отдаёт вдвое меньше взрослой: ствол ещё тонок
+    return p.regrow === 'grown' ? Math.max(1, Math.round(full / 2)) : full;
   }
 
   _crash(p, playerPos, quiet = false) {
@@ -255,12 +288,12 @@ export class Lumber {
     if (idx >= 0) this.colliders.splice(idx, 1);
     const fx = Math.sin(p.fallYaw);
     const fz = Math.cos(p.fallYaw);
-    if (!p.sapling) {
+    if (!p.sapling && p.regrow !== 'young') {
       p.lieOb = {
         x1: p.x,
         z1: p.z,
-        x2: p.x + fx * p.h * 0.75,
-        z2: p.z + fz * p.h * 0.75,
+        x2: p.x + fx * this._len(p) * 0.75,
+        z2: p.z + fz * this._len(p) * 0.75,
         r: 0.32,
         y0: p.y - 0.5,
         y1: p.y + 0.8,
@@ -271,12 +304,13 @@ export class Lumber {
 
     // ух в сугроб: вмятина по всей длине, снежная пыль с кроны, толчок земли;
     // саженец падает тихо и мелко — эффекты по росту
-    const sc = Math.min(1, p.h / 9);
+    const len = this._len(p);
+    const sc = Math.min(1, len / 9);
     const dust = this.deps.dust;
     for (let i = 0; i < 5; i++) {
       const k = 0.15 + (i / 5) * 0.85;
-      const cx = p.x + fx * p.h * k;
-      const cz = p.z + fz * p.h * k;
+      const cx = p.x + fx * len * k;
+      const cz = p.z + fz * len * k;
       this.deps.footprints.stampCircle(cx, cz, (0.9 + k * 0.9) * Math.max(sc, 0.35), 0.75);
       _to.set(cx, p.y + 0.4, cz);
       _dir.set(0, (1.6 + k) * sc, 0);
@@ -284,7 +318,7 @@ export class Lumber {
     }
     const dist = Math.hypot(p.x - playerPos.x, p.z - playerPos.z);
     this.deps.audio.treeFall(dist + (1 - sc) * 8); // мелкое звучит как далёкое — тише
-    this.deps.onCrash(dist * (p.sapling ? 3 : 1));
+    this.deps.onCrash(dist * (p.sapling || p.regrow === 'young' ? 3 : 1));
   }
 
   update(dt, playerPos) {
@@ -344,9 +378,39 @@ export class Lumber {
       } else {
         p.fallYaw = yaw || 0;
         this._crash(p, playerPos, true);
-        p.wood = a;
+        // null - ствол повалили, но разделывать не начинали: запас полный, и
+        // считает его _crash. Журнал про запас и не знает: он помнит только
+        // сами удары, а сколько поленьев в сосне - дело самой сосны.
+        if (a != null) p.wood = a;
         if (p.wood <= 0) this._vanish(p, true); // разделан до конца ещё той ночью
       }
     }
+  }
+
+  /**
+   * Поставить сосну на стадию отрастания (growth.js): пень зарос молодняком,
+   * молодняк подрос, подросшая стала взрослой.
+   *
+   * Новых мешей не заводится - меняется только матрица инстанса, масштаб
+   * вокруг комля. Зовётся один раз на загрузке, до того как лес попадёт в
+   * кадр: расти на глазах у игрока дерево не должно.
+   */
+  regrow(p, stage) {
+    if (stage === 'stump') return; // пень так пень: инстанс уже скрыт _vanish
+    p.regrow = stage === 'adult' ? null : stage;
+    p.grow = regrowScale(stage);
+    p.state = 'up';
+    p.hits = 0;
+    p.chops = 0;
+    p.wood = 0;
+    p.fallT = -1;
+    p.fallYaw = 0;
+    p.wobA = 0;
+    p.need = this._needFor(p);
+    // Коллайдер возвращается только тому, у кого он был: молодняк проходим
+    // насквозь, как подлесок. У лежавшего ствола столб снят в _crash - вот
+    // его и возвращаем.
+    if (p.ob && stage !== 'young' && !this.colliders.includes(p.ob)) this.colliders.push(p.ob);
+    this._write(p, 0);
   }
 }

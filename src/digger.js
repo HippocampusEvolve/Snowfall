@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { edgeTable, triTable } from './mctables.js';
 import { SNOW_CONST, createDiggerMaterial } from './snowmaterial.js';
+import { PIT_DEPTH } from './growth.js';
 
 // Воксельное копание в духе Digger Pro, адаптированное под heightmap-движок.
 //
@@ -24,6 +25,14 @@ const CLAMP = 4.0; // предел накопленной правки на во
 const CORE = 0.6; // доля радиуса с полной силой, дальше — плавный спад
 const EDGE_BLEND = 0.6; // ширина сшивки с мешем террейна у границы чанка, м
 const SKIRT = 0.35; // юбка по периметру выреза: лента вниз от кромки меша, м
+
+// Копок лопатой: половина бокса штыка, сила и кромка осыпания. Вынесены из
+// shovelEdit, потому что теми же числами копок воспроизводит журнал (save.js),
+// и разъехаться этим числам нельзя - иначе восстановленная яма не совпадёт
+// с вырытой.
+const SHOVEL_HALF = { x: 0.34, y: 0.24, z: 0.34 };
+const SHOVEL_STRENGTH = 2.4;
+const SHOVEL_FALLOFF = 0.1;
 
 // раскладка Marching Cubes (Paul Bourke): 8 углов + 12 рёбер
 const CORNER = [
@@ -74,6 +83,11 @@ export class Digger {
     // на колонку — раскоп в десятки колонок стоит копейки)
     this._heightCache = new Map();
     this.onChanged = null; // зовётся после перестройки мешей (main: перерисовать тени)
+    this.onStroke = null; // зовётся на каждый копок лопатой (журнал в save.js)
+    // Тихий режим воспроизведения: правки копятся, чанки не перестраиваются.
+    // Тысяча записанных взмахов иначе перестроила бы одни и те же чанки
+    // тысячу раз - на входе в мир это секунды на пустом месте.
+    this._quiet = false;
 
     this.group = new THREE.Group();
     scene.add(this.group);
@@ -308,6 +322,7 @@ export class Digger {
 
   // перестроить чанки, затронутые правкой в диапазоне воксельных индексов
   _remeshRange(imin, imax, jmin, jmax, kmin, kmax) {
+    if (this._quiet) return; // воспроизведение журнала перестроит всё разом в конце
     // грязные чанки: диапазон индексов + нижний сосед по общей границе
     const cmin = (i) => {
       let c = Math.floor(i / VN);
@@ -575,7 +590,7 @@ export class Digger {
     const c = hit.point.clone().addScaledVector(this._dir, 0.12);
     c.y += sign > 0 ? 0.1 : -0.08; // укладка растёт над точкой, копок — вглубь
     const yaw = Math.atan2(this._dir.x, this._dir.z);
-    this.editBox(c, yaw, { x: 0.34, y: 0.24, z: 0.34 }, sign, 2.4, 0.1);
+    this.shovelStroke(c, yaw, sign);
     // правка у поверхности снимает/засыпает и следы на ней: свежий срез чист,
     // а под глубоким тоннелем поверхностные следы не трогаем
     if (
@@ -587,15 +602,65 @@ export class Digger {
     return hit.point;
   }
 
+  /**
+   * Правка одного копка без камеры: центр бокса штыка, азимут, знак, сила.
+   *
+   * Через неё копает лопата (shovelEdit) и через неё же журнал воспроизводит
+   * записанные взмахи - формула правки одна на оба пути. В тихом режиме
+   * (см. replayBegin) копок ничего не перестраивает и в журнал не попадает:
+   * он оттуда и пришёл.
+   */
+  shovelStroke(center, yaw, sign, strength = SHOVEL_STRENGTH) {
+    this.editBox(center, yaw, SHOVEL_HALF, sign, strength, SHOVEL_FALLOFF);
+    if (this.onStroke && !this._quiet) this.onStroke(center, yaw, sign, strength);
+  }
+
+  /** Начать воспроизведение журнала: правки копятся, меши ждут. */
+  replayBegin() {
+    this._quiet = true;
+  }
+
+  /** Журнал воспроизведён - перестроить всё затронутое разом. */
+  replayEnd() {
+    this._quiet = false;
+    this._remeshEdits();
+  }
+
+  /**
+   * Осадка правок у поверхности (growth.js): всё, что лежит не глубже depth
+   * метров под базовой поверхностью снега, умножается на k. Глубже не
+   * трогаем: тоннели и пещеры остаются как выкопаны, затягивает только ямы.
+   * Мешей не касается - зовётся до перестройки, на загрузке.
+   */
+  settle(k, depth) {
+    if (!(k < 1)) return;
+    const surf = new Map(); // baseHeight по колонке (ix,iz): у ямы их немного
+    for (const [kk, v] of this.edits) {
+      const ix = unX(kk);
+      const iz = unZ(kk);
+      const ck = colKey(ix, iz);
+      let h = surf.get(ck);
+      if (h === undefined) {
+        h = this.baseHeight(ix * VS, iz * VS);
+        surf.set(ck, h);
+      }
+      if (unY(kk) * VS < h - depth) continue;
+      const nv = v * k;
+      // выцветшую в ноль правку выбрасываем совсем: колонка выходит из
+      // coverage-выреза, и заровнявшаяся яма перестаёт стоить чанка
+      if (Math.abs(nv) < 0.01) this.edits.delete(kk);
+      else this.edits.set(kk, nv);
+    }
+  }
+
   get colliders() {
     return [...this.chunks.values()];
   }
 
-  // Восстановление правок из сохранения (см. save.js): заполняем edits разом
-  // и перестраиваем все затронутые чанки — та же логика «грязных» колонок,
-  // что в edit(): колонка в coverage-маске вырезает террейн целиком, поэтому
-  // замащиваем весь диапазон высот её поверхности, не только слой правок.
-  load(entries) {
+  // Восстановление правок из кэша вокселей (см. save.js): заполняем edits
+  // разом и перестраиваем всё затронутое. fill < 1 - множитель осадки ям за
+  // время отсутствия игрока (growth.js); применяется до перестройки.
+  load(entries, { fill = 1 } = {}) {
     // сейвы старого формата хранили ключ строкой "ix|iy|iz" — конвертируем на
     // месте; узлы вне домена упаковки отбрасываем, чтобы битый сейв не породил
     // фантомный чанк из-за переполнившегося ключа
@@ -609,6 +674,17 @@ export class Digger {
       entries = conv;
     }
     this.edits = new Map(entries);
+    // ямы затянуло, пока игрока не было (growth.js) - до перестройки мешей,
+    // иначе пришлось бы строить их дважды
+    if (fill < 1) this.settle(fill, PIT_DEPTH);
+    this._remeshEdits();
+  }
+
+  // Перестройка всех чанков по накопленным правкам: та же логика «грязных»
+  // колонок, что в edit(), - колонка в coverage-маске вырезает террейн
+  // целиком, поэтому замащиваем весь диапазон высот её поверхности, не
+  // только слой правок.
+  _remeshEdits() {
     if (this.edits.size === 0) return;
 
     // диапазон iy правок по колонкам (cx,cz); сэмпл на границе чанка
