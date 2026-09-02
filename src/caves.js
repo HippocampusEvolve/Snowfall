@@ -186,7 +186,8 @@ export function createCaves({ seed = 1, avoid = [] } = {}) {
     return d;
   }
 
-  return { sdf, exits, shaftDist };
+  // seed и avoid отдаём наружу: по ним воркер заводит у себя ТО ЖЕ поле
+  return { sdf, exits, shaftDist, seed, avoid };
 }
 
 /**

@@ -7,6 +7,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Terrain } from './terrain.js';
 import { SnowPatch } from './snowpatch.js';
 import { Digger } from './digger.js';
+import { createCaves } from './caves.js';
+import { WORLD_SEED } from './seed.js';
 import { Footprints } from './footprints.js';
 import { Sky } from './sky.js';
 import { Snowfall } from './snowfall.js';
@@ -156,8 +158,22 @@ initSnowCap(terrain.textures);
 const snowPatch = new SnowPatch(footprints, terrain);
 scene.add(snowPatch.mesh);
 
+// Поле природных пещер от семени мира. Цилиндры avoid - места, под которыми
+// грунт обязан остаться целым: изба, костёр и стартовая площадка (провалиться
+// под избу в первую же минуту - не то знакомство с миром). Координаты избы и
+// костра объявлены ниже по файлу, поэтому здесь они повторены числами: это
+// единственное место, где такое повторение есть, и его стережёт тест avoid.
+const caves = createCaves({
+  seed: WORLD_SEED,
+  avoid: [
+    { x: -4.5, z: -13, r: 9 }, // изба (CABIN)
+    { x: 2.5, z: -9, r: 6 }, // костёр (FIRE)
+    { x: 0, z: 0, r: 14 }, // стартовая площадка
+  ],
+});
+
 // воксельное копание (Digger): реальный 3D-объём — ямы, тоннели, пещеры
-const digger = new Digger(scene, terrain, snowPatch, footprints);
+const digger = new Digger(scene, terrain, snowPatch, footprints, caves);
 digger.onChanged = () => { shadowDirty = true; }; // перестройка ямы → тень заново
 
 const sky = new Sky(moonDir);
@@ -362,6 +378,8 @@ const freezes = []; // пойманные долгие кадры (ловец ф
 if (debug)
   window.__snow = {
     scene, camera, renderer, terrain, snowPatch, digger, player, input,
+    // поле пещер: __snow.caves.exits - выходы наверх, к ним удобно телепортироваться
+    caves,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
     axe, lumber, woodpile, groundLogs,
     // журнал мира: `__snow.journal.stats()` — сколько записей, байт, как въехал
@@ -895,7 +913,8 @@ function onAxeImpact() {
 // Выкопанная в метель нора глушит ветер УШАМИ — так игрок узнаёт, что построил
 // укрытие, без единой надписи.
 function sampleCave() {
-  if (digger.edits.size === 0) return 0;
+  // Раннего выхода по «правок ещё нет» здесь больше нет: пещеры в мире есть
+  // с рождения, и природная нора обязана глушить ветер так же, как выкопанная.
   const p = camera.position;
   const roof =
     digger.densityAt(p.x, p.y + 1.1, p.z) > 0 || digger.densityAt(p.x, p.y + 2.0, p.z) > 0;
@@ -992,6 +1011,10 @@ function tick(frameAt) {
     caveTarget = sampleCave();
   }
   caveK += (caveTarget - caveK) * Math.min(1, dt * 2.5);
+
+  // потоковая загрузка воксельных чанков: колонки вокруг игрока разбираются,
+  // очередь уезжает в воркеры, готовое ставится в сцену (не больше двух за кадр)
+  digger.update(player.pos);
 
   snowPatch.update(camera.position);
   snow.update(dt, t, camera.position, audio.windLevel, blizzard, caveK);
