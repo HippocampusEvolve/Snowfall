@@ -344,6 +344,12 @@ if (player.debug)
     scene, camera, renderer, terrain, snowPatch, digger, player,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
     axe, lumber, woodpile, groundLogs,
+    // журнал мира: `__snow.journal.stats()` — сколько записей, байт, как въехал
+    journal: saver.journal,
+    // Сдвинуть мир в прошлое и перезагрузиться: так живой мир (growth.js)
+    // проверяется без ожидания суток. Порядок ручной проверки описан у
+    // SaveGame.timeTravel.
+    timeTravel: (hours) => saver.timeTravel(hours),
     // Пробуждение создаётся ниже по файлу, вместе с заставкой, — геттером,
     // иначе обращение здесь пришлось бы на временную мёртвую зону `const` и
     // роняло бы весь отладочный хендл, а с ним и мир.
@@ -502,6 +508,7 @@ function doHandAction() {
       player.carrying = false;
       carriedLog.visible = false;
       woodpile.add();
+      saver.notePile(woodpile.count); // штабель своего события не подаёт
       audio.woodStack();
       shadowDirty = true;
     } else if (player.carrying) {
@@ -529,7 +536,9 @@ function doHandAction() {
       if (handTarget.kind === 'log') {
         groundLogs.take(handTarget.ref);
         shadowDirty = true;
-      } else if (!woodpile.take()) {
+      } else if (woodpile.take()) {
+        saver.notePile(woodpile.count); // штабель своего события не подаёт
+      } else {
         return; // штабель пуст: рука потянулась — а брать нечего
       }
       player.carrying = true;
