@@ -84,11 +84,30 @@ export function assetStamps(dir = 'public') {
 // ---------------------------------------------------------------------------
 export function serviceWorker() {
   let base = '/';
+  // Штамп boot.js в его адресе. Без него первый заход после выкладки получал
+  // СМЕСЬ версий: старый worker ещё у руля, страницу он берёт с сервера
+  // (новую), а boot.js - из своего кэша оболочки (старый), и мир зовёт
+  // сторож, которого в старом файле нет. Новый адрес в старом кэше не
+  // найдётся, и worker честно сходит за ним в сеть.
+  const bootHash = createHash('sha1')
+    .update(readFileSync(new URL('./public/boot.js', import.meta.url)))
+    .digest('hex')
+    .slice(0, 8);
+  const htmlHash = createHash('sha1')
+    .update(readFileSync(new URL('./index.html', import.meta.url)))
+    .digest('hex')
+    .slice(0, 8);
   return {
     name: 'service-worker',
     apply: 'build',
     configResolved(config) {
       base = config.base;
+    },
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        return html.replace(`${base}boot.js"`, `${base}boot.js?v=${bootHash}"`);
+      },
     },
     generateBundle(_options, bundle) {
       const scripts = Object.keys(bundle)
@@ -96,8 +115,13 @@ export function serviceWorker() {
         .sort();
       // Оболочка: сама страница, отдельный boot и бандлы. Модели и текстуры
       // сюда НЕ входят - их кэширует worker по факту запроса (sw-template.js).
-      const shell = [base, `${base}boot.js`, ...scripts.map((f) => base + f)];
-      const version = createHash('sha1').update(scripts.join('|')).digest('hex').slice(0, 8);
+      const shell = [base, `${base}boot.js?v=${bootHash}`, ...scripts.map((f) => base + f)];
+      // Версия: бандлы, boot и сама страница. Правка одного html раньше версию
+      // не меняла, и старый worker оставался у руля со старым кэшем оболочки.
+      const version = createHash('sha1')
+        .update([...scripts, bootHash, htmlHash].join('|'))
+        .digest('hex')
+        .slice(0, 8);
       const source = readFileSync(new URL('./sw-template.js', import.meta.url), 'utf8')
         .replace(/__SCOPE__/g, base)
         .replace(/__VERSION__/g, version)
