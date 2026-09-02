@@ -4,6 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SNOWFALL</title>
+    <!-- boot.js стоит первым модулем в head намеренно: модульные скрипты
+         исполняются в порядке документа, а Vite поднимает бандл мира в head.
+         Когда boot.js лежал в конце body, мир звал __FTE_BOOT__.ready() раньше,
+         чем сторож существовал, и через 30 с живой мир объявлялся не
+         загрузившимся. -->
+    <script type="module" src="/boot.js"></script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>❄️</text></svg>" />
   <!-- ПРЕЛОАДА ЗДЕСЬ БОЛЬШЕ НЕТ, и это результат замера, а не забывчивость.
        Семь link rel=preload на текстуры снега и обе модели (2.2 МБ) стояли тут
@@ -291,7 +297,6 @@
     <button id="retry" class="btn" type="button">ещё раз</button>
   </div>
 
-  <script type="module" src="/boot.js"></script>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
