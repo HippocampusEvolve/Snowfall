@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { VIEW_Z } from './viewmodel.js';
-import { HeldTool } from './tool.js';
+import { HeldTool, VIEW_Z } from 'world-core/core';
 import { Burst } from './burst.js';
 
 // Топор — инструмент рубки (VISION.md, «память рук»: топор → рубка → кучи).

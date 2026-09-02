@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { VIEW_Z } from './viewmodel.js';
-import { HeldTool } from './tool.js';
+import { HeldTool, VIEW_Z } from 'world-core/core';
 import { Burst } from './burst.js';
 import { createGLTFLoader } from './gltfload.js';
 import { asset } from './asset.js';

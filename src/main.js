@@ -16,7 +16,6 @@ import { createRidges } from './ridges.js';
 import { Aurora } from './aurora.js';
 import { Breath } from './breath.js';
 import { Campfire } from './campfire.js';
-import { Player } from './player.js';
 import { GameAudio } from './audio.js';
 import { Stats } from './stats.js';
 import { Critters } from './critters.js';
@@ -25,11 +24,11 @@ import { initSnowCap } from './snowcap.js';
 import { Shovel, loadShovelModel } from './shovel.js';
 import { Axe } from './axe.js';
 import { Lumber } from './lumber.js';
-import { ViewModel, VIEW_Z } from './viewmodel.js';
 import { SaveGame } from './save.js';
-import { SmoothLook } from './look.js';
 import { createAwakening } from './awaken.js';
-import { TouchControls } from './touch.js';
+import { createTouch, touchForced, touchSupported } from './touch.js';
+import { createSupport } from './support.js';
+import { Body, Input, SmoothLook, ViewModel, VIEW_Z } from 'world-core/core';
 import { createShell } from './shell.js';
 import { keepOffline } from './offline.js';
 
@@ -242,28 +241,49 @@ const groundLogs = new GroundLogs(scene);
 // ---------- аудио, игрок, дыхание, статы ----------
 const audio = new GameAudio();
 
+// debug-режим (?debug): без экрана входа и без pointer lock, поворот стрелками
+const debug = new URLSearchParams(location.search).has('debug');
+
+// Контроллер от первого лица — общий для миров (world-core/core): взгляд с
+// телом, слой ввода и само тело. Мир отдаёт ему только свою форму (support.js)
+// и числа, которыми эта походка отличается от чужой.
+//
 // взгляд с телом: инерция мыши, крены в вираж/стрейф, клевок приземления,
-// дыхание (look.js); ?rawlook — сырой 1:1 без эффектов
+// дыхание; ?rawlook — сырой 1:1 без эффектов
 const look = new SmoothLook(camera, renderer.domElement);
 
-const player = new Player(
-  camera,
+// ввод: клавиши, мышь и палец сводятся в одно намерение. F и кнопки мыши
+// уходят колбэками — что ими делать, знает только этот мир
+const input = new Input({
   look,
-  terrain,
-  (fx, fz, dir, side, running, surface) => {
+  target: renderer.domElement,
+  onAction: () => doHandAction(),
+  onTool: (slot, down) => setToolHeld(slot, down),
+  arrowTurn: debug,
+});
+input.free = debug; // без захвата курсора тело всё равно должно идти
+
+const player = new Body({
+  camera,
+  input,
+  support: createSupport({
+    terrain,
+    digger,
+    colliders,
+    getFloor: (fx, fz) => cabin.floorHeightAt(fx, fz),
+  }),
+  spawn: new THREE.Vector3(0, terrain.getHeight(0, 0), 0),
+  onStep: (fx, fz, dir, side, running, surface) => {
     if (surface === 'snow') footprints.stamp(fx, fz, dir, side); // на досках следов нет
     audio.footstep(running, surface);
   },
-  colliders,
-  digger,
-  (fx, fz) => cabin.floorHeightAt(fx, fz),
-  (fx, fz, surface, impact) => {
+  onLand: (fx, fz, surface, impact) => {
     if (surface === 'snow') footprints.stampCircle(fx, fz, 0.45, 0.85); // вмятина от приземления
     audio.land(surface, Math.abs(impact));
     view.land(impact); // руки проседают вместе с телом
     look.land(impact); // и взгляд клюёт вниз
-  }
-);
+  },
+});
 
 const breath = new Breath(scene, camera, (exertion) => audio.breath(exertion));
 const stats = new Stats();
@@ -272,8 +292,8 @@ const stats = new Stats();
 scene.add(camera);
 
 // Всё, что в руках, живёт в слое viewmodel: своя камера с узким FOV и свой
-// depth — предмет не растягивается у края кадра и не протыкает стены (viewmodel.js)
-const view = new ViewModel(camera, moonDir);
+// depth — предмет не растягивается у края кадра и не протыкает стены (world-core/core)
+const view = new ViewModel(camera, { keyDir: moonDir });
 const carriedLog = createCarriedLog();
 carriedLog.position.z *= VIEW_Z; // компенсация узкого FOV — кадр остаётся прежним
 view.add(carriedLog);
@@ -327,7 +347,7 @@ const returning = await saver.load();
 saver.start();
 // Вернувшийся мог выйти из мира, стоя на полу избы, а изба едет волной
 // отделки. До её приезда пола под ним нет - держим его на месте
-// (см. «опора, которой ещё нет» в player.js).
+// (см. «опора, которой ещё нет» в теле ядра, world-core/core).
 if (returning) {
   player.holdY = player.pos.y;
   // Камера переезжает к телу СРАЗУ, а не на последнем кадре пробуждения:
@@ -339,9 +359,9 @@ carriedLog.visible = player.carrying; // недонесённое полено �
 // debug (?debug): доступ к системам из консоли — удобно щупать копание,
 // подгонять зверей (__snow.critters.timer = 0) и жечь дрова (__snow.campfire.fuel = 0)
 const freezes = []; // пойманные долгие кадры (ловец фризов в тике, только ?debug)
-if (player.debug)
+if (debug)
   window.__snow = {
-    scene, camera, renderer, terrain, snowPatch, digger, player,
+    scene, camera, renderer, terrain, snowPatch, digger, player, input,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
     axe, lumber, woodpile, groundLogs,
     // журнал мира: `__snow.journal.stats()` — сколько записей, байт, как въехал
@@ -396,13 +416,13 @@ function enterWorld(ev) {
   // никогда — и мышь не могла повернуть взгляд вовсе. Спрашиваем само
   // нажатие: палец это был или мышь. Синтетический клик (Enter с клавиатуры)
   // pointerType не несёт — тогда решает тип указателя устройства.
-  const byFinger = TouchControls.forced() || (ev && ev.pointerType
+  const byFinger = touchForced() || (ev && ev.pointerType
     ? ev.pointerType !== 'mouse'
     : matchMedia('(pointer: coarse)').matches);
   if (touch && byFinger) {
     touch.activate(); // на таче pointer lock нет — просто входим
     shell.close();
-  } else player.controls.lock();
+  } else look.lock();
 }
 
 // Захват курсора могут и не дать, и это не сбой, а обычное дело: браузер
@@ -422,7 +442,7 @@ document.addEventListener('pointerlockerror', () => {
 addEventListener('pointerdown', () => {
   if (!awaitingLock || player.locked || shell.isOpen()) return;
   awaitingLock = false;
-  player.controls.lock();
+  look.lock();
 });
 
 // сброс памяти мира: второе нажатие в течение 3.5 с — защита от случайного клика
@@ -445,11 +465,11 @@ function armReset() {
 
 const shell = createShell({ onEnter: enterWorld, onReset: armReset });
 
-player.controls.addEventListener('lock', () => {
+look.addEventListener('lock', () => {
   shell.close();
   audio.resume();
 });
-player.controls.addEventListener('unlock', () => {
+look.addEventListener('unlock', () => {
   // Замёрзшего экран паузы не встречает: у смерти свой экран со своей кнопкой.
   if (!stats.dead) shell.open();
 });
@@ -460,27 +480,15 @@ player.controls.addEventListener('unlock', () => {
 let digHeld = false;
 let buildHeld = false;
 let chopHeld = false; // ЛКМ с топором — цепочка ударов, как копание лопатой
-renderer.domElement.addEventListener('mousedown', (e) => {
-  if (!player.locked) return;
-  if (e.button === 0) {
-    if (shovel.held) digHeld = true;
-    else if (axe.held) chopHeld = true;
-  } else if (e.button === 2) {
-    if (shovel.held) buildHeld = true;
-  }
-});
-addEventListener('mouseup', (e) => {
-  if (e.button === 0) {
-    digHeld = false;
-    chopHeld = false;
-  } else if (e.button === 2) buildHeld = false;
-});
-addEventListener('blur', () => {
-  digHeld = false;
-  buildHeld = false;
-  chopHeld = false;
-});
-renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+// Слот кнопки в замах переводит мир, а не ввод: ядру всё равно, что за
+// инструмент в руках. Один и тот же обработчик обслуживает мышь и палец —
+// кнопка на экране это те же ЛКМ и ПКМ.
+function setToolHeld(slot, down) {
+  if (slot === 1) {
+    digHeld = down && shovel.held;
+    chopHeld = down && !shovel.held && axe.held;
+  } else buildHeld = down && shovel.held;
+}
 // поверхность под точкой: срез диггера → рельеф; пол/крыльцо домика — если выше
 // (и брошенное полено, и воткнутая лопата встают на доски, а не тонут под них)
 function groundAt(x, z) {
@@ -564,25 +572,9 @@ function doHandAction() {
     }
 }
 
-addEventListener('keydown', (e) => {
-  if (!player.locked) return;
-  if (e.code === 'KeyF') doHandAction();
-});
-
 // тач-управление (телефон/планшет): создаётся только на тач-устройствах —
 // на десктопе ни кнопок, ни слушателей. Палец слева — идти, справа — смотреть.
-const touch = TouchControls.supported() ? new TouchControls(player, look) : null;
-if (touch) {
-  touch.onAction = doHandAction;
-  // держать кнопку инструмента = держать ЛКМ/ПКМ: замахи цепочкой
-  touch.onTool = (slot, down) => {
-    if (slot === 1) {
-      if (shovel.held) digHeld = down;
-      else if (axe.held) chopHeld = down;
-      else { digHeld = false; chopHeld = false; }
-    } else buildHeld = shovel.held && down;
-  };
-}
+const touch = touchSupported() ? createTouch(input, look) : null;
 
 // Прогрев НАСТОЯЩИМ кадром: программы шейдеров, VBO и заливка текстур в GPU.
 // renderer.compile() тут не годится: он собирает программы под канвас (srgb),
@@ -714,7 +706,7 @@ function warmUp() {
     view.render(renderer);
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
     mark('мир собран');
-    if (player.debug) {
+    if (debug) {
       // ?debug идёт мимо экрана входа, а с ним — мимо появления мира: без
       // этой строки мир остался бы тёмным и неуправляемым.
       window.__FTE_BOOT__?.ready();
@@ -934,7 +926,7 @@ function tick(frameAt) {
   lastFrameAt = frameAt;
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
-  const dbg = player.debug;
+  const dbg = debug;
   if (dbg) _fm[0] = performance.now();
 
   sky.update(t); // луна ползёт по полярному кругу — ДО блока теней: снап в свежем базисе

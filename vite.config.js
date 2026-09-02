@@ -217,6 +217,13 @@ export function precompress() {
 // (пути ассетов в коде идут через src/asset.js -> import.meta.env.BASE_URL).
 export default defineConfig(({ command, isPreview }) => ({
   base: command === 'build' || isPreview ? '/snowfall/' : '/',
+  // Ядро миров (world-core) держит свой three в devDependencies, и он новее
+  // нашего. Без dedupe сборщик взял бы обе копии сразу: у three всё построено
+  // на instanceof и на общих реестрах, поэтому две копии — это материалы,
+  // группы и геометрии, которые перестают узнавать друг друга, и вторые
+  // шестьсот килобайт в бандле заодно. Ядро объявляет three как
+  // peerDependency: копия должна быть ровно одна, наша.
+  resolve: { dedupe: ['three'] },
   build: {
     target: 'es2022',
     rollupOptions: {
