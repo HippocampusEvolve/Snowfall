@@ -107,6 +107,30 @@ export class SaveGame {
     this._saving = false;
     this._savingPromise = Promise.resolve();
     this._saveGeneration = 0; // более новый pagehide-сейв отменяет старый async snapshot
+    // Прочитанная, но ещё не применённая рубка: лес приезжает по сети позже,
+    // чем читается сейв (см. forestReady).
+    this._fells = null;
+  }
+
+  /**
+   * Лес приехал — применить придержанную рубку.
+   *
+   * Зовётся волной отделки в main.js ДО того, как лес попадёт в кадр: пни и
+   * лежащие стволы оказываются на местах сразу, ничего не «падает на глазах».
+   *
+   * Держать запись обязательно, и не ради красоты: сейв читается раньше леса,
+   * а автосейв работает с первой секунды. Без этого первый же автосейв записал
+   * бы поверх пустую рубку — и ночь, в которую человек валил сосны, исчезла бы
+   * молча. Поэтому же `_collect` возвращает придержанное как есть.
+   */
+  forestReady() {
+    if (!this._fells || !this.lumber) return;
+    try {
+      this.lumber.restore(this._fells, this.player.pos);
+    } catch (e) {
+      console.warn('рубка не восстановлена:', e);
+    }
+    this._fells = null;
   }
 
   _open() {
@@ -212,10 +236,9 @@ export class SaveGame {
       this.woodpile.count = Math.min(d.pile, this.woodpile.capacity);
       this.woodpile._refresh();
     }
-    // сваленные деревья лежат, зарубки на стоящих — на месте
-    if (this.lumber && Array.isArray(d.fells) && d.forestV === FOREST_V) {
-      this.lumber.restore(d.fells, this.player.pos);
-    }
+    // Сваленные деревья лежат, зарубки на стоящих — на месте. Применяет их не
+    // этот метод, а forestReady: лес приезжает по сети позже, чем читается сейв.
+    if (Array.isArray(d.fells) && d.forestV === FOREST_V) this._fells = d.fells;
     // брошенные поленья лежат, где их бросили; недонесённое — снова в руках
     if (this.logs && Array.isArray(d.logs)) this.logs.restore(d.logs);
     if (d.carry) this.player.carrying = true;
@@ -245,7 +268,12 @@ export class SaveGame {
     };
     if (this.logs) data.logs = this.logs.serialize();
     if (this.woodpile) data.pile = this.woodpile.count;
-    if (this.lumber) {
+    // Рубка: пока лес не приехал, возвращаем в запись ровно то, что из неё
+    // прочитали, — иначе автосейв затрёт её пустотой (см. forestReady).
+    if (this._fells) {
+      data.fells = this._fells;
+      data.forestV = FOREST_V;
+    } else if (this.lumber) {
       data.fells = this.lumber.serialize();
       data.forestV = FOREST_V;
     }

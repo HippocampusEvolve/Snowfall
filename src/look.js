@@ -92,6 +92,25 @@ export class SmoothLook extends THREE.EventDispatcher {
   }
 
   // приземление: клевок взгляда вниз, сила — по скорости касания
+  /**
+   * Поставить взгляд без доезда.
+   *
+   * Нужен там, где камеру ведёт не игрок: спавн, телепорт и появление мира
+   * (`awaken.js`). Присвоить `yaw`/`pitch` снаружи недостаточно — кватернион
+   * камеры пересобирается в `update`, а во время появления он не зовётся
+   * вовсе, и взгляд остался бы стоять. Ровно на это и наткнулась первая
+   * проверка появления: пелена отходила, а голова не поднималась.
+   *
+   * Ставится и текущее, и целевое: иначе сглаживание потянет камеру само и
+   * подерётся за неё с тем, кто её ведёт.
+   */
+  setYaw(yaw, pitch = 0) {
+    this.yaw = this.tYaw = yaw;
+    this.pitch = this.tPitch = pitch;
+    this._euler.set(pitch, yaw, 0, 'YXZ');
+    this.camera.quaternion.setFromEuler(this._euler);
+  }
+
   land(impact) {
     if (this.cfg.raw) return;
     this._kick.v -= clamp(Math.abs(impact) * 0.12, 0.15, 0.9);

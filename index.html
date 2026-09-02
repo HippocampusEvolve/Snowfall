@@ -47,57 +47,28 @@
     }
     canvas { display: block; }
 
-    /* Заставка загрузки: мир открывается уже отделанным и с прогретыми
-       шейдерами (см. warmUp в main.js). */
-    #loading {
-      position: fixed; inset: 0; z-index: 20;
-      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.6rem;
-      background: var(--bg);
-      font-size: 0.8rem; letter-spacing: 0.4em; text-indent: 0.4em; color: var(--dim);
-      transition: opacity 0.6s ease;
-    }
-    #loading.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
-
-    /* Загрузка не состоялась: полоса врёт о продолжении, и её не остаётся.
-       Разрядка тоже уходит - она хороша для двух слов, а не для просьбы
-       обновить страницу. */
-    #loading.failed #loadBar { display: none; }
-    #loading.failed span {
-      letter-spacing: 0.08em; text-indent: 0; text-align: center;
-      max-width: 22rem; line-height: 1.7;
-    }
-    #loading .boot-retry { margin-top: 0.4rem; }
-
-    /* Пока модуль игры не разобран, о долях ничего не известно — полоса просто
-       «дышит» на CSS-анимации, без единой строчки JS. Как только main.js
-       начинает считать ассеты, он вешает .known и ведёт ширину сам. */
-    #loadBar {
-      position: relative; overflow: hidden;
-      width: min(300px, 48vw); height: 2px;
-      background: rgba(140, 165, 205, 0.14);
-    }
-    #loadFill {
-      position: absolute; top: 0; bottom: 0; left: -34%; width: 34%;
-      background: linear-gradient(90deg, transparent, var(--accent), transparent);
-      animation: drift 1.7s ease-in-out infinite;
-    }
-    @keyframes drift { to { left: 100%; } }
-    #loadBar.known #loadFill {
-      animation: none; left: 0; width: 0;
-      background: linear-gradient(90deg, var(--accent), var(--ink));
-      transition: width 0.35s ease;
-    }
-
-    /* Вход в мир, он же пауза: один экран на оба случая — уходит по кнопке,
-       возвращается, когда курсор отпущен (Esc, потеря фокуса). */
+    /* Экран входа он же заставка он же пауза: ОДИН экран на всё.
+       Раньше их было два - заставка с полосой поверх и меню под ней, - и
+       переключение между ними читалось как щелчок. Хуже того, меню открывалось
+       только по первому кадру мира, то есть ждало сборки, а нажатие до неё
+       пропадало впустую.
+       Теперь экран входа показывается сразу, ещё до того как мир начал
+       собираться. Полоса живёт под кнопкой и тает, когда мир готов; нажать
+       можно в любой момент - нажатие подхватит boot.js и передаст миру, как
+       только тот встанет на ноги. */
     #gate {
       position: fixed; inset: 0; z-index: 10;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       background: rgba(4, 8, 14, 0.62);
       backdrop-filter: blur(6px);
       transition: opacity 0.5s ease;
+      /* Первое появление - мягкое: витрина гаснет полсекунды, и титул мира
+         проступает ей навстречу, а не выпрыгивает готовым. */
+      animation: gate-in 0.7s ease both;
     }
+    @keyframes gate-in { from { opacity: 0; } to { opacity: 1; } }
     #gate.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
     /* Кегль ведёт себя от ширины экрана осторожно: имя мира — одно длинное
        слово с большим трекингом, и на 360 px оно упиралось в края. */
     #gate h1 {
@@ -123,6 +94,57 @@
     .btn:focus-visible, .quiet:focus-visible, #exit:focus-visible, .tbtn:focus-visible {
       outline: 2px solid var(--accent); outline-offset: 4px;
     }
+
+    /* Нажали раньше, чем мир собрался: кнопка не отказывает, а принимает и
+       ждёт. Мир войдёт сам, как только встанет (boot.js держит намерение). */
+    .btn.waiting {
+      color: var(--dim); border-color: rgba(140, 165, 205, 0.25);
+      cursor: default; pointer-events: none;
+    }
+    .btn.waiting:hover { background: transparent; }
+
+    /* --- полоса под кнопкой ---
+       Пока мир собирается, она под кнопкой; когда собрался - тает. Прежде
+       полоса жила на отдельном экране поверх меню, и переход между экранами
+       и был тем самым рывком. */
+    #boot {
+      display: flex; flex-direction: column; align-items: center; gap: 1rem;
+      margin-top: 1.8rem; height: 2px;
+      transition: opacity 0.7s ease;
+    }
+    body.ready #boot { opacity: 0; }
+
+    /* Пока модуль игры не разобран, о долях ничего не известно - полоса просто
+       «дышит» на CSS-анимации, без единой строчки JS. Как только main.js
+       начинает считать ресурсы, он вешает .known и ведёт ширину сам. */
+    #loadBar {
+      position: relative; overflow: hidden;
+      width: min(300px, 48vw); height: 2px;
+      background: rgba(140, 165, 205, 0.14);
+    }
+    #loadFill {
+      position: absolute; top: 0; bottom: 0; left: -34%; width: 34%;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      animation: drift 1.7s ease-in-out infinite;
+    }
+    @keyframes drift { to { left: 100%; } }
+    #loadBar.known #loadFill {
+      animation: none; left: 0; width: 0;
+      background: linear-gradient(90deg, var(--accent), var(--ink));
+      transition: width 0.35s ease;
+    }
+
+    /* Мир не собрался: полоса врёт о продолжении, и её не остаётся. Остаётся
+       строка и кнопка «повторить» (обе ставит boot.js). */
+    #bootMsg {
+      max-width: 22rem; text-align: center; line-height: 1.7;
+      font-size: 0.8rem; letter-spacing: 0.08em; color: var(--dim);
+    }
+    body.boot-failed #loadBar { display: none; }
+    body.boot-failed #boot { height: auto; }
+    /* Пока мир не собрался, входить некуда: кнопка входа уступает место
+       кнопке «повторить». */
+    body.boot-failed #enter { display: none; }
 
     /* Тихие ссылки под кнопкой: выход из мира и всё, что мир добавит от себя. */
     .quiet {
@@ -233,27 +255,28 @@
     }
     @media (prefers-reduced-motion: reduce) {
       #loadFill { animation: none; left: 0; }
-      #loading, #gate, #death, #frost, #prompt, .tbtn, #exit { transition: none; }
-      #gate { backdrop-filter: none; }
+      #gate, #boot, #death, #frost, #prompt, .tbtn, #exit { transition: none; }
+      #gate { animation: none; backdrop-filter: none; }
     }
   </style>
 </head>
 <body>
   <div id="vignette"></div>
 
-  <div id="loading" role="status" aria-live="polite" aria-busy="true">
-    <span>СНЕГ ИДЁТ…</span>
-    <div id="loadBar" role="progressbar" aria-label="Загрузка ресурсов"><div id="loadFill"></div></div>
-  </div>
-
   <a id="exit" href="https://find-the-end.fun/" aria-label="Выйти на витрину">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
   </a>
 
-  <div id="gate" class="hidden" inert aria-hidden="true">
+  <!-- Экран входа виден СРАЗУ, без ожидания мира: ни class="hidden", ни inert.
+       Мир собирается за ним и проступает сквозь него по мере готовности. -->
+  <div id="gate">
     <h1>SNOWFALL</h1>
     <p class="mood">Минус четырнадцать. Свет в окне горит не для тебя.</p>
     <button id="enter" class="btn" type="button" data-resume="продолжить">войти в ночь</button>
+    <div id="boot" role="status" aria-live="polite">
+      <div id="loadBar" role="progressbar" aria-label="Мир собирается"><div id="loadFill"></div></div>
+      <p id="bootMsg" hidden></p>
+    </div>
     <a class="quiet" href="https://find-the-end.fun/">выйти из мира</a>
     <button id="resetWorld" class="quiet" type="button">начать ночь заново</button>
   </div>

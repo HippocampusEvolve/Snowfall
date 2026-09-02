@@ -159,8 +159,9 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   // ---- интерьер: примитивы в локали gltf.scene, база — на реальном полу ----
   const interior = buildInterior(localFloorY);
   root.add(interior.group);
-  // реальные ассеты мебели (Poly Haven CC0) поверх примитивов, где есть модель
-  await loadInteriorProps(interior.group, localFloorY, interior.colliders);
+  // Сколько коллайдеров у процедурной мебели: всё, что появится в этом списке
+  // сверх этого числа, принесли поздние модели (см. `dressed` ниже).
+  const ownColliders = interior.colliders.length;
   group.updateMatrixWorld(true);
 
   // ---- коллизия: стены-отрезки с дверным проёмом + столбы крыльца ----
@@ -210,6 +211,26 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   // полотно двери — динамический отрезок, следует за углом открытия
   const doorSeg = { x1: 0, z1: 0, x2: 0, z2: 0, r: 0.1 };
   obstacles.push(doorSeg);
+
+  // ---- поздняя отделка: скачанные модели мебели ----
+  // Чугунок и стопка книг стоят ВНУТРИ дома: снаружи их не видно вовсе, а
+  // весят они четверть мегабайта. Держать на них вход в мир незачем — они
+  // уезжают в последнюю волну отделки, уже за спиной у игрока (см. «волны
+  // отделки» в main.js). Пока не приехали, на их местах стоят процедурные
+  // двойники, ради которых интерьер и собран примитивами.
+  //
+  // Коллайдеры этих моделей отдаются наружу списком, а не дописываются в
+  // `obstacles`: тот к моменту их приезда давно скопирован в общий реестр мира,
+  // и добавленное в него уже никем не читается.
+  const dressed = loadInteriorProps(interior.group, localFloorY, interior.colliders)
+    .then(() => {
+      group.updateMatrixWorld(true);
+      return interior.colliders.slice(ownColliders).map((c) => {
+        const p = l2w(c.x, FLOOR_Y, c.z);
+        return { x: p.x, z: p.z, r: c.r };
+      });
+    })
+    .catch(() => []); // нет файлов — процедурные двойники остаются на месте
 
   // ---- пол/крыльцо/ступени: реальная поверхность из геометрии ----
   // В пределах футпринта пускаем луч вниз с уровня чуть выше пола (ниже
@@ -326,7 +347,7 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   }
 
   return {
-    group, obstacles, update, toggleDoor,
+    group, obstacles, update, toggleDoor, dressed,
     get doorOpen() { return doorOpen; },
     doorCenter, floorHeightAt, isInside, snowMask, stovePos,
     // повёрнутый прямоугольник габарита в мировых координатах

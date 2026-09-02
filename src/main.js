@@ -28,8 +28,15 @@ import { Lumber } from './lumber.js';
 import { ViewModel, VIEW_Z } from './viewmodel.js';
 import { SaveGame } from './save.js';
 import { SmoothLook } from './look.js';
+import { createAwakening } from './awaken.js';
 import { TouchControls } from './touch.js';
 import { createShell } from './shell.js';
+import { keepOffline } from './offline.js';
+
+// Вехи загрузки уходят в трассу boot.js: измерять её надо числами, а не
+// секундомером у экрана (см. `__FTE_BOOT__.trace()`).
+const mark = (n) => window.__FTE_BOOT__?.mark(n);
+mark('модуль разобран');
 
 // ---------- прогресс заставки ----------
 // Полоса в index.html до этого момента «дышала» вслепую: доли известны только
@@ -166,27 +173,49 @@ scene.add(aurora.mesh);
 const snow = new Snowfall();
 scene.add(snow.points);
 
-// домик с тёплыми окнами + лес (сосны LOLIPOP, камни Quaternius);
-// вокруг домика — поляна без деревьев
+// ---------- то, что приезжает по сети ----------
+// Домик с тёплыми окнами и лес (сосны LOLIPOP, камни Quaternius) — четыре
+// мегабайта на двоих, и раньше мир ждал их здесь, top-level await'ом. Ждал
+// целиком: полоса загрузки стояла до последней книги на столе ВНУТРИ избы,
+// которую со старта не видно вовсе.
+//
+// Теперь мир собирается до конца без сети — на том, что считается кодом, — и
+// зовёт игрока внутрь по первому кадру. Изба и лес приезжают следом, волной
+// отделки (она в конце файла, там же и порядок). Отсюда до неё живут три
+// вещи, которые эту отсрочку и делают возможной.
 const CABIN = { x: -4.5, z: -13, rotY: 0.95 };
-const [trees, cabin] = await Promise.all([
-  createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }]),
-  createCabin(terrain, CABIN),
-]);
-// Круг avoid в createTrees держит от домика только СТВОЛЫ, и то с натяжкой:
-// сруб - повёрнутый прямоугольник 8.1 x 9.6 м, а крона взрослой сосны сама
-// по себе до 4 м в радиусе. Поэтому габарит домика домик и меряет сам, а лес
-// убирает по нему то, что залезло ветками внутрь. Отбраковка идёт ПОСЛЕ
-// раскладки и не двигает ни одну другую сосну (см. cull в trees.js).
-trees.cull([{ ...cabin.footprint, margin: 0.5 }]);
-scene.add(trees.group);
-scene.add(cabin.group);
-snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
 
-// единый реестр коллайдеров мира (формат — см. collide.js): деревья, дом,
-// костёр; сюда же будущая стройка/мебель/враги. Динамические (дверь) живут
-// как разделяемые объекты — их поля мутируются владельцем на месте.
-const colliders = [...trees.obstacles, ...cabin.obstacles];
+// Первая: реестр коллайдеров (формат — см. collide.js) ЖИВОЙ и поначалу
+// пустой. Игрок и рубка держат на этот массив ссылку, поэтому дописанное
+// волной видно им сразу, без пересборки. Динамические препятствия (дверь)
+// живут как разделяемые объекты — их поля мутируются владельцем на месте.
+const colliders = [];
+
+// Вторая: пустая изба. Тик спрашивает избу каждый кадр — про дверь, про пол,
+// про печку, — и десяток проверок на null в горячем пути был бы худшим
+// решением и для читаемости, и для скорости. Вместо этого место избы держит
+// пустышка с тем же набором вопросов и честными ответами «избы тут нет».
+// Дверь и печка у неё унесены на километр вниз: ни подсказки, ни тепла с
+// такого расстояния не бывает, и отдельного условия для этого не нужно.
+const FAR_AWAY = new THREE.Vector3(0, -1000, 0);
+const NO_CABIN = {
+  group: null,
+  obstacles: [],
+  snowMask: null,
+  doorOpen: false,
+  doorCenter: FAR_AWAY,
+  stovePos: FAR_AWAY,
+  update() {},
+  toggleDoor() { return false; },
+  floorHeightAt: () => null,
+  isInside: () => false,
+};
+let cabin = NO_CABIN;
+
+// Третья: лес до приезда - просто отсутствие леса. Рубка заводится с пустым
+// списком сосен и принимает его волной (`setForest` в lumber.js), а сама
+// ссылка держится ради отладочного хендла.
+let trees = null;
 
 // костёр — очаг перед домом; он ЕСТ ДРОВА (затухает до углей без подброса)
 const FIRE = { x: 2.5, z: -9 };
@@ -251,9 +280,11 @@ view.add(carriedLog);
 
 // лопата — воткнута в снег у поленницы. Ей копают (ЛКМ — срез-штык) и
 // намывают (ПКМ — укладка); без лопаты в руках правок снега нет.
-// Модель ждём здесь: она догрузилась бы и сама, но тогда лопата у поленницы
-// первые кадры стояла бы невидимой
-await loadShovelModel();
+// Модель раньше ждали здесь, чтобы лопата не стояла первые кадры невидимой.
+// Теперь она едет волной отделки вместе с избой: `buildShovel` отдаёт пустую
+// группу сразу, а приехавшая модель сама разойдётся по уже собранным копиям
+// (см. `waiting` в shovel.js).
+loadShovelModel();
 const shovel = new Shovel(scene, view);
 shovel.place(3.0, terrain.getHeight(3.0, -15.4), -15.4, 2.2);
 
@@ -263,7 +294,9 @@ const axe = new Axe(scene, view);
 axe.place(block.x, block.topY, block.z, 2.6);
 
 // рубка леса: удары, дрожь кроны, валка, лежащие стволы, разделка (lumber.js)
-const lumber = new Lumber(trees.pines, colliders, groundLogs, {
+// Лес приезжает волной отделки, поэтому рубка заводится пустой: до приезда
+// топору просто не во что попасть (`setForest` в lumber.js).
+const lumber = new Lumber([], colliders, groundLogs, {
   audio,
   footprints,
   dust: axe.dust, // снежная пыль рухнувшей кроны — та же система, что у зарубки
@@ -290,8 +323,17 @@ const saver = new SaveGame({
   digger, footprints, campfire, player, shovel, logs: groundLogs,
   axe, woodpile, lumber,
 });
-await saver.load();
+const returning = await saver.load();
 saver.start();
+// Вернувшийся мог выйти из мира, стоя на полу избы, а изба едет волной
+// отделки. До её приезда пола под ним нет - держим его на месте
+// (см. «опора, которой ещё нет» в player.js).
+if (returning) {
+  player.holdY = player.pos.y;
+  // Камера переезжает к телу СРАЗУ, а не на последнем кадре пробуждения:
+  // весь вход вернувшийся смотрит уже с того места, где вышел из мира.
+  player.syncCamera();
+}
 carriedLog.visible = player.carrying; // недонесённое полено пережило перезагрузку
 
 // debug (?debug): доступ к системам из консоли — удобно щупать копание,
@@ -299,9 +341,17 @@ carriedLog.visible = player.carrying; // недонесённое полено �
 const freezes = []; // пойманные долгие кадры (ловец фризов в тике, только ?debug)
 if (player.debug)
   window.__snow = {
-    scene, camera, renderer, terrain, snowPatch, digger, player, cabin,
+    scene, camera, renderer, terrain, snowPatch, digger, player,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
-    axe, lumber, woodpile, trees, groundLogs,
+    axe, lumber, woodpile, groundLogs,
+    // Пробуждение создаётся ниже по файлу, вместе с заставкой, — геттером,
+    // иначе обращение здесь пришлось бы на временную мёртвую зону `const` и
+    // роняло бы весь отладочный хендл, а с ним и мир.
+    get awakening() { return awakening; },
+    // Изба и лес приезжают волной отделки — геттерами, иначе в консоли навсегда
+    // осталось бы то, что лежало здесь в момент сборки: пустышка и null.
+    get cabin() { return cabin; },
+    get trees() { return trees; },
   };
 
 // ---------- постобработка ----------
@@ -320,10 +370,20 @@ composer.addPass(new OutputPass());
 // Вход, пауза и выход на витрину — общий для всех миров экран (shell.js).
 // Esc браузер обрабатывает сам: он отпускает курсор, а по этому событию
 // возвращается экран паузы.
-const loading = document.getElementById('loading');
-const shell = createShell((ev) => {
+//
+// Экран этот показан с первой секунды и мира не ждёт: пока мир собирается, его
+// кнопки держит boot.js, а сюда они переходят по `shell.ready()` вместе с тем,
+// что успели нажать без нас.
+function enterWorld(ev) {
   audio.init();
   audio.resume();
+  // Появление мира запускается САМИМ нажатием, а не захватом курсора.
+  // Сперва оно висело на событии `lock` — и это было ошибкой сразу дважды: на
+  // телефоне pointer lock не запрашивается вовсе (ниже видно: там просто
+  // `shell.close()`), а на десктопе браузер держит защитную паузу около
+  // секунды после выхода по Esc и в захвате отказывает. В обоих случаях мир
+  // остался бы тёмным и неуправляемым.
+  awakening.enter();
   // Чем вошли, тем и играем. Раньше выбор шёл по факту «тач вообще возможен»,
   // а `'ontouchstart' in window` истинно на любом ноутбуке с сенсорным
   // экраном: там мир уходил в тач-режим, pointer lock не запрашивался
@@ -337,12 +397,32 @@ const shell = createShell((ev) => {
     touch.activate(); // на таче pointer lock нет — просто входим
     shell.close();
   } else player.controls.lock();
+}
+
+// Захват курсора могут и не дать, и это не сбой, а обычное дело: браузер
+// отдаёт его только по свежему жесту. Нажатие, пришедшее раньше готовности
+// мира, до него доживает не всегда — а отменять из-за этого вход нельзя,
+// иначе вернётся ровно то, на что жаловались: нажал, а ничего не случилось.
+// Поэтому вход идёт всё равно, а курсор перехватывается первым же движением
+// мыши в мире.
+let awaitingLock = false;
+
+document.addEventListener('pointerlockerror', () => {
+  if (!shell.isOpen()) return;
+  awaitingLock = true;
+  shell.close();
+});
+
+addEventListener('pointerdown', () => {
+  if (!awaitingLock || player.locked || shell.isOpen()) return;
+  awaitingLock = false;
+  player.controls.lock();
 });
 
 // сброс памяти мира: второе нажатие в течение 3.5 с — защита от случайного клика
 const resetBtn = document.getElementById('resetWorld');
 let resetArmedUntil = 0;
-resetBtn.addEventListener('click', () => {
+function armReset() {
   if (performance.now() < resetArmedUntil) {
     saver.reset();
     return;
@@ -355,7 +435,10 @@ resetBtn.addEventListener('click', () => {
     resetBtn.textContent = 'начать ночь заново';
     resetBtn.classList.remove('arm');
   }, 3500);
-});
+}
+
+const shell = createShell({ onEnter: enterWorld, onReset: armReset });
+
 player.controls.addEventListener('lock', () => {
   shell.close();
   audio.resume();
@@ -492,37 +575,142 @@ if (touch) {
   };
 }
 
-// Прелоадер: прогрев НАСТОЯЩИМ кадром всей сцены + проталина у костра.
+// Прогрев НАСТОЯЩИМ кадром: программы шейдеров, VBO и заливка текстур в GPU.
 // renderer.compile() тут не годится: он собирает программы под канвас (srgb),
 // а мир рисуется композером в рендер-таргет (srgb-linear) — это другой ключ
 // программы (outputColorSpace в WebGLPrograms), и при первом повороте камеры
 // всё за пределами стартового ракурса компилировалось заново + заливались
 // VBO и текстуры невидимых объектов — секундный фриз (Windows/ANGLE).
-// Поэтому: дожидаемся DefaultLoadingManager (все текстуры уже в памяти —
-// их GPU-upload тоже ляжет в этот кадр), гасим frustum culling у ВСЕЙ сцены
-// и рисуем один кадр композером под заставкой. Culling возвращаем сразу же.
+// Поэтому: гасим frustum culling и рисуем кадр композером. Culling
+// возвращаем сразу же.
+//
+// Прогрев идёт ПОРЦИЯМИ ПО КАДРАМ, и это не украшение, а условие живого меню.
+//
+// Замер (01.09.2026, dev, эта машина): экран входа открывался на 2.26 с, и
+// сразу за ним главный поток стоял 2.2 с одной задачей. Полторы секунды из них
+// — прогрев одним кадром: изба, лес и мебель компилировали свои программы и
+// заливали VBO разом. Всё это время кнопка «войти в ночь» была нарисована, но
+// не могла отработать нажатие: обработчик просто не получал очереди. Снаружи
+// это и читалось как «меню ждёт мира».
+//
+// Здесь тот же кадр разбит на порции: рисуем столько объектов, сколько
+// укладывается в бюджет, и отдаём кадр браузеру. Размер порции подбирается
+// сам — по тому, сколько заняла предыдущая. Прогрев от этого дольше по
+// календарю, но он идёт ЗА меню, а не вместо него.
+//
+// Зовётся дважды: по миру, собранному кодом (сразу за открытием меню), и по
+// приехавшей отделке. Второй заход не переделывает первый — прогретое помечено
+// в `userData.warmed`, — и не идёт с ним внахлёст: очередь одна.
+const WARM_BUDGET_MS = 12;
+
+function nextFrame() {
+  return new Promise((r) => requestAnimationFrame(() => r()));
+}
+
+let warmQueue = Promise.resolve();
+
+/** Поставить прогрев в очередь. Два прогрева разом рисовали бы кадр дважды. */
+function warmSpread() {
+  warmQueue = warmQueue.then(() => warmSceneSpread());
+  return warmQueue;
+}
+
+async function warmSceneSpread() {
+  mark('прогрев начат');
+  const pend = [];
+  scene.traverse((o) => {
+    // Только то, что рисуется: группы и пустышки прогревать нечем, а порции
+    // из них состояли бы наполовину.
+    if ((o.isMesh || o.isPoints || o.isLine) && o.frustumCulled && !o.userData.warmed) {
+      pend.push(o);
+    }
+  });
+  let size = 4;
+  for (let i = 0; i < pend.length; ) {
+    const part = pend.slice(i, i + size);
+    i += part.length;
+    for (const o of part) {
+      o.frustumCulled = false;
+      o.userData.warmed = true;
+    }
+    const t0 = performance.now();
+    digger.primeStart();
+    // Карта теней перерисовывается на каждой порции: depth-варианты программ
+    // компилируются только в теневом проходе, и без этого фриз просто уехал бы
+    // на первую тень в кадре.
+    renderer.shadowMap.needsUpdate = true;
+    composer.render();
+    digger.primeEnd();
+    const spent = performance.now() - t0;
+    for (const o of part) o.frustumCulled = true;
+    // Порция растёт, пока кадр укладывается в бюджет, и сжимается, если нет.
+    size = spent > WARM_BUDGET_MS ? Math.max(2, size >> 1) : Math.min(64, size * 2);
+    await nextFrame();
+  }
+  view.render(renderer); // сцена рук — своим кадром, она рисуется отдельно
+  mark(`прогрев кончен (${pend.length} объектов)`);
+}
+
+// Заставка уходит по ПЕРВОМУ КАДРУ, а не по загруженным ассетам, и это главное
+// решение всей загрузки мира.
+//
+// Раньше здесь стояло `DefaultLoadingManager.onLoad = warmUp`: экран держался,
+// пока не приедет всё до последнего байта — пять с половиной мегабайт, тридцать
+// секунд на 1.5 Мбит/с, и десятисекундный предохранитель на случай, если сеть
+// оборвётся совсем. Ждать приходилось и того, что со старта не видно вовсе:
+// книг на столе внутри избы, чугунка у камина, дальнего края леса.
+//
+// Теперь мир, собранный кодом, показывается сразу, а изба и лес доезжают
+// волной отделки (ниже), пока игрок читает титул на экране входа.
+//
+// Само появление ведёт `awaken.js`: мир проступает из темноты сквозь пелену, а
+// по входу она отходит и опущенный взгляд поднимается. Модуль владеет на это
+// время туманом, светом, звуком и камерой — см. его шапку.
+const EXPOSURE = renderer.toneMappingExposure;
+// Во сколько раз пелена входа плотнее той, что насчитала метель. Объявлена ДО
+// createAwakening: тот сразу ставит первую ступень, то есть пишет сюда.
+let fogVeil = 1;
+const awakening = createAwakening({
+  // Плотность живёт множителем, а не присваиванием: её КАЖДЫЙ КАДР
+  // пересчитывает метель (см. `scene.fog.density` в тике), и прямая запись
+  // держалась бы ровно до следующего кадра.
+  setFog: (times) => {
+    fogVeil = times;
+  },
+  setLight: (mul) => {
+    renderer.toneMappingExposure = EXPOSURE * mul;
+  },
+  setSound: (level) => {
+    audio.setWake(level);
+  },
+  look,
+  yaw: look.yaw,
+});
+
 let warmed = false;
 function warmUp() {
   if (warmed) return;
   warmed = true;
-  window.__FTE_BOOT__?.ready();
   requestAnimationFrame(() => {
-    const culled = [];
-    scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
-    // материал вырытого снега прогревать нечем: до первого копка в сцене нет
-    // ни одного меша с ним. Подкладываем на этот кадр заглушку (см. digger.js)
+    // Один обычный кадр — чтобы за экраном входа было что показать. Прогрев
+    // всего остального идёт ниже, ЗА уже открытым меню: раньше он стоял здесь
+    // и задерживал экран на полсекунды, а следом ещё и подмораживал его.
+    //
+    // `__FTE_BOOT__.ready()` зовётся ровно один раз и ровно отсюда (через
+    // `shell.ready()`): он же отдаёт нажатие, сделанное до готовности, и
+    // вызвать его раньше значит это нажатие потерять.
     digger.primeStart();
-    renderer.shadowMap.needsUpdate = true; // и depth-варианты теней в тот же кадр
     composer.render();
     digger.primeEnd();
-    for (const o of culled) o.frustumCulled = true;
     view.render(renderer);
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
-    loading.classList.add('hidden');
-    loading.removeAttribute('aria-busy');
-    loading.setAttribute('aria-hidden', 'true');
-    loading.setAttribute('inert', '');
+    mark('мир собран');
     if (player.debug) {
+      // ?debug идёт мимо экрана входа, а с ним — мимо появления мира: без
+      // этой строки мир остался бы тёмным и неуправляемым.
+      window.__FTE_BOOT__?.ready();
+      shell.close();
+      awakening.skip();
       // ?debug идёт мимо экрана входа: звук заводится первой же клавишей.
       const initAudio = () => {
         audio.init();
@@ -531,17 +719,85 @@ function warmUp() {
       };
       addEventListener('keydown', initAudio);
     } else {
-      shell.open(); // мир готов — можно звать внутрь
+      awakening.reveal(); // мир начинает проступать из темноты
+      // Экран входа уже открыт — мир лишь забирает его себе. Вместе с ним
+      // приходит то, что нажали, пока он собирался: это нажатие и есть вход,
+      // просто сделанный раньше, чем мир успел ответить.
+      const pressed = shell.ready();
+      if (pressed.reset) armReset();
+      if (pressed.enter) enterWorld(pressed.enter);
     }
     startLoop();
+    keepOffline(); // следующий приход в мир — без сети (offline.js)
+    // Прогрев мира, собранного кодом: порциями по кадрам, при живом меню.
+    warmSpread();
   });
 }
-THREE.DefaultLoadingManager.onLoad = warmUp;
-// очередь лоадеров могла опустеть ещё до подписки (горячий кэш): пустая
-// пара itemStart/itemEnd синхронно дёргает onLoad, если грузить нечего
-THREE.DefaultLoadingManager.itemStart('warmup-probe');
-THREE.DefaultLoadingManager.itemEnd('warmup-probe');
-setTimeout(warmUp, 10000); // предохранитель: битая сеть не держит заставку вечно
+warmUp();
+
+// ---------- волны отделки ----------
+// Порядок здесь — это порядок, в котором мир одевается на глазах, и выбран он
+// по одному признаку: видно ли это со старта.
+//
+//   1. Изба и лес — весь силуэт мира: тёплые окна в двадцати метрах и стена
+//      сосен вокруг поляны. Запрашиваются вместе, но изба первой: она ближе,
+//      вдвое легче леса, и без неё поляна выглядит просто пустой.
+//   2. Мебель внутри избы (чугунок, книги) — её не видно, пока не войдёшь.
+//      Уходит последней, отдельной волной внутри createCabin.
+//
+// Сорванная волна мир не роняет: без леса поляна пуста, без избы негде
+// греться, но ходить, копать и жечь костёр можно и так. Поэтому allSettled,
+// а не all — упавшая изба не должна уносить с собой приехавший лес.
+(async () => {
+  const [cabinRes, treesRes] = await Promise.allSettled([
+    createCabin(terrain, CABIN).then((v) => (mark('изба собрана'), v)),
+    createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }])
+      .then((v) => (mark('лес собран'), v)),
+  ]);
+
+  if (cabinRes.status === 'fulfilled') {
+    cabin = cabinRes.value;
+    colliders.push(...cabin.obstacles);
+    snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
+    scene.add(cabin.group);
+    // мебель внутри дома приезжает своей волной; её коллайдеры — следом
+    cabin.dressed.then((late) => {
+      mark('мебель на месте');
+      if (late.length) colliders.push(...late);
+    });
+  } else {
+    console.warn('изба не приехала:', cabinRes.reason);
+  }
+
+  if (treesRes.status === 'fulfilled') {
+    trees = treesRes.value;
+    // Круг avoid в createTrees держит от домика только СТВОЛЫ, и то с натяжкой:
+    // сруб - повёрнутый прямоугольник 8.1 x 9.6 м, а крона взрослой сосны сама
+    // по себе до 4 м в радиусе. Поэтому габарит домика домик и меряет сам, а лес
+    // убирает по нему то, что залезло ветками внутрь. Отбраковка идёт ПОСЛЕ
+    // раскладки и не двигает ни одну другую сосну (см. cull в trees.js).
+    // Без избы отбраковывать нечем - тогда лес встаёт как разложен.
+    if (cabin.footprint) trees.cull([{ ...cabin.footprint, margin: 0.5 }]);
+    // Порядок трёх следующих строк важен и держится на одном: лес попадает в
+    // кадр последним. Сперва отбраковка снимает коллайдеры с убранных сосен,
+    // потом рубка принимает лес, потом сейв кладёт на место сваленное в
+    // прошлую ночь - и только после этого лес добавляется в сцену. Иначе
+    // вернувшийся игрок увидел бы, как срубленная им сосна падает заново.
+    lumber.setForest(trees.pines);
+    saver.forestReady();
+    colliders.push(...trees.obstacles);
+    scene.add(trees.group);
+  } else {
+    console.warn('лес не приехал:', treesRes.reason);
+  }
+
+  // Отделка на месте: опора под ногами настоящая, придерживать больше нечего.
+  player.holdY = null;
+  shadowDirty = true; // приехавшее отбрасывает тени
+  // Программы и текстуры отделки — порциями по кадрам, а не одним кадром на
+  // полторы секунды: пока идёт прогрев, меню обязано отвечать на нажатие.
+  await warmSpread();
+})();
 
 // ---------- resize ----------
 window.addEventListener('resize', () => {
@@ -655,7 +911,17 @@ function tick(frameAt) {
   requestAnimationFrame(tick);
   // На gate/паузе атмосфера остаётся живой, но десять полных кадров в секунду
   // достаточно и заметно экономит GPU и батарею.
-  if (document.body.classList.contains('paused') && frameAt - lastFrameAt < 100) return;
+  //
+  // Исключение — появление мира: пелена отходит и взгляд поднимается ИМЕННО на
+  // этом экране. Десять кадров в секунду сделали бы движение дёрганым, а
+  // потолок на dt (0.05 с) вдобавок растянул бы его вдвое против настоящего
+  // времени — первая проверка так и показала недоведённый до конца взгляд.
+  if (
+    document.body.classList.contains('paused') &&
+    !awakening.holds() &&
+    frameAt - lastFrameAt < 100
+  )
+    return;
   lastFrameAt = frameAt;
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
@@ -691,13 +957,18 @@ function tick(frameAt) {
 
   // метель: плавно следует за порывами ветра из аудио
   blizzard += (Math.max(0, audio.windLevel - 0.35) / 0.65 - blizzard) * Math.min(1, dt * 0.35);
-  scene.fog.density = FOG_CALM + blizzard * (FOG_STORM - FOG_CALM);
+  scene.fog.density = (FOG_CALM + blizzard * (FOG_STORM - FOG_CALM)) * fogVeil;
   for (const m of ridges.mats) m.opacity = 1 - blizzard * 0.8;
 
-  // взгляд — ДО физики: направление движения должно идти по свежей камере
-  look.update(dt, player);
-  player.update(dt);
-  footprints.updateView(player.pos.x, player.pos.z); // окно детальной карты следов
+  // Пока идёт пробуждение, игрок не управляет ничем: камерой ведёт awaken.js.
+  // Мир вокруг при этом живёт — снег летит, огонь дышит, пелена отходит.
+  awakening.update(dt);
+  if (!awakening.holds()) {
+    // взгляд — ДО физики: направление движения должно идти по свежей камере
+    look.update(dt, player);
+    player.update(dt);
+    footprints.updateView(player.pos.x, player.pos.z); // окно детальной карты следов
+  }
   if (dbg) _fm[2] = performance.now(); // ловец: конец физики
 
   // лопата и топор: пока кнопка удержана — замахи цепочкой, врезание внутри замаха
