@@ -28,6 +28,7 @@ import { Axe } from './axe.js';
 import { Lumber } from './lumber.js';
 import { SaveGame } from './save.js';
 import { createAwakening } from './awaken.js';
+import { createSpread } from './spread.js';
 import { createTouch, touchForced, touchSupported } from './touch.js';
 import { createSupport } from './support.js';
 import { Body, Input, SmoothLook, ViewModel, VIEW_Z } from 'world-core/core';
@@ -410,6 +411,9 @@ composer.addPass(new OutputPass());
 // кнопки держит boot.js, а сюда они переходят по `shell.ready()` вместе с тем,
 // что успели нажать без нас.
 function enterWorld(ev) {
+  // Вход - это конец ожидания, чем бы ни была занята отделка: за туманом
+  // игрока оставлять нельзя. Если мир успел одеться сам, здесь пусто.
+  unveilWorld();
   audio.init();
   audio.resume();
   // Появление мира запускается САМИМ нажатием, а не захватом курсора.
@@ -635,27 +639,53 @@ async function warmSceneSpread() {
       pend.push(o);
     }
   });
+  // Приехавшее ПРЯЧЕТСЯ и открывается порциями — иначе порции не значат ничего
+  // (замер трассой, 03.09.2026). Погашенный frustum culling решает только одну
+  // задачу: втянуть в кадр то, чего в нём нет. А только что добавленная волна
+  // в кадре И ТАК стоит — изба в двадцати метрах, лес вокруг поляны, — и
+  // первый же `composer.render()` компилировал её ЦЕЛИКОМ: 743 мс одной
+  // задачей главного потока сразу за «изба собрана», сколько бы объектов ни
+  // было в порции. Поэтому волна въезжает невидимой, а порция сперва открывает
+  // свои объекты и лишь потом рисует: в кадре ровно то, что мы готовы оплатить.
+  const hidden = new Set();
+  for (const o of pend) {
+    if (!o.visible) continue; // спрятанное самим миром (двойники мебели) не трогаем
+    o.visible = false;
+    hidden.add(o);
+  }
   let size = 4;
-  for (let i = 0; i < pend.length; ) {
-    const part = pend.slice(i, i + size);
-    i += part.length;
-    for (const o of part) {
-      o.frustumCulled = false;
-      o.userData.warmed = true;
+  try {
+    for (let i = 0; i < pend.length; ) {
+      const part = pend.slice(i, i + size);
+      i += part.length;
+      for (const o of part) {
+        if (hidden.has(o)) o.visible = true;
+        o.frustumCulled = false;
+        o.userData.warmed = true;
+      }
+      const t0 = performance.now();
+      digger.primeStart();
+      // Карта теней перерисовывается на каждой порции: depth-варианты программ
+      // компилируются только в теневом проходе, и без этого фриз просто уехал
+      // бы на первую тень в кадре.
+      renderer.shadowMap.needsUpdate = true;
+      composer.render();
+      digger.primeEnd();
+      // Дождаться, пока нарисованное действительно нарисуется. Без этого замер
+      // врёт, и врёт в худшую сторону: команды GL уходят в очередь и возвращают
+      // управление сразу, компиляция программ идёт лениво, `spent` выходит в
+      // единицы миллисекунд - и порция растёт до потолка. `finish` делает цену
+      // порции честной, и подбор размера начинает работать.
+      renderer.getContext().finish();
+      const spent = performance.now() - t0;
+      for (const o of part) o.frustumCulled = true;
+      // Порция растёт, пока кадр укладывается в бюджет, и сжимается, если нет.
+      size = spent > WARM_BUDGET_MS ? Math.max(1, size >> 1) : Math.min(32, size + 2);
+      await nextFrame();
     }
-    const t0 = performance.now();
-    digger.primeStart();
-    // Карта теней перерисовывается на каждой порции: depth-варианты программ
-    // компилируются только в теневом проходе, и без этого фриз просто уехал бы
-    // на первую тень в кадре.
-    renderer.shadowMap.needsUpdate = true;
-    composer.render();
-    digger.primeEnd();
-    const spent = performance.now() - t0;
-    for (const o of part) o.frustumCulled = true;
-    // Порция растёт, пока кадр укладывается в бюджет, и сжимается, если нет.
-    size = spent > WARM_BUDGET_MS ? Math.max(2, size >> 1) : Math.min(64, size * 2);
-    await nextFrame();
+  } finally {
+    // Что бы ни случилось посреди прогрева, мир не должен остаться дырявым.
+    for (const o of hidden) o.visible = true;
   }
   view.render(renderer); // сцена рук — своим кадром, она рисуется отдельно
   mark(`прогрев кончен (${pend.length} объектов)`);
@@ -697,6 +727,24 @@ const awakening = createAwakening({
   yaw: look.yaw,
 });
 
+// Туман экрана входа снимается ОТДЕЛЬНЫМ сигналом, не готовностью мира
+// (`__FTE_BOOT__.unveil`, см. его шапку). Здесь к нему привязано начало
+// появления: пелена мира отходит ровно тогда, когда расходится туман меню, а
+// не двумя секундами раньше, в пустоту за сплошной подложкой.
+//
+// Идемпотентно: сигналов, ведущих сюда, три - последняя волна отделки, вход
+// игрока и предохранитель по времени. Кто пришёл первым, тот и открывает мир.
+let worldUnveiled = false;
+function unveilWorld() {
+  if (worldUnveiled) return;
+  worldUnveiled = true;
+  if (!debug) awakening.reveal(); // мир начинает проступать из темноты
+  window.__FTE_BOOT__?.unveil();
+}
+// Предохранитель: волна может не упасть, а просто зависнуть (сеть отвечает по
+// байту в минуту). `allSettled` такого не ловит, и туман остался бы навсегда.
+setTimeout(unveilWorld, 15000);
+
 let warmed = false;
 function warmUp() {
   if (warmed) return;
@@ -719,6 +767,7 @@ function warmUp() {
       // ?debug идёт мимо экрана входа, а с ним — мимо появления мира: без
       // этой строки мир остался бы тёмным и неуправляемым.
       window.__FTE_BOOT__?.ready();
+      unveilWorld(); // ?debug идёт мимо меню - и мимо ожидания отделки
       shell.close();
       awakening.skip();
       // ?debug идёт мимо экрана входа: звук заводится первой же клавишей.
@@ -729,13 +778,19 @@ function warmUp() {
       };
       addEventListener('keydown', initAudio);
     } else {
-      awakening.reveal(); // мир начинает проступать из темноты
       // Экран входа уже открыт — мир лишь забирает его себе. Вместе с ним
       // приходит то, что нажали, пока он собирался: это нажатие и есть вход,
       // просто сделанный раньше, чем мир успел ответить.
+      //
+      // Туман при этом НЕ снимается: мир встал на ноги, но поляна за меню ещё
+      // пуста - ни избы, ни леса, ни мебели. Его снимет `unveilWorld`, когда
+      // приедет последняя волна (или сам вход, если нажали раньше).
       const pressed = shell.ready();
       if (pressed.reset) armReset();
-      if (pressed.enter) enterWorld(pressed.enter);
+      if (pressed.enter) {
+        unveilWorld();
+        enterWorld(pressed.enter);
+      }
     }
     startLoop();
     keepOffline(); // следующий приход в мир — без сети (offline.js)
@@ -758,7 +813,12 @@ warmUp();
 // Сорванная волна мир не роняет: без леса поляна пуста, без избы негде
 // греться, но ходить, копать и жечь костёр можно и так. Поэтому allSettled,
 // а не all — упавшая изба не должна уносить с собой приехавший лес.
+let dressed = null; // последняя волна: мебель внутри избы
 (async () => {
+  // Волна и разбирается порциями: приняв избу и лес, мир ещё раскладывает их
+  // по реестрам, отбраковывает налезшее и поднимает сейв. Стыки те же, что
+  // внутри самих сборщиков (`spread.js`).
+  const breathe = createSpread();
   const [cabinRes, treesRes] = await Promise.allSettled([
     createCabin(terrain, CABIN).then((v) => (mark('изба собрана'), v)),
     createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }])
@@ -769,9 +829,10 @@ warmUp();
     cabin = cabinRes.value;
     colliders.push(...cabin.obstacles);
     snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
+    await breathe();
     scene.add(cabin.group);
     // мебель внутри дома приезжает своей волной; её коллайдеры — следом
-    cabin.dressed.then((late) => {
+    dressed = cabin.dressed.then((late) => {
       mark('мебель на месте');
       if (late.length) colliders.push(...late);
     });
@@ -788,6 +849,7 @@ warmUp();
     // раскладки и не двигает ни одну другую сосну (см. cull в trees.js).
     // Без избы отбраковывать нечем - тогда лес встаёт как разложен.
     if (cabin.footprint) trees.cull([{ ...cabin.footprint, margin: 0.5 }]);
+    await breathe();
     // Порядок трёх следующих строк важен и держится на одном: лес попадает в
     // кадр последним. Сперва отбраковка снимает коллайдеры с убранных сосен,
     // потом рубка принимает лес, потом сейв кладёт на место сваленное в
@@ -796,6 +858,7 @@ warmUp();
     lumber.setForest(trees.pines);
     saver.forestReady();
     colliders.push(...trees.obstacles);
+    await breathe();
     scene.add(trees.group);
   } else {
     console.warn('лес не приехал:', treesRes.reason);
@@ -807,6 +870,16 @@ warmUp();
   // Программы и текстуры отделки — порциями по кадрам, а не одним кадром на
   // полторы секунды: пока идёт прогрев, меню обязано отвечать на нажатие.
   await warmSpread();
+
+  // Последняя волна - мебель внутри избы. Ждём и её: мир считается собранным,
+  // только когда доехало всё, что вообще доедет. `allSettled`, а не `then`:
+  // упавшая мебель не должна оставить человека за туманом навсегда.
+  await Promise.allSettled([dressed]);
+  await warmSpread(); // прогреть то, что принесла мебель
+
+  // Мир одет целиком - туман расходится и открывает его за меню.
+  mark('мир одет');
+  unveilWorld();
 })();
 
 // ---------- resize ----------
@@ -932,8 +1005,12 @@ function tick(frameAt) {
   // рисовать его значит греть видеокарту в пустоту и отбирать кадры у меню.
   // Прогревочные кадры (`warmSpread`, `primeStart`/`primeEnd`) идут мимо этой
   // проверки: они рисуют сами, не через цикл, и нужны для компиляции шейдеров.
-  const unveiled = document.body.classList.contains('unveiled');
-  if (!unveiled && !awakening.holds()) return;
+  // Раньше здесь стояло `!unveiled && !awakening.holds()`, и это не работало:
+  // `holds()` истинно от начала появления до самого конца входа, то есть всё
+  // время под туманом. Мир честно рисовался в никуда и отбирал кадры у меню.
+  // Теперь условие одно: нет тумана - есть кадры. Вход туман снимает сам
+  // (`unveilWorld`), так что войти в нерисуемый мир нельзя.
+  if (!document.body.classList.contains('unveiled')) return;
   if (
     document.body.classList.contains('paused') &&
     !awakening.holds() &&

@@ -21,6 +21,7 @@ const enterLabel = enter ? enter.textContent : ''; // «войти в ночь»
 const UNVEIL_MS = 2000;
 
 let ready = false; // мир собран и подхватил управление экраном
+let unveiled = false; // туман разошёлся и открыл мир за меню
 let pendingEnter = null; // событие нажатия «войти», пришедшее раньше мира
 let pendingReset = false; // и «начать заново» тоже могли нажать раньше
 let onEnter = null; // сюда мир кладёт свой обработчик, когда готов
@@ -28,7 +29,8 @@ let onReset = null;
 
 document.body.classList.add('booting');
 // Пока туман сплошной, мир за ним не виден - значит и рисовать его незачем.
-// Класс снимается вместе с приходом `unveiled` (мир зовёт `ready`).
+// Класс снимается в `unveil`, а не в `ready`: между ними мир как раз и
+// доодевается, и всё это время показывать его нечем и незачем.
 
 function fail(reason) {
   if (ready) return;
@@ -56,6 +58,9 @@ function fail(reason) {
 // нажатию нельзя - именно это и читалось как «кнопка не работает».
 enter?.addEventListener('click', (ev) => {
   if (onEnter) {
+    // Вход - это и есть конец ожидания: туман уходит вместе с ним, чем бы ни
+    // была занята отделка. Иначе игрок оказался бы в мире за сплошной пеленой.
+    unveil();
     onEnter(ev);
     return;
   }
@@ -102,6 +107,12 @@ const trace = [];
 let steps = 0;
 let shown = 0;
 
+/** Шаг лестницы вех: откусывает треть остатка, назад не ходит. */
+function step() {
+  steps += 1;
+  paint(1 - Math.pow(0.68, steps));
+}
+
 function paint(value) {
   if (!bar || !fill || value <= shown) return;
   shown = value;
@@ -111,6 +122,32 @@ function paint(value) {
   bar.setAttribute('aria-valuemax', '100');
   bar.setAttribute('aria-valuenow', String(Math.round(shown * 100)));
   bar.setAttribute('aria-valuetext', `мир собран на ${Math.round(shown * 100)} процентов`);
+}
+
+/**
+ * Туман расходится и открывает собранный мир за меню. Идемпотентно.
+ *
+ * Отделено от `ready` намеренно (03.09.2026). Раньше туман снимался прямо в
+ * `ready`, а `ready` мир зовёт рано - по первому кадру, когда за меню стоит
+ * ещё голая поляна, и следующие две секунды в кадре доезжали изба, лес и
+ * мебель. Снаружи это читалось так: туман разошёлся и показал стройку, а
+ * меню на ней подвисало - самые тяжёлые задачи главного потока приходились
+ * ровно на эти две секунды.
+ *
+ * Теперь сигналов два. `ready` - «мир встал на ноги, кнопка теперь его», и
+ * это ещё веха, а не конец: полоса делает шаг. `unveil` - «мир собран
+ * целиком», и вот здесь полоса доходит до края, тает вместе с `#boot`, а
+ * туман расступается. Не путать с пробуждением (`awaken.js`): там просыпается
+ * мир, здесь расступается подложка меню.
+ */
+function unveil() {
+  if (unveiled) return;
+  unveiled = true;
+  paint(1);
+  document.body.classList.remove('booting');
+  document.body.classList.add('unveiled');
+  document.body.classList.add('ready');
+  setTimeout(() => fog?.classList.add('gone'), UNVEIL_MS);
 }
 
 window.__FTE_BOOT__ = {
@@ -125,15 +162,11 @@ window.__FTE_BOOT__ = {
   ready(handlers = {}) {
     ready = true;
     clearTimeout(watchdog);
-    paint(1);
-    // Туман расходится и открывает мир за меню. Не путать с пробуждением
-    // (`awaken.js`): там просыпается мир, здесь расступается подложка меню.
-    document.body.classList.add('unveiled');
-    setTimeout(() => fog?.classList.add('gone'), UNVEIL_MS);
+    // Веха, а не конец: мир подхватил экран, но отделка ещё едет. Туман
+    // снимает `unveil`, и до него полоса до края не доходит.
+    step();
     onEnter = handlers.enter || null;
     onReset = handlers.reset || null;
-    document.body.classList.remove('booting');
-    document.body.classList.add('ready');
     // Кнопка возвращается из ожидания: если нажатие было, мир отработает его
     // сам, а надпись должна снова звать внутрь.
     if (enter) {
@@ -143,8 +176,13 @@ window.__FTE_BOOT__ = {
     const had = { enter: pendingEnter, reset: pendingReset };
     pendingEnter = null;
     pendingReset = false;
+    // Нажали раньше, чем мир оделся: игрока нельзя оставить за туманом.
+    // Вход всегда снимает туман, даже если мир ещё договаривает отделку.
+    if (had.enter) unveil();
     return had;
   },
+  /** Мир собран целиком: туман расходится. См. `unveil` выше. */
+  unveil,
   /** Виден ли ещё экран входа: миру это нужно, чтобы не входить дважды. */
   gateOpen() {
     return !!gate && !gate.classList.contains('hidden');
@@ -152,8 +190,7 @@ window.__FTE_BOOT__ = {
   /** Отметить веху загрузки. Полоса при этом делает шаг: см. `paint`. */
   mark(name) {
     trace.push([name, Math.round(performance.now())]);
-    steps += 1;
-    paint(1 - Math.pow(0.68, steps));
+    step();
   },
   /**
    * Доля загруженного по счёту ресурсов: 0..1. Зовёт мир, когда его загрузчик

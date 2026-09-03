@@ -7,6 +7,7 @@ import { buildFirebox } from './firebox.js';
 import { material } from 'world-core/materials';
 import { bed, table, stool, rug, shelfWithBooks, logStack } from 'world-core/props';
 import { matset } from './matsets.js';
+import { createSpread } from './spread.js';
 
 // Домик: Scandinavian Log Cabin (rivetech, CC-BY). Масштаб к реальным метрам,
 // посадка в снег по рельефу, снег на крыше и кромках брёвен через snowTint.
@@ -32,6 +33,13 @@ const PORCH_Z1 = 4.67;
 const FOOT = { x0: -2.85, x1: 4.6, z0: -3.05, z1: 5.1 };
 
 export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
+  // Изба приезжает за уже открытым меню, и собирается она порциями по кадрам.
+  // Одним куском это стоило 675 мс главного потока подряд: разбор gltf,
+  // снежные материалы по всем мешам, обмер рельефа под футпринтом, интерьер
+  // с процедурными поверхностями ядра и полсотни лучей по полу. Всё это время
+  // кнопка «войти в ночь» была нарисована, но нажатие не отрабатывала.
+  // `await breathe()` на стыках отдаёт кадр браузеру, когда набежал бюджет.
+  const breathe = createSpread();
   const gltf = await createGLTFLoader().loadAsync(asset('models/cabin/scene.gltf'));
   const root = gltf.scene;
 
@@ -52,6 +60,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   // тут не годится - дом вытянут и повёрнут, круг либо режет лишнее, либо
   // пропускает угол.
   const half = new THREE.Vector2((size.x * s) / 2, (size.z * s) / 2);
+
+  await breathe();
 
   const group = new THREE.Group();
   group.add(root);
@@ -97,6 +107,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     // на них не бывает (снег внутри дома выглядел как изморозь на полу)
     else if (name !== 'Floor') snowTint(c.material, '0.78, 0.83, 0.94', 0.5, 0.5);
   });
+
+  await breathe();
 
   // дверь — отдельный узел модели, вращается вокруг своей петли
   const doorNode = root.getObjectByName('Cabin_Door_3');
@@ -157,7 +169,9 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   const localFloorY = (worldFloorTop - group.position.y - root.position.y) / s;
 
   // ---- интерьер: примитивы в локали gltf.scene, база — на реальном полу ----
-  const interior = buildInterior(localFloorY);
+  // Самый тяжёлый кусок избы: поверхности мебели считаются процедурно
+  // (world-core), а не грузятся картинками. Дышит он изнутри, своими стыками.
+  const interior = await buildInterior(localFloorY, breathe);
   root.add(interior.group);
   // Сколько коллайдеров у процедурной мебели: всё, что появится в этом списке
   // сверх этого числа, принесли поздние модели (см. `dressed` ниже).
@@ -248,6 +262,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     return _fv.x >= ROOM.x0 && _fv.x <= ROOM.x1 && _fv.z >= ROOM.z0 && _fv.z <= ROOM.z1;
   }
 
+  await breathe();
+
   // ---- свет из окон: кластеризуем вершины стёкол на отдельные окна ----
   const lights = [];
   const centre = new THREE.Vector3();
@@ -279,6 +295,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
     lights.push(l);
     group.attach(l);
   }
+
+  await breathe();
 
   // ---- маска снегопада: под крышей (по её реальным габаритам) снег не падает ----
   const roofC = l2w(0.17, 0, 0.75);
@@ -366,7 +384,7 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
 // ткани и ковра; глаз цеплялся за неё как за заглушки. Предмет ядра знает свои
 // материалы сам (кровать: брус, ткань, шерстяной плед), здесь остаются только
 // место, коллайдер и свет.
-function buildInterior(F) {
+async function buildInterior(F, breathe) {
   const g = new THREE.Group();
 
   const iron = new THREE.MeshStandardMaterial({ color: 0x23252b, roughness: 0.55, metalness: 0.7 });
@@ -408,6 +426,8 @@ function buildInterior(F) {
     dest.add(prop.group);
     return prop;
   };
+
+  await breathe();
 
   // ---- камин у задней стены ----
   // Сложен в Blender (blender-web-agent-kit), 1920 треугольников. Подиум,
@@ -512,6 +532,8 @@ function buildInterior(F) {
     x1: stove.x - 0.62, z1: stove.z + 0.55, x2: stove.x + 0.62, z2: stove.z + 0.55, r: 0.62,
   });
 
+  await breathe();
+
   // ---- стопка колотых дров сбоку от камина ----
   // Справа: камин занимает заднюю стену до x 0.16. Поленья лежат ТОРЦАМИ в
   // комнату: торец с кольцами — самая светлая и самая узнаваемая часть полена,
@@ -519,6 +541,8 @@ function buildInterior(F) {
   // сливалась с брёвнами. Прежние шесть цилиндров «по x» вдобавок лежали друг
   // в друге по оси.
   adopt(logStack({ r: 0.055, len: 0.52, rows: [3, 2, 1] }), 0.62, -2.06, Math.PI / 2);
+
+  await breathe();
 
   // ---- стол у правого окна + свеча ----
   // Каркас стола — в группе 'table' (её прячет модельный стол WoodenTable_02).
@@ -548,6 +572,8 @@ function buildInterior(F) {
   dest.add(candle);
   dest = g;
 
+  await breathe();
+
   // ---- табуретки (каждая в группе 'seatN' — её заменит модель стула) ----
   [[1.15, 0.7], [2.3, 0.9]].forEach(([sx, sz], i) => {
     groupNamed('seat' + i);
@@ -555,6 +581,8 @@ function buildInterior(F) {
     dest = g;
     colliders.push({ x: sx, z: sz, r: 0.24 });
   });
+
+  await breathe();
 
   // ---- кровать вдоль правой стены, ближе к дальнему углу ----
   // Изголовье стоит у самой стены: её брёвна выпирают внутрь до z ≈ −2.35
@@ -564,8 +592,12 @@ function buildInterior(F) {
   adopt(bed({ w: 1.02, l: 2.1 }), bedAt.x, bedAt.z);
   colliders.push({ x1: bedAt.x, z1: bedAt.z - 0.85, x2: bedAt.x, z2: bedAt.z + 0.85, r: 0.5 });
 
+  await breathe();
+
   // ---- круглый плетёный коврик по центру ----
   adopt(rug({ r: 0.85 }), 0.25, 0);
+
+  await breathe();
 
   // ---- полка на задней стене: книги и кружка ----
   // Задняя кромка полки — на линии выпуклости брёвен (BACK_WALL); прежняя
@@ -579,6 +611,8 @@ function buildInterior(F) {
     o.receiveShadow = true;
   });
   g.add(shelf.group);
+
+  await breathe();
 
   // ---- подвесной масляный фонарь по центру ----
   // Мягкий тёплый свет наполняет комнату и — главное — читается сквозь

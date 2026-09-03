@@ -86,3 +86,60 @@ test('«начать заново» до готовности мира тоже 
   const had = global.window.__FTE_BOOT__.ready({});
   assert.equal(had.reset, true);
 });
+
+// --- два сигнала: «мир встал на ноги» и «мир собран целиком» ----------------
+// Туман экрана входа снимает не `ready`, а `unveil`. Разведены они затем, что
+// `ready` мир зовёт по первому кадру, когда за меню ещё пусто, а отделка едет
+// ещё две секунды. Проверяется счётом: это контракт оболочки, одинаковый во
+// всех мирах, и глазами в браузере такое не ловится.
+
+test('ready не снимает туман, а unveil снимает', async () => {
+  page();
+  await import('../public/boot.js?case=unveil');
+  const boot = global.window.__FTE_BOOT__;
+  const body = global.document.body;
+
+  boot.ready({});
+  assert.equal(body.classList.contains('unveiled'), false, 'мир ещё одевается - туман стоит');
+  assert.equal(body.classList.contains('booting'), true, 'и мир за туманом не рисуется');
+
+  boot.unveil();
+  assert.equal(body.classList.contains('unveiled'), true, 'мир собран - туман расходится');
+  assert.equal(body.classList.contains('booting'), false, 'теперь мир видно, значит и рисуем');
+  assert.equal(body.classList.contains('ready'), true, 'полоса загрузки тает вместе с туманом');
+});
+
+test('unveil идемпотентен: сигналов к нему несколько', async () => {
+  page();
+  await import('../public/boot.js?case=unveil-twice');
+  const boot = global.window.__FTE_BOOT__;
+  boot.ready({});
+  boot.unveil();
+  boot.unveil();
+  assert.equal(global.document.body.classList.contains('unveiled'), true);
+});
+
+test('вход до конца отделки снимает туман вместе с собой', async () => {
+  const dom = page();
+  await import('../public/boot.js?case=unveil-pending');
+  const boot = global.window.__FTE_BOOT__;
+
+  dom.enter.click({ type: 'click' }); // нажали, пока мир собирался
+  boot.ready({});
+  assert.equal(
+    global.document.body.classList.contains('unveiled'),
+    true,
+    'игрока нельзя оставить в мире за сплошным туманом'
+  );
+});
+
+test('нажатие после ready тоже снимает туман, не дожидаясь отделки', async () => {
+  const dom = page();
+  await import('../public/boot.js?case=unveil-late');
+  const boot = global.window.__FTE_BOOT__;
+
+  boot.ready({ enter: () => {} });
+  assert.equal(global.document.body.classList.contains('unveiled'), false);
+  dom.enter.click({ type: 'click' });
+  assert.equal(global.document.body.classList.contains('unveiled'), true);
+});

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createGLTFLoader } from './gltfload.js';
 import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
+import { createSpread } from './spread.js';
 
 // Лес: реалистичные сосны LOLIPOP (CC-BY, 15 вариантов × LOD0-2) + камни
 // Quaternius (CC0). Инстансинг по паре (вариант × LOD-кольцо): кольцо выбирается
@@ -55,12 +56,19 @@ async function loadPinesScene() {
 // Разбираем сцену пака на варианты: имя → геометрии LOD0-2 (кора + хвоя)
 // в мировом пространстве пака + матрица нормализации (низ y=0, центр XZ в
 // нуле, высота = 1). Матрица одна на вариант (по LOD0) — LOD-ы совмещены.
-function collectPineVariants(root) {
+async function collectPineVariants(root, breathe) {
   root.updateMatrixWorld(true);
   const byName = new Map();
+  // Сперва отбираем узлы, потом разбираем их с выдохами: разбор одного
+  // LOD-узла - это клон геометрии с прогоном матрицы по каждой вершине, и
+  // пятнадцать вариантов по три кольца подряд держали поток одним куском.
+  const lodNodes = [];
   root.traverse((node) => {
     const m = node.name.match(/^(Pine_[a-z]+_\d+)_LOD(\d+)$/);
-    if (!m) return;
+    if (m) lodNodes.push([node, m]);
+  });
+  for (const [node, m] of lodNodes) {
+    await breathe();
     const [, vname, lodS] = m;
     let v = byName.get(vname);
     if (!v) {
@@ -75,10 +83,11 @@ function collectPineVariants(root) {
       else lod.clusters = geo;
     });
     v.lods[+lodS] = lod;
-  });
+  }
 
   const variants = [...byName.values()].filter((v) => v.lods[0] && v.kind);
   for (const v of variants) {
+    await breathe();
     const box = new THREE.Box3();
     for (const geo of [v.lods[0].bark, v.lods[0].clusters]) {
       if (!geo) continue;
@@ -133,6 +142,11 @@ function prepareRock(node) {
 }
 
 export async function createTrees(terrain, count = 170, rockCount = 45, avoid = []) {
+  // Лес собирается за уже открытым меню, и одним куском его собирать нельзя:
+  // разбор пака, нормализация пятнадцати вариантов и раскладка двух сотен
+  // инстансов держали поток 619 мс подряд. Стыки ниже (`await breathe()`) —
+  // места, где сборку можно отпустить, не разорвав ни одного этапа.
+  const breathe = createSpread();
   const group = new THREE.Group();
   const obstacles = [];
   const pines = []; // рубимые сосны — записи для lumber.js
@@ -145,9 +159,15 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       .then((g) => g.scene),
   ]);
 
-  const variants = collectPineVariants(pineScene);
+  await breathe();
+  const variants = await collectPineVariants(pineScene, breathe);
+  await breathe();
   rockScene.updateMatrixWorld(true);
-  const rocks = ROCKS.map((n) => prepareRock(rockScene.getObjectByName(n)));
+  const rocks = [];
+  for (const n of ROCKS) {
+    rocks.push(prepareRock(rockScene.getObjectByName(n)));
+    await breathe();
+  }
 
   // ---- материалы ----
   // Кора и хвоя — PBR-материалы из пака (общие на все варианты). Хвою переводим
@@ -192,6 +212,8 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     0.52 +
     0.3 * Math.sin(x * 0.043 + 1.7) * Math.cos(z * 0.037 - 0.8) +
     0.24 * Math.sin((x - z) * 0.021 + 0.5);
+
+  await breathe();
 
   const placed = [];
   const scatter = (n, rMin, rMax, minGap2, dens = null) => {
@@ -238,7 +260,12 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     buckets.get(key).push([x, z]);
   });
 
+  await breathe();
+
   for (const [key, list] of buckets) {
+    // Стык на каждое ведро: одно ведро — это один вариант сосны в одном
+    // LOD-кольце, десяток-другой инстансов, доли миллисекунды.
+    await breathe();
     const [vi, ring] = key.split(':').map(Number);
     const v = variants[vi];
     const lod = v.lods[Math.min(ring, v.lods.length - 1)];
@@ -302,9 +329,11 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   const rockSpots = scatter(rockCount, 10, 130, 6);
   const perRock = rocks.map(() => []);
   rockSpots.forEach((sp, i) => perRock[i % rocks.length].push(sp));
-  rocks.forEach((rock, ri) => {
+  for (let ri = 0; ri < rocks.length; ri++) {
+    await breathe();
+    const rock = rocks[ri];
     const list = perRock[ri];
-    if (!list.length) return;
+    if (!list.length) continue;
     const meshes = rock.geos.map((geo) => {
       const m = new THREE.InstancedMesh(geo, rockMat, list.length);
       m.castShadow = true;
@@ -337,7 +366,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       m.instanceMatrix.needsUpdate = true;
       group.add(m);
     });
-  });
+  }
 
   // ---- отбраковка того, что налезло на постройку ----
   // Зачем отдельным проходом, а не фильтром в scatter: раскладка леса - часть
