@@ -163,33 +163,74 @@
       outline: 2px solid var(--accent); outline-offset: 4px;
     }
 
-    /* Нажали раньше, чем мир собрался: кнопка не отказывает, а принимает и
-       ждёт. Мир войдёт сам, как только встанет (boot.js держит намерение). */
-    .btn.waiting {
-      color: var(--dim); border-color: rgba(140, 165, 205, 0.25);
-      cursor: default; pointer-events: none;
+    /* --- кнопок нет, пока мир не собран ---
+       Пока идёт загрузка, на экране только титул, строка настроения и полоса.
+       Ни одной кнопки: нажимать нечего, потому что мир ещё не готов принять
+       нажатие, а живая кнопка над занятым главным потоком отзывается с
+       полусекундным запозданием - именно это и читалось как «кнопка не
+       работает». Прежняя механика (кнопка принимала нажатие в ожидание «мир
+       собирается» и держала его до прихода мира) убрана целиком: нет кнопки -
+       нет и раннего нажатия.
+       Прячем ИМЕННО видимостью, а не прозрачностью: невидимая, но живая кнопка
+       ловит и Tab, и клик мимо, и это хуже нарисованной.
+       Завязано на состояние ЗАГРУЗКИ (`body.booting`), а не на сам экран: пауза
+       по Esc - тот же #gate, но мир на ней давно собран, и кнопки там должны
+       быть сразу, без всякого проявления.
+       Исключение одно - `boot-failed`: если мир не собрался, входить некуда, но
+       «повторить» нужно немедленно. */
+    body.booting:not(.boot-failed) #gate .btn,
+    body.booting:not(.boot-failed) #gate .quiet {
+      opacity: 0; visibility: hidden;
     }
-    .btn.waiting:hover { background: transparent; }
+    body.booting:not(.boot-failed) #exit { visibility: hidden; }
+    /* Проявление кнопок идёт ПОСЛЕ того, как туман тронулся с места, а не вместе
+       с ним: последняя волна отделки - самый тяжёлый кадр за всю загрузку, и
+       начинать на нём движение значит показать его рывком. Задержка в 0.45 с
+       пропускает его вперёд.
+       Именно АНИМАЦИЯ, а не переход, и это не вкусовщина. Переход по `visibility`
+       с задержкой отработал бы ещё раз на каждой паузе: экран паузы - тот же
+       #gate, он показывается снятием `hidden`, и кнопки на нём выцветали бы те
+       же полсекунды. Анимация же играет один раз, на самом `unveiled`, и потом
+       держит конечный кадр (`both`) - пауза открывается мгновенно.
+       `visibility` внутри кадров нужен, чтобы кнопка не ловила клик и Tab в те
+       0.45 с, пока она ещё нарисована прозрачной. */
+    body.unveiled #gate .btn,
+    body.unveiled #gate .quiet {
+      animation: gate-btn-in 0.8s ease 0.45s both;
+    }
+    @keyframes gate-btn-in {
+      from { opacity: 0; transform: translateY(7px); visibility: hidden; }
+      1% { visibility: visible; }
+      to { opacity: 1; transform: none; visibility: visible; }
+    }
 
-    /* --- полоса под кнопкой ---
-       Пока мир собирается, она под кнопкой; когда собрался - тает. Прежде
-       полоса жила на отдельном экране поверх меню, и переход между экранами
-       и был тем самым рывком. */
+    /* --- полоса под титулом ---
+       Пока мир собирается, она единственное, что движется на экране, и потому
+       ведёт всю атмосферу входа. Отсюда её вид: тонкая линия шириной примерно с
+       титул, заливка от прозрачного к цвету мира и мягкий огонёк на бегущем
+       конце - один тихий акцент, и больше ничего.
+       Ширину ведёт boot.js покадрово, а CSS-перехода на width здесь НЕТ
+       намеренно: два хода по одному свойству и дают те самые рывки, ради которых
+       всё и переделывалось.
+       Под линией - тихая подпись, что мир собирает прямо сейчас. Высота у неё
+       зарезервирована, поэтому смена подписи не двигает раскладку. */
     #boot {
-      display: flex; flex-direction: column; align-items: center; gap: 1rem;
-      margin-top: 1.8rem; height: 2px;
-      transition: opacity 0.7s ease;
+      display: flex; flex-direction: column; align-items: center; gap: 0.9rem;
+      margin-top: 2.2rem;
+      /* Полоса тает МЕДЛЕННЕЕ, чем доходит до края, и с задержкой: иначе конец
+         её хода приходится уже на прозрачное, и до края она на глазах не
+         доходит вовсе. */
+      transition: opacity 1.1s ease 0.35s;
     }
     body.ready #boot { opacity: 0; }
 
-    /* Пока модуль игры не разобран, о долях ничего не известно - полоса просто
-       «дышит» на CSS-анимации, без единой строчки JS. Как только main.js
-       начинает считать ресурсы, он вешает .known и ведёт ширину сам. */
     #loadBar {
       position: relative; overflow: hidden;
-      width: min(300px, 48vw); height: 2px;
+      width: min(560px, 74vw); height: 2px;
       background: rgba(140, 165, 205, 0.14);
     }
+    /* Пока boot.js не сделал первый кадр хода, полоса «дышит» на CSS - без
+       единой строчки JS, на случай если разбор бандла затянулся. */
     #loadFill {
       position: absolute; top: 0; bottom: 0; left: -34%; width: 34%;
       background: linear-gradient(90deg, transparent, var(--accent), transparent);
@@ -198,9 +239,23 @@
     @keyframes drift { to { left: 100%; } }
     #loadBar.known #loadFill {
       animation: none; left: 0; width: 0;
-      background: linear-gradient(90deg, var(--accent), var(--ink));
-      transition: width 0.35s ease;
+      background: linear-gradient(90deg, transparent 0%, var(--accent) 76%, var(--ink) 100%);
     }
+    /* Огонёк на бегущем конце. Он же и есть весь «свет» экрана загрузки. */
+    #loadBar.known #loadFill::after {
+      content: ''; position: absolute; right: -1px; top: -2px;
+      width: 3px; height: 6px; border-radius: 2px;
+      background: var(--ink);
+      box-shadow: 0 0 7px 1px var(--accent), 0 0 20px 4px var(--glow);
+    }
+    #loadNote {
+      min-height: 1.05em;
+      font-size: 0.7rem; letter-spacing: 0.26em; text-indent: 0.26em;
+      text-transform: uppercase; color: var(--dim); text-align: center;
+      opacity: 0.9; text-shadow: 0 0 14px rgba(0, 0, 0, 0.7);
+      transition: opacity 0.26s ease;
+    }
+    #loadNote.fading { opacity: 0; }
 
     /* Мир не собрался: полоса врёт о продолжении, и её не остаётся. Остаётся
        строка и кнопка «повторить» (обе ставит boot.js). */
@@ -209,7 +264,7 @@
       font-size: 0.8rem; letter-spacing: 0.08em; color: var(--dim);
     }
     body.boot-failed #loadBar { display: none; }
-    body.boot-failed #boot { height: auto; }
+    body.boot-failed #loadNote { display: none; }
     /* Пока мир не собрался, входить некуда: кнопка входа уступает место
        кнопке «повторить». */
     body.boot-failed #enter { display: none; }
@@ -323,6 +378,8 @@
     }
     @media (prefers-reduced-motion: reduce) {
       #loadFill { animation: none; left: 0; }
+      #loadNote { transition: none; }
+      #gate .btn, #gate .quiet { animation: none; }
       #gate, #boot, #death, #frost, #prompt, .tbtn, #exit { transition: none; }
       #gate { animation: none; }
       #fog { transition: none; }
@@ -347,6 +404,7 @@
     <button id="enter" class="btn" type="button" data-resume="продолжить">войти в ночь</button>
     <div id="boot" role="status" aria-live="polite">
       <div id="loadBar" role="progressbar" aria-label="Мир собирается"><div id="loadFill"></div></div>
+      <p id="loadNote" aria-hidden="true"></p>
       <p id="bootMsg" hidden></p>
     </div>
     <a class="quiet" href="https://find-the-end.fun/">выйти из мира</a>
