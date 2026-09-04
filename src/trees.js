@@ -85,11 +85,12 @@ export async function createTrees(
   await setsReady;
   await breathe();
   const sets = matsets('bark', 'rubble');
+  // Кора тёмная: светлая читалась издали белым столбом сквозь крону.
   const barkMat = snowTint(
-    material(sets.bark, { normalScale: 1.4, color: 0x8a7a63 }),
+    material(sets.bark, { normalScale: 1.4, color: 0x4a4136, roughness: 1 }),
     '0.62, 0.68, 0.84',
-    0.45,
-    0.45
+    0.35,
+    0.5
   );
 
   // Хвоя: одна канва 256x256 на весь лес (кисть иголок слева, силуэт для
@@ -100,15 +101,17 @@ export async function createTrees(
   const clustersMat = snowTint(
     new THREE.MeshStandardMaterial({
       map: foliage,
-      color: 0xbfd0b4,
-      roughness: 0.9,
+      // ночная хвоя: тёмная и холодная. Светлый оттенок под лунным светом
+      // выцветал в серый, и крона теряла глубину.
+      color: 0x7f9c8e,
+      roughness: 0.95,
       metalness: 0,
       alphaTest: 0.45,
       side: THREE.DoubleSide,
     }),
-    '0.72, 0.78, 0.92',
-    0.8,
-    0.08
+    '0.80, 0.86, 0.98',
+    0.5,
+    0.52
   );
 
   // тени хвои: depth-материал с той же маской, иначе тень — сплошная карточка
