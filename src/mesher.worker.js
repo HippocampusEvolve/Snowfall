@@ -56,6 +56,9 @@ const ei = (i, j, k, a) => ((k * S + j) * S + i) * 3 + a; // ребро решё
  * @param {number} job.cz
  * @param {Float32Array} job.colH baseHeight в SW² узлах колонки (с кольцом),
  *   порядок (k+1)*SW + (i+1)
+ * @param {number} [job.capDepth] глубина «шапки» (м): колонка не режет террейн,
+ *   и всё, что выше этой глубины под поверхностью, считается сплошным грунтом -
+ *   поверхность снега там рисует сам террейн, а MC отдаёт только свод пещеры
  * @param {Array<[number, number]>|null} job.edits правки: [индекс в SW³, дельта]
  * @param {Array<[number, number]>|null} job.editMaterials материалы положенной массы
  * @param {object} caves поле пещер (createCaves)
@@ -63,6 +66,11 @@ const ei = (i, j, k, a) => ((k * S + j) * S + i) * 3 + a; // ребро решё
  */
 export function meshChunk(job, caves) {
   const { cx, cy, cz, colH } = job;
+  // Шапка: в неразрезанной колонке верхние capDepth метров грунта сплошные.
+  // Иначе MC построил бы В НЕЙ вторую снежную поверхность поверх террейна (её
+  // не видно, но она есть) - а без неё чанк, задевающий поверхность, вовсе не
+  // мешился, и свод пещеры на глубине 1.5-4 м оставался без геометрии.
+  const cap = job.capDepth > 0 ? job.capDepth : 0;
   const ox = cx * VN, oy = cy * VN, oz = cz * VN;
 
   // 1. поле в SW³ узлах: рельеф, пещера, правка - одной формулой compose
@@ -80,8 +88,11 @@ export function meshChunk(job, caves) {
       for (let j = -1; j <= VN + 1; j++) {
         const y = (oy + j) * VS;
         const p = fi(i, j, k);
-        const cave = caves.sdf(x, y, z, base - y);
-        FIELD[p] = compose(base, y, cave, FIELD[p]);
+        const g = base - y;
+        const cave = caves.sdf(x, y, z, g);
+        // база с шапкой: слагаемое рельефа не опускается ниже cap, поэтому
+        // изоповерхность снега в шапку не попадает, а свод (cave) - как был
+        FIELD[p] = compose(cap && g < cap ? y + cap : base, y, cave, FIELD[p]);
         MAT[p] = EDIT_MAT[p] >= 0
           ? EDIT_MAT[p]
           : caves.materialAt

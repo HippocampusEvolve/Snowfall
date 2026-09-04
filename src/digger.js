@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { SNOW_CONST, createDiggerMaterial, loadDiggerMaterialSets } from './snowmaterial.js';
 import { PIT_DEPTH } from './growth.js';
-import { compose, DEPTH_MIN, Y_FLOOR, MATERIAL } from './caves.js';
+import { compose, Y_FLOOR, MATERIAL } from './caves.js';
 import { meshChunk, VN, VS, SW } from './mesher.worker.js';
 import { DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength } from './dig-rules.js';
 import {
@@ -10,6 +10,8 @@ import {
   chunkLoadRadius,
   chunkKeepRadius,
   mergeChunkParts,
+  surfaceOpen,
+  SURFACE_CAP,
 } from './cavebudget.js';
 
 // Воксельный объём мира: природные пещеры от семени плюс раскоп игрока.
@@ -439,14 +441,24 @@ export class Digger {
     return false;
   }
 
+  // Выходит ли пещера на поверхность колонки: правило чистое, лежит в
+  // cavebudget.js и проверяется на Node вместе с рамками потоковой загрузки.
+  _caveOpen(cx, cz) {
+    return surfaceOpen(this.caves, this._columnHeights(cx, cz).h, cx, cz);
+  }
+
   // Какие чанки колонки положено мешить и режет ли она террейн.
   //
-  // Правило выреза: колонка режет террейн, только если её ПРИПОВЕРХНОСТНАЯ
-  // полоса содержит пещеру или правку. Тогда, как и раньше, воксельный меш
-  // обязан замостить всю поверхность колонки — иначе в вырезе видно небо.
-  // Если полоса чиста, террейн остаётся на месте, а мешатся лишь внутренние
-  // чанки: чанк, пересекающий поверхность, в неразрезанной колонке не мешится
-  // никогда — иначе в одном месте оказались бы две поверхности и мерцание.
+  // Правило выреза: колонка режет террейн, только если пустота ВЫХОДИТ к её
+  // поверхности - природная (устье ствола, см. surfaceOpen) или выкопанная.
+  // Тогда воксельный меш обязан замостить всю поверхность колонки, иначе
+  // в вырезе видно небо.
+  //
+  // Если выхода нет, поверхность остаётся за террейном, но чанки колонки
+  // мешатся ВСЕ, включая тот, что задевает поверхность: под шапкой
+  // (SURFACE_CAP) он отдаёт только свод пещеры и не строит вторую снежную
+  // поверхность. Раньше такой чанк не мешился вовсе - и свод, попавший
+  // в верхние четыре метра, оставался без геометрии.
   _columnPlan(cx, cz) {
     const ck = colKey(cx, cz);
     const had = this._plan.get(ck);
@@ -458,8 +470,7 @@ export class Digger {
     const edLo = ed ? ed.jmin * VS : Infinity;
     const edHi = ed ? ed.jmax * VS : -Infinity;
 
-    const cut =
-      (ed && edHi >= bandLo && edLo <= bandHi) || this._caveNear(cx, cz, bandLo, bandHi);
+    const cut = (ed && edHi >= bandLo && edLo <= bandHi) || this._caveOpen(cx, cz);
 
     const set = new Set();
     const wide = new Set(); // приповерхностные и правленые чанки живут до 40 м
@@ -467,16 +478,19 @@ export class Digger {
     const cyBottom = Math.min(CY_FLOOR, ed ? Digger._cmin(ed.jmin) : CY_FLOOR);
     for (let cy = cyBottom; cy <= cyTop; cy++) {
       const lo = cy * CHUNK, hi = (cy + 1) * CHUNK;
+      const hasEdit = ed && edHi >= lo - VS && edLo <= hi + VS;
       const nearSurface = hi > bandLo && lo < bandHi;
-      if (nearSurface) {
-        if (cut) {
-          set.add(cy); // разрезанная колонка мостится целиком
-          wide.add(cy);
-        }
+      if (nearSurface && cut) {
+        set.add(cy); // разрезанная колонка мостится целиком
+        wide.add(cy);
         continue;
       }
       if (lo > bandHi) continue; // выше рельефа мешить нечего
-      const hasEdit = ed && edHi >= lo - VS && edLo <= hi + VS;
+      // Чанк, задевающий поверхность неразрезанной колонки, раньше не мешился
+      // вовсе - и свод пещеры, попавший в эти четыре метра, оставался без
+      // геометрии: из хода было видно небо, а сверху не за что было зацепиться.
+      // Теперь он мешится под шапкой (см. SURFACE_CAP и capDepth в воркере):
+      // вторая снежная поверхность не появляется, а свод стоит.
       if (hasEdit || this._caveNear(cx, cz, lo, hi)) {
         set.add(cy);
         if (hasEdit) wide.add(cy);
@@ -494,7 +508,7 @@ export class Digger {
       this._retire(k);
     }
 
-    const plan = { cut, set, wide };
+    const plan = { cut, set, wide, cap: cut ? 0 : SURFACE_CAP };
     this._plan.set(ck, plan);
     if (dropped) this._rebuildColumn(ck);
     if (cut) {
@@ -543,7 +557,9 @@ export class Digger {
       if (list.length) edits = list;
       if (materials.length) editMaterials = materials;
     }
-    return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits, editMaterials };
+    const plan = this._plan.get(colKey(cx, cz));
+    const capDepth = plan ? plan.cap : 0;
+    return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits, editMaterials, capDepth };
   }
 
   /** Выпечь наборы среза по одному на кадр; зовётся после готовности мира. */
@@ -795,6 +811,11 @@ export class Digger {
     }
   }
 
+  /** Вырезан ли террейн в колонке под точкой (там его рисовать нечем). */
+  isCutAt(x, z) {
+    return this._cutCols.has(colKey(Math.floor(x / CHUNK), Math.floor(z / CHUNK)));
+  }
+
   // перерисовываем coverage-маску по колонкам, режущим террейн
   _updateCoverage() {
     const cols = this._cutCols;
@@ -887,7 +908,16 @@ export class Digger {
     this._ray.set(camera.position, this._dir);
     this._ray.far = reach;
     const vHit = this._ray.intersectObjects(this.colliders, false)[0];
-    const tHit = this._ray.intersectObject(this.terrainMesh, false)[0];
+    let tHit = this._ray.intersectObject(this.terrainMesh, false)[0];
+    // В вырезанных колонках меша террейна ЛОГИЧЕСКИ нет: его выкидывает discard
+    // в шейдере, а луч про это не знает и упирается в невидимую плоскость. На
+    // дне ямы глубже вытянутой руки это и означало «копок не попадает»: удар
+    // уходил в уже выбранный до предела слой у самой кромки.
+    if (tHit && this.isCutAt(tHit.point.x, tHit.point.z)) tHit = undefined;
+    // Из двух живых поверхностей берём БЛИЖНЮЮ. Приоритет вокселей был бы
+    // неверен: под целым снегом лежат своды пещер, и удар уходил бы сквозь
+    // снег в камень свода.
+    if (vHit && tHit) return vHit.distance <= tHit.distance ? vHit : tHit;
     return vHit || tHit || null;
   }
 
