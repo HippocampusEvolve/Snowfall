@@ -54,3 +54,14 @@ test('pagehide-снимок отменяет более старую асинх�
   assert.equal(await old, false);
   assert.deepEqual(writes, [2]);
 });
+
+test('счётчик добытого растёт на успешный удар и уходит в заголовок', () => {
+  const saver = game(async () => new Uint8Array([0, 0, 0]));
+  const c = { x: 0, y: -8, z: 0 };
+  saver.digger.onStroke(c, 0, -1, 2.4, 1, 'shovel');
+  saver.digger.onStroke(c, 0, -1, 0.8, 2, 'pickaxe');
+  saver.digger.onStroke(c, 0, -1, 0.8, 3, 'pickaxe');
+  saver.digger.onStroke(c, 0, -1, 0, 2, 'shovel');
+  saver.digger.onStroke(c, 0, 1, 2.4, 1, 'shovel');
+  assert.deepEqual(saver._collect().head.mined, { soil: 1, stone: 1, ore: 1 });
+});

@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { SNOW_CONST, createDiggerMaterial } from './snowmaterial.js';
+import { SNOW_CONST, createDiggerMaterial, loadDiggerMaterialSets } from './snowmaterial.js';
 import { PIT_DEPTH } from './growth.js';
-import { compose, DEPTH_MIN, Y_FLOOR } from './caves.js';
+import { compose, DEPTH_MIN, Y_FLOOR, MATERIAL } from './caves.js';
 import { meshChunk, VN, VS, SW } from './mesher.worker.js';
+import { DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength } from './dig-rules.js';
 import {
   CAVE_LOAD_RADIUS,
   SURFACE_LOAD_RADIUS,
@@ -54,7 +55,6 @@ const PLAN_PER_FRAME = 4; // колонок, разбираемых на чан�
 // и разъехаться этим числам нельзя - иначе восстановленная яма не совпадёт
 // с вырытой.
 const SHOVEL_HALF = { x: 0.34, y: 0.24, z: 0.34 };
-const SHOVEL_STRENGTH = 2.4;
 const SHOVEL_FALLOFF = 0.1;
 
 // Ключ вокселя/чанка — SMI-число (упаковка умножением), не строка: editAt зовёт
@@ -105,6 +105,7 @@ export class Digger {
     this._plan = new Map(); // colKey -> Set(cy), какие чанки колонке положены
     this.onChanged = null; // зовётся после установки чанков (main: перерисовать тени)
     this.onStroke = null; // зовётся на каждый копок лопатой (журнал в save.js)
+    this.lastStroke = null; // материал и сила последнего удара для звука и крошки
     // Тихий режим воспроизведения: правки копятся, чанки не перестраиваются.
     this._quiet = false;
 
@@ -115,6 +116,11 @@ export class Digger {
       textures: terrain.textures,
       heightTex: terrain.heightTex,
       footprints,
+    });
+    // Три тяжёлых набора считаются по одному между кадрами. Пока они едут,
+    // шейдер держит снежные карты и остаётся полностью рабочим.
+    this.materialSetsReady = loadDiggerMaterialSets(this.material).catch((e) => {
+      console.warn('[digger] наборы среза не выпечены', e);
     });
 
     // Юбка по периметру выреза (см. _rebuildSkirt).
@@ -233,6 +239,18 @@ export class Digger {
   densityAt(x, y, z) {
     const base = this.baseHeight(x, z);
     return compose(base, y, this.caves.sdf(x, y, z, base - y), this.editAt(x, y, z));
+  }
+
+  // Материал берётся из того же поля и с той же высотой колонки, что плотность.
+  materialAt(x, y, z) {
+    const base = this.baseHeight(x, z);
+    return this.caves.materialAt
+      ? this.caves.materialAt(x, y, z, base)
+      : base - y <= 1.2
+        ? MATERIAL.SNOW
+        : base - y <= 4
+          ? MATERIAL.SOIL
+          : MATERIAL.STONE;
   }
 
   // трилинейная интерполяция накопленных правок в произвольной точке.
@@ -547,6 +565,7 @@ export class Digger {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(out.position, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(out.normal, 3));
+    geo.setAttribute('material', new THREE.BufferAttribute(out.material, 1));
     geo.setIndex(new THREE.BufferAttribute(out.index, 1));
     // Все части уже в мировых координатах, матрица меша единичная.
     geo.computeBoundingSphere();
@@ -602,6 +621,7 @@ export class Digger {
     this._parts.set(k, msg.empty ? null : {
       position: msg.position,
       normal: msg.normal,
+      material: msg.material,
       index: msg.index,
     });
     this._rebuildColumn(colKey(msg.cx, msg.cz));
@@ -796,6 +816,7 @@ export class Digger {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    geo.setAttribute('material', new THREE.Uint8BufferAttribute(new Uint8Array(pos.length / 3), 1));
     if (pos.length) geo.computeBoundingSphere(); // мировые координаты — culling честный
     this.skirt.geometry.dispose();
     this.skirt.geometry = geo;
@@ -815,6 +836,7 @@ export class Digger {
       new THREE.Float32BufferAttribute([0, y, 0, 0.01, y, 0, 0, y, 0.01], 3)
     );
     geo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+    geo.setAttribute('material', new THREE.Uint8BufferAttribute([0, 0, 0], 1));
     geo.computeBoundingSphere();
     this._primeKeep = { geometry: this.skirt.geometry, visible: this.skirt.visible };
     this.skirt.geometry = geo;
@@ -848,7 +870,8 @@ export class Digger {
     const c = hit.point.clone().addScaledVector(this._dir, 0.12);
     c.y += sign > 0 ? 0.1 : -0.08; // укладка растёт над точкой, копок — вглубь
     const yaw = Math.atan2(this._dir.x, this._dir.z);
-    this.shovelStroke(c, yaw, sign);
+    const material = this.materialAt(c.x, c.y, c.z);
+    this.lastStroke = this.shovelStroke(c, yaw, sign, DIG_RULES.SHOVEL_STRENGTH, material);
     if (
       this.footprints &&
       Math.abs(hit.point.y - this.baseHeight(hit.point.x, hit.point.z)) < 1.2
@@ -863,9 +886,45 @@ export class Digger {
    * Через неё копает лопата (shovelEdit) и через неё же журнал воспроизводит
    * записанные взмахи - формула правки одна на оба пути.
    */
-  shovelStroke(center, yaw, sign, strength = SHOVEL_STRENGTH) {
-    this.editBox(center, yaw, SHOVEL_HALF, sign, strength, SHOVEL_FALLOFF);
-    if (this.onStroke && !this._quiet) this.onStroke(center, yaw, sign, strength);
+  shovelStroke(center, yaw, sign, strength = DIG_RULES.SHOVEL_STRENGTH, material) {
+    const code = material === undefined
+      ? this.materialAt(center.x, center.y, center.z)
+      : material;
+    // Лопата режет снег и грунт. По камню удар остаётся слышимым, но поле не
+    // меняется и добыча не начисляется.
+    const applied = shovelAppliedStrength(code, sign, strength);
+    if (applied > 0) this.editBox(center, yaw, SHOVEL_HALF, sign, applied, SHOVEL_FALLOFF);
+    if (this.onStroke && !this._quiet)
+      this.onStroke(center, yaw, sign, applied, code, 'shovel');
+    return { material: code, strength: applied };
+  }
+
+  // Удар кирки из камеры: маленькая сферическая правка в точке прицела.
+  pickaxeEdit(camera, reach = 3.2) {
+    const hit = this._aim(camera, reach);
+    if (!hit) return null;
+    const c = hit.point.clone().addScaledVector(this._dir, 0.1);
+    const material = this.materialAt(c.x, c.y, c.z);
+    const strength = pickaxeAppliedStrength(material);
+    this.lastStroke = this.pickaxeStroke(c, strength, material);
+    if (
+      this.footprints &&
+      Math.abs(hit.point.y - this.baseHeight(hit.point.x, hit.point.z)) < 1.2
+    ) {
+      this.footprints.eraseCircle(hit.point.x, hit.point.z, 0.35);
+    }
+    return hit.point;
+  }
+
+  /** Правка одного удара кирки без камеры, в том числе при воспроизведении. */
+  pickaxeStroke(center, strength = DIG_RULES.PICK_STONE_STRENGTH, material) {
+    const code = material === undefined
+      ? this.materialAt(center.x, center.y, center.z)
+      : material;
+    this.edit(center, DIG_RULES.PICK_RADIUS, -1, strength);
+    if (this.onStroke && !this._quiet)
+      this.onStroke(center, 0, -1, strength, code, 'pickaxe');
+    return { material: code, strength };
   }
 
   /** Начать воспроизведение журнала: правки копятся, меши ждут. */

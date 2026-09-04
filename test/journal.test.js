@@ -10,9 +10,26 @@ test('копок читается обратно тем же', () => {
   g.dig(12.34, 3.5, -47.02, Math.PI / 2, -1, 2.4, 120);
   const r = g.at(0);
   assert.deepEqual(
-    [r.kind, r.seq, r.t, r.sign, Math.round(r.strength * 100), Math.round(r.yaw * 1000)],
-    [KIND.DIG, 1, 120, -1, 240, Math.round((Math.PI / 2) * 1000)]
+    [r.kind, r.seq, r.t, r.sign, Math.round(r.strength * 100), Math.round(r.yaw * 1000), r.material],
+    [KIND.DIG, 1, 120, -1, 240, Math.round((Math.PI / 2) * 1000), 0]
   );
+});
+
+test('материал и кирка читаются из записи DIG', () => {
+  const g = j();
+  g.dig(1, -8, 3, 0, -1, 0.8, 12, 3, 'pickaxe');
+  const r = g.at(0);
+  assert.deepEqual([r.kind, r.material, r.tool, r.strength], [KIND.DIG, 3, 'pickaxe', 0.8]);
+});
+
+test('старая запись DIG без старших битов даёт снег', () => {
+  const g = j();
+  g.dig(1, 2, 3, 0, -1, 2.4, 0);
+  const bytes = g.pending()[0][1];
+  bytes[8] &= 0x0f;
+  const old = j();
+  old.adopt(0, bytes);
+  assert.deepEqual([old.at(0).material, old.at(0).tool], [0, 'shovel']);
 });
 
 test('центр копка квантуется с ошибкой не больше сантиметра', () => {

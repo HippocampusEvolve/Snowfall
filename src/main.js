@@ -25,6 +25,7 @@ import { Woodpile, createChoppingBlock, createCarriedLog, GroundLogs } from './f
 import { initSnowCap } from './snowcap.js';
 import { Shovel, loadShovelModel } from './shovel.js';
 import { Axe } from './axe.js';
+import { Pickaxe } from './pickaxe.js';
 import { Lumber } from './lumber.js';
 import { SaveGame } from './save.js';
 import { createAwakening } from './awaken.js';
@@ -333,6 +334,10 @@ shovel.place(3.0, terrain.getHeight(3.0, -15.4), -15.4, 2.2);
 const axe = new Axe(scene, view);
 axe.place(block.x, block.topY, block.z, 2.6);
 
+// Кирка ждёт рядом с лопатой у избы, но их силуэты не пересекаются.
+const pickaxe = new Pickaxe(scene, view);
+pickaxe.place(4.2, terrain.getHeight(4.2, -16.2), -16.2, 2.35);
+
 // рубка леса: удары, дрожь кроны, валка, лежащие стволы, разделка (lumber.js)
 // Лес приезжает волной отделки, поэтому рубка заводится пустой: до приезда
 // топору просто не во что попасть (`setForest` в lumber.js).
@@ -357,11 +362,11 @@ const lumber = new Lumber([], colliders, groundLogs, {
 // чужая жизнь: редкие цепочки звериных следов через поляну
 const critters = new Critters(footprints, camera);
 
-// память мира: копание, следы/тропы, костёр, позиция, лопата, топор,
+// память мира: копание, следы/тропы, костёр, позиция, лопата, топор, кирка,
 // поленья, поленница, сваленные деревья (сброс — кнопка в меню или ?reset)
 const saver = new SaveGame({
   digger, footprints, campfire, player, shovel, logs: groundLogs,
-  axe, woodpile, lumber,
+  axe, pickaxe, woodpile, lumber,
 });
 const returning = await saver.load();
 saver.start();
@@ -385,7 +390,7 @@ if (debug)
     // поле пещер: __snow.caves.exits - выходы наверх, к ним удобно телепортироваться
     caves,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
-    axe, lumber, woodpile, groundLogs,
+    axe, pickaxe, lumber, woodpile, groundLogs,
     // журнал мира: `__snow.journal.stats()` — сколько записей, байт, как въехал
     journal: saver.journal,
     // Сдвинуть мир в прошлое и перезагрузиться: так живой мир (growth.js)
@@ -506,6 +511,7 @@ look.addEventListener('unlock', () => {
 let digHeld = false;
 let buildHeld = false;
 let chopHeld = false; // ЛКМ с топором — цепочка ударов, как копание лопатой
+let mineHeld = false; // ЛКМ с киркой - цепочка коротких ударов
 // Слот кнопки в замах переводит мир, а не ввод: ядру всё равно, что за
 // инструмент в руках. Один и тот же обработчик обслуживает мышь и палец —
 // кнопка на экране это те же ЛКМ и ПКМ.
@@ -513,6 +519,7 @@ function setToolHeld(slot, down) {
   if (slot === 1) {
     digHeld = down && shovel.held;
     chopHeld = down && !shovel.held && axe.held;
+    mineHeld = down && !shovel.held && !axe.held && pickaxe.held;
   } else buildHeld = down && shovel.held;
 }
 // поверхность под точкой: срез диггера → рельеф; пол/крыльцо домика — если выше
@@ -565,6 +572,11 @@ function doHandAction() {
       audio.axeTake();
       shadowDirty = true; // топор покинул колоду
       axeHintT = 9; // короткая подсказка, что топором делать
+    } else if (handTarget && handTarget.kind === 'pickaxe') {
+      pickaxe.take();
+      audio.pickaxeTake();
+      shadowDirty = true;
+      pickaxeHintT = 9;
     } else if (handTarget) {
       // поленница или лежащее полено — в руки
       if (handTarget.kind === 'log') {
@@ -595,6 +607,13 @@ function doHandAction() {
       axe.plant(ax, groundAt(ax, az), az, Math.atan2(_dirTmp.x, _dirTmp.z));
       audio.axePlant();
       shadowDirty = true; // топор встал в мир — новый кастер
+    } else if (pickaxe.held && !pickaxe.busy) {
+      camera.getWorldDirection(_dirTmp);
+      const px = player.pos.x + _dirTmp.x * 0.8;
+      const pz = player.pos.z + _dirTmp.z * 0.8;
+      pickaxe.plant(px, groundAt(px, pz), pz, Math.atan2(_dirTmp.x, _dirTmp.z));
+      audio.pickaxePlant();
+      shadowDirty = true;
     }
 }
 
@@ -914,9 +933,10 @@ let blizzard = 0; // 0..1 — сглаженная сила метели
 let nearDoor = false; // рядом с дверью — работает F
 let nearFire = false; // рядом с костром — F подбрасывает полено
 let nearPile = false; // рядом с поленницей — F складывает принесённое полено
-let handTarget = null; // что возьмёт F: {kind:'pile'|'shovel'|'axe'|'log', ref} — ближайшее к прицелу
+let handTarget = null; // ближайший к прицелу предмет, который возьмёт F
 let shovelHintT = 0; // сек показа подсказки после взятия лопаты
 let axeHintT = 0; // сек показа подсказки после взятия топора
+let pickaxeHintT = 0; // сек показа подсказки после взятия кирки
 let carryHintT = 0; // сек показа подсказки «бросить полено»
 let shadowAcc = 0; // таймер перерисовки карты теней
 const _sRight = new THREE.Vector3(); // базис плоскости окна теней (⊥ лучу луны)
@@ -954,6 +974,7 @@ function onShovelImpact(kind) {
   }
   if (kind === 'dig') audio.shovelDig();
   else audio.shovelScoop();
+  if (kind === 'dig' && digger.lastStroke?.strength === 0) return true;
   camera.getWorldDirection(_dirTmp);
   // при копке крошка летит на копающего и вверх; при укладке — вперёд от штыка
   _sprayDir.copy(_dirTmp).multiplyScalar(kind === 'dig' ? -0.7 : 0.5);
@@ -974,6 +995,22 @@ function onAxeImpact() {
   axe.spray(hit.point, hit.out);
   audio.axeChop();
   if (hit.split) audio.woodSplit(); // от ствола откололось полено
+  shadowDirty = true;
+  return true;
+}
+
+// Врезание кирки: маленькая сферическая правка и каменная крошка.
+function onPickaxeImpact() {
+  const p = digger.pickaxeEdit(camera);
+  if (!p) {
+    audio.shovelWhiff();
+    return false;
+  }
+  audio.pickaxeHit();
+  camera.getWorldDirection(_dirTmp);
+  _sprayDir.copy(_dirTmp).multiplyScalar(-0.55);
+  _sprayDir.y = 1.05;
+  pickaxe.spray(p, _sprayDir);
   shadowDirty = true;
   return true;
 }
@@ -1072,11 +1109,13 @@ function tick(frameAt) {
   }
   if (dbg) _fm[2] = performance.now(); // ловец: конец физики
 
-  // лопата и топор: пока кнопка удержана — замахи цепочкой, врезание внутри замаха
+  // Инструменты повторяют замах, пока кнопка удержана.
   if (shovel.held && (digHeld || buildHeld)) shovel.trySwing(digHeld ? 'dig' : 'build');
   shovel.update(dt, onShovelImpact);
   if (axe.held && chopHeld) axe.trySwing('chop');
   axe.update(dt, onAxeImpact);
+  if (pickaxe.held && mineHeld) pickaxe.trySwing('mine');
+  pickaxe.update(dt, onPickaxeImpact);
   lumber.update(dt, player.pos); // дрожь крон и валка — после ударов этого кадра
   // Падающее дерево тащит тень за собой; дрожь кроны — нет. Разница в цене
   // велика: дрожь длится около секунды после КАЖДОГО удара топором, и на этом
@@ -1135,7 +1174,7 @@ function tick(frameAt) {
   nearFire = fireDist < 2.4;
   nearPile = camera.position.distanceTo(woodpile.position) < 2.3;
   handTarget = null;
-  if (!player.carrying && !shovel.held && !axe.held) {
+  if (!player.carrying && !shovel.held && !axe.held && !pickaxe.held) {
     // Порог прицела: рука тянется к тому, на что игрок СМОТРИТ. Без него
     // (bestDot = -1) единственный предмет рядом брался даже строго за спиной.
     // У рубки такой порог свой и строже — AIM в lumber.js.
@@ -1158,6 +1197,7 @@ function tick(frameAt) {
     }
     consider('shovel', shovel.pos.x, shovel.pos.y + 0.5, shovel.pos.z);
     if (!axe.held) consider('axe', axe.pos.x, axe.pos.y + 0.35, axe.pos.z);
+    consider('pickaxe', pickaxe.pos.x, pickaxe.pos.y + 0.4, pickaxe.pos.z);
     for (const l of groundLogs.list) consider('log', l.x, l.y + 0.1, l.z, l);
   }
   // намерение руки видно на самом штабеле: призрак — куда ляжет, подсветка — что возьмётся
@@ -1170,6 +1210,7 @@ function tick(frameAt) {
   );
   if (shovel.held && shovelHintT > 0) shovelHintT -= dt;
   if (axe.held && axeHintT > 0) axeHintT -= dt;
+  if (pickaxe.held && pickaxeHintT > 0) pickaxeHintT -= dt;
   if (carryHintT > 0) carryHintT -= dt;
   let promptText = null;
   if (nearDoor) promptText = cabin.doorOpen ? 'F — закрыть дверь' : 'F — открыть дверь';
@@ -1183,21 +1224,24 @@ function tick(frameAt) {
       pile: 'F — взять полено',
       shovel: 'F — взять лопату',
       axe: 'F — взять топор',
+      pickaxe: 'F - взять кирку',
       log: 'F — поднять полено',
     }[handTarget.kind];
   else if (shovel.held && shovelHintT > 0)
     promptText = 'ЛКМ — копать · ПКМ — намыть · F — воткнуть';
   else if (axe.held && axeHintT > 0)
     promptText = 'ЛКМ — рубить · F — воткнуть';
+  else if (pickaxe.held && pickaxeHintT > 0)
+    promptText = 'ЛКМ - долбить · F - воткнуть';
   if (touch && touch.active) {
     // кнопка «рука» показывается, когда F что-то сделает; тексты — без клавиш
     touch.setButtons({
-      action: nearDoor || player.carrying || !!handTarget || shovel.held || axe.held,
-      tool: shovel.held ? 'shovel' : axe.held ? 'axe' : null,
+      action: nearDoor || player.carrying || !!handTarget || shovel.held || axe.held || pickaxe.held,
+      tool: shovel.held ? 'shovel' : axe.held ? 'axe' : pickaxe.held ? 'pickaxe' : null,
     });
     if (promptText)
       promptText = promptText.startsWith('ЛКМ')
-        ? 'кнопки справа — ' + (shovel.held ? 'копать и намыть' : 'рубить')
+        ? 'кнопки справа - ' + (shovel.held ? 'копать и намыть' : axe.held ? 'рубить' : 'долбить')
         : promptText.replace('F — ', '');
   }
   // DOM трогаем только на смене. Раньше подсказка писалась каждый кадр:
@@ -1247,9 +1291,9 @@ function tick(frameAt) {
   // не утечёт, но viewmodel меряет угловую скорость взгляда по камере — оставленный
   // punch читался бы как рывок мыши. Дёргается мир — не viewmodel: он привязан
   // к виду, своя отдача у него в кейфреймах замаха.
-  // отдача обоих инструментов (в руках всегда максимум один — суммирование безопасно)
-  const pitch = shovel.punch.pitch + axe.punch.pitch;
-  const roll = shovel.punch.roll + axe.punch.roll;
+  // отдача инструментов, в руках всегда максимум один
+  const pitch = shovel.punch.pitch + axe.punch.pitch + pickaxe.punch.pitch;
+  const roll = shovel.punch.roll + axe.punch.roll + pickaxe.punch.roll;
   let fzProg = 0, fzGeo = 0, fzTex = 0, fzShadow = false;
   if (dbg) {
     _fm[5] = performance.now(); // ловец: конец HUD/прочего, старт рендера

@@ -29,6 +29,7 @@ export function mergeChunkParts(parts) {
 
   const position = new Float32Array(vertices * 3);
   const normal = new Float32Array(vertices * 3);
+  const material = new Uint8Array(vertices);
   const index = new Uint32Array(indices);
   let pv = 0;
   let pi = 0;
@@ -36,10 +37,11 @@ export function mergeChunkParts(parts) {
   for (const p of live) {
     position.set(p.position, pv);
     normal.set(p.normal, pv);
+    if (p.material) material.set(p.material, pv / 3);
     for (let i = 0; i < p.index.length; i++) index[pi + i] = p.index[i] + base;
     pv += p.position.length;
     pi += p.index.length;
     base += p.position.length / 3;
   }
-  return { position, normal, index };
+  return { position, normal, material, index };
 }

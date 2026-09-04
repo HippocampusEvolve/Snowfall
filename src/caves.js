@@ -11,7 +11,15 @@ import { mulberry32 } from './seed.js';
 
 export const DEPTH_MIN = 1.5; // тоньше потолок не бывает: под этим слоем свод
 export const Y_FLOOR = -36; // ниже пещер нет (домен ключей вокселей ±64 м по y)
+export const MATERIAL = Object.freeze({ SNOW: 0, SOIL: 1, STONE: 2, ORE: 3 });
 const BIG = 1e3; // «очень далеко от пещеры»: быстрый выход без вызова шума
+
+const SNOW_DEPTH = 1.2;
+const SOIL_DEPTH = 4.0;
+const ORE_DEPTH = 6.0;
+const CAVE_WALL = 1.0;
+const F_ORE = 1 / 7;
+const ORE_RIDGE = 0.988;
 
 // Ход: частота шума и полуширина полосы нуля. Ширина хода в метрах =
 // 2 * W0 / |grad m|, где |grad m| ~ 2.2 * F_WORM для нашего градиентного шума.
@@ -132,6 +140,10 @@ export function createCaves({ seed = 1, avoid = [] } = {}) {
     });
   }
 
+  // Отдельное поле руды создаётся после выходов, чтобы новый материал не
+  // менял уже сложившуюся геометрию пещер и положения шахт.
+  const nOre = makeNoise(rand);
+
   // Расстояние от точки (x, depth, z) до ствола выхода. Вертикаль меряется
   // ГЛУБИНОЙ под поверхностью, а не мировым Y: так ствол сам следует за
   // рельефом и выходит на склоне ровно там, где посчитан.
@@ -186,8 +198,27 @@ export function createCaves({ seed = 1, avoid = [] } = {}) {
     return d;
   }
 
+  /**
+   * Геологический материал в мировой точке. baseHeight приходит из той же
+   * колонки высот, по которой мешер считает плотность. Нулевой дефолт удобен
+   * для чистых тестов с плоской поверхностью.
+   */
+  function materialAt(x, y, z, baseHeight = 0, caveValue) {
+    const depth = baseHeight - y;
+    // Полоса по обе стороны стенки не получает рудных пятен и мягких слоёв.
+    const cave = caveValue === undefined ? sdf(x, y, z, depth) : caveValue;
+    if (Math.abs(cave) <= CAVE_WALL) return MATERIAL.STONE;
+    if (depth <= SNOW_DEPTH) return MATERIAL.SNOW;
+    if (depth <= SOIL_DEPTH) return MATERIAL.SOIL;
+    if (depth > ORE_DEPTH) {
+      const ridge = 1 - Math.abs(nOre(x * F_ORE, y * F_ORE, z * F_ORE));
+      if (ridge >= ORE_RIDGE) return MATERIAL.ORE;
+    }
+    return MATERIAL.STONE;
+  }
+
   // seed и avoid отдаём наружу: по ним воркер заводит у себя ТО ЖЕ поле
-  return { sdf, exits, shaftDist, seed, avoid };
+  return { sdf, materialAt, exits, shaftDist, seed, avoid };
 }
 
 /**

@@ -337,7 +337,7 @@ export class GameAudio {
   // Звук мягкий и глухой: у снега нет резкой атаки, он проминается. Поэтому
   // атаки размяты (30–45 мс), «уф» не свипует по частоте (свип = «блуп»
   // пузыря), а весь врез идёт через общий лоупас, срезающий сухую верхушку.
-  shovelDig() {
+  shovelDig(pitch = 1) {
     if (!this.ctx) return;
     const ctx = this.ctx;
     const t = ctx.currentTime + 0.005;
@@ -348,7 +348,7 @@ export class GameAudio {
     // общий «войлок» поверх всего вреза: снег глушит верх
     const soft = ctx.createBiquadFilter();
     soft.type = 'lowpass';
-    soft.frequency.value = 1500 + cold * 600;
+    soft.frequency.value = (1500 + cold * 600) * pitch;
     soft.Q.value = 0.5;
     out.connect(soft);
     soft.connect(this.sfx);
@@ -356,11 +356,11 @@ export class GameAudio {
     // врез: шумовая пачка с ниспадающим полосовым фильтром
     const cut = ctx.createBufferSource();
     cut.buffer = this.noise;
-    cut.playbackRate.value = 0.7 + Math.random() * 0.4;
+    cut.playbackRate.value = (0.7 + Math.random() * 0.4) * pitch;
     const cbp = ctx.createBiquadFilter();
     cbp.type = 'bandpass';
-    cbp.frequency.setValueAtTime(700 + cold * 250, t);
-    cbp.frequency.exponentialRampToValueAtTime(300, t + 0.13);
+    cbp.frequency.setValueAtTime((700 + cold * 250) * pitch, t);
+    cbp.frequency.exponentialRampToValueAtTime(300 * pitch, t + 0.13);
     cbp.Q.value = 0.7;
     const cg = ctx.createGain();
     cg.gain.setValueAtTime(0.0001, t);
@@ -377,10 +377,10 @@ export class GameAudio {
       const st = t + 0.02 + i * 0.016 + Math.random() * 0.012;
       const src = ctx.createBufferSource();
       src.buffer = this.noise;
-      src.playbackRate.value = 0.45 + Math.random() * 0.6 + cold * 0.25;
+      src.playbackRate.value = (0.45 + Math.random() * 0.6 + cold * 0.25) * pitch;
       const lp = ctx.createBiquadFilter();
       lp.type = 'lowpass';
-      lp.frequency.value = 520 + Math.random() * 500 + cold * 400;
+      lp.frequency.value = (520 + Math.random() * 500 + cold * 400) * pitch;
       const g = ctx.createGain();
       const peak = 0.3 * Math.pow(0.87, i) * (0.7 + Math.random() * 0.5);
       g.gain.setValueAtTime(0.0001, st);
@@ -396,7 +396,7 @@ export class GameAudio {
     // это придавливание, а не удар
     const o = ctx.createOscillator();
     o.type = 'sine';
-    o.frequency.setValueAtTime(58 + Math.random() * 8, t);
+    o.frequency.setValueAtTime((58 + Math.random() * 8) * pitch, t);
     const og = ctx.createGain();
     og.gain.setValueAtTime(0.0001, t);
     og.gain.linearRampToValueAtTime(0.22, t + 0.045);
@@ -495,6 +495,19 @@ export class GameAudio {
   shovelPlant() {
     if (!this.ctx) return;
     this.shovelDig();
+  }
+
+  // Кирка переиспользует врез лопаты, но более высокий тон читает металл.
+  pickaxeHit() {
+    this.shovelDig(1.35);
+  }
+
+  pickaxeTake() {
+    this.shovelTake();
+  }
+
+  pickaxePlant() {
+    this.shovelDig(1.2);
   }
 
   // ---------- топор и рубка ----------

@@ -9,12 +9,15 @@
 //
 //   0..3   seq   u32  номер записи, сквозной с первой ночи (1, 2, 3, ...)
 //   4..7   t     u32  секунд от эпохи мира (epoch, Unix-секунды в заголовке)
-//   8      kind  u8   вид записи (KIND)
+//   8      tag   u8   биты 0..3 - вид записи (KIND), бит 4 - резерв;
+//                     для DIG бит 5 - кирка,
+//                     биты 6..7 - материал 0..3; у других видов старшие биты 0
 //   9..15       7 байт полезной нагрузки, своей у каждого вида
 //
 // Нагрузка по видам:
 //
-//   DIG    9..10 i16 x, 11..12 i16 y, 13..14 i16 z - центр копка, шаг 2 см
+//   DIG    байт 8: бит 5 - кирка, биты 6..7 - материал удара;
+//          9..10 i16 x, 11..12 i16 y, 13..14 i16 z - центр копка, шаг 2 см
 //                (мир 400 м, i16 при 2 см держит +-655 м - с запасом);
 //          15    u8  бит 7 - знак (0 копок, 1 намыв), биты 4..6 - сила
 //                шагом 0.4, биты 0..3 - азимут штыка шагом 22.5 градуса.
@@ -43,6 +46,8 @@ export const KIND = { DIG: 1, CHOP: 2, FELL: 3, SPLIT: 4, FUEL: 5, PILE: 6 };
 const Q = 0.02; // шаг квантования центра копка, м
 const YAW_STEPS = 16; // делений азимута в 4 битах
 const STRENGTH_STEP = 0.4; // шаг силы в 3 битах (0 .. 2.8)
+const KIND_MASK = 0x0f;
+const PICKAXE_BIT = 0x20;
 
 const clampI16 = (v) => Math.max(-32768, Math.min(32767, v));
 
@@ -100,9 +105,11 @@ export class Journal {
     return o;
   }
 
-  /** Взмах лопаты: центр, азимут штыка, знак (-1 копок, +1 намыв), сила. */
-  dig(x, y, z, yaw, sign, strength, t) {
-    const o = this._head(KIND.DIG, t);
+  /** Правка инструментом: центр, азимут, знак, сила, материал и вид инструмента. */
+  dig(x, y, z, yaw, sign, strength, t, material = 0, tool = 'shovel') {
+    const m = Math.max(0, Math.min(3, material | 0));
+    const tag = KIND.DIG | (tool === 'pickaxe' ? PICKAXE_BIT : 0) | (m << 6);
+    const o = this._head(tag, t);
     this._view.setInt16(o + 9, clampI16(Math.round(x / Q)), true);
     this._view.setInt16(o + 11, clampI16(Math.round(y / Q)), true);
     this._view.setInt16(o + 13, clampI16(Math.round(z / Q)), true);
@@ -153,7 +160,8 @@ export class Journal {
   at(i) {
     const o = i * REC;
     const v = this._view;
-    const r = { seq: v.getUint32(o, true), t: v.getUint32(o + 4, true), kind: v.getUint8(o + 8) };
+    const tag = v.getUint8(o + 8);
+    const r = { seq: v.getUint32(o, true), t: v.getUint32(o + 4, true), kind: tag & KIND_MASK };
     if (r.kind === KIND.DIG) {
       r.x = v.getInt16(o + 9, true) * Q;
       r.y = v.getInt16(o + 11, true) * Q;
@@ -162,6 +170,8 @@ export class Journal {
       r.sign = b & 128 ? 1 : -1;
       r.strength = ((b >> 4) & 7) * STRENGTH_STEP;
       r.yaw = (b & 15) * ((Math.PI * 2) / YAW_STEPS);
+      r.material = tag >> 6;
+      r.tool = tag & PICKAXE_BIT ? 'pickaxe' : 'shovel';
     } else if (r.kind === KIND.CHOP) {
       r.id = v.getUint16(o + 9, true);
       r.hits = this._buf[o + 11];

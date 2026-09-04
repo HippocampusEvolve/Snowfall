@@ -10,8 +10,8 @@
 // Раскладка хранилища (база `snowfall`):
 //   world    - заголовок, одна запись: версия, эпоха, время сохранения,
 //              голова журнала, позиция, инструменты, поленья, поленница,
-//              топливо. То, чего мало и что меняется редко, живёт последним
-//              состоянием - записи под него не нужны.
+//              топливо и счётчики добытого. То, чего мало и что меняется
+//              редко, живёт последним состоянием - записи под него не нужны.
 //   journal  - сам журнал порциями по 4096 записей (ключ - номер порции):
 //              автосейв дописывает последнюю, а не переписывает всё.
 //   cache    - снимок вокселей и следов. Журнал - истина, снимок - КЭШ: если
@@ -25,6 +25,7 @@
 // и квота — сотни МБ против ~5 МБ. Смерть мир НЕ стирает. Сброс: кнопка в
 // меню (reset()) или открыть с ?reset.
 import { Journal, KIND } from './journal.js';
+import { MATERIAL } from './caves.js';
 import {
   regrowStage, healedHits, fuelAfter, trailFade, pitFill, PIT_DEPTH,
 } from './growth.js';
@@ -162,7 +163,7 @@ export function forestFrom(records, worldNow) {
 export class SaveGame {
   constructor({
     digger, footprints, campfire, player,
-    shovel = null, logs = null, axe = null, woodpile = null, lumber = null,
+    shovel = null, logs = null, axe = null, pickaxe = null, woodpile = null, lumber = null,
   }) {
     this.digger = digger;
     this.footprints = footprints;
@@ -171,6 +172,7 @@ export class SaveGame {
     this.shovel = shovel;
     this.logs = logs;
     this.axe = axe;
+    this.pickaxe = pickaxe;
     this.woodpile = woodpile;
     this.lumber = lumber;
     this.disabled = false; // взводит reset(): не дать автосейву записать мир обратно
@@ -190,15 +192,26 @@ export class SaveGame {
     // Прочитанная, но ещё не применённая рубка: лес приезжает по сети позже,
     // чем читается сейв (см. forestReady).
     this._forest = null;
+    this.mined = { soil: 0, stone: 0, ore: 0 };
     this._wire();
   }
 
-  // Мир сам рассказывает журналу, что с ним делают: копок, удар топором,
-  // полено в костре. Через колбэки, а не проверкой состояния по таймеру, —
+  // Мир сам рассказывает журналу, что с ним делают: копок, удар инструментом,
+  // полено в костре. Через колбэки, а не проверкой состояния по таймеру, -
   // иначе два копка между автосейвами слились бы в один.
   _wire() {
-    this.digger.onStroke = (c, yaw, sign, strength) => {
-      this.journal.dig(c.x, c.y, c.z, yaw, sign, strength);
+    this.digger.onStroke = (c, yaw, sign, strength, material = 0, tool = 'shovel') => {
+      this.journal.dig(c.x, c.y, c.z, yaw, sign, strength, undefined, material, tool);
+      if (sign < 0 && strength > 0) {
+        const name = material === MATERIAL.SOIL
+          ? 'soil'
+          : material === MATERIAL.STONE
+            ? 'stone'
+            : material === MATERIAL.ORE
+              ? 'ore'
+              : null;
+        if (name) this.mined[name]++;
+      }
     };
     if (this.lumber) {
       this.lumber.onEvent = (kind, p) => {
@@ -323,6 +336,12 @@ export class SaveGame {
   _apply(head, cache, debug = false) {
     const away = Math.max(0, nowSec() - (head.savedAt || nowSec()));
     const worldNow = this.journal.now();
+    const mined = head.mined || {};
+    this.mined = {
+      soil: Math.max(0, Math.floor(Number(mined.soil) || 0)),
+      stone: Math.max(0, Math.floor(Number(mined.stone) || 0)),
+      ore: Math.max(0, Math.floor(Number(mined.ore) || 0)),
+    };
 
     // ---- воксели: кэш, если он совпал с головой журнала, иначе воспроизведение
     const fill = pitFill(away);
@@ -367,6 +386,11 @@ export class SaveGame {
       this.axe.place(tools.axe.x, tools.axe.y, tools.axe.z, tools.axe.yaw || 0);
       if (tools.axe.held) this.axe.take();
     }
+    // кирка сохраняет и место в мире, и состояние в руке
+    if (this.pickaxe && tools.pickaxe) {
+      this.pickaxe.place(tools.pickaxe.x, tools.pickaxe.y, tools.pickaxe.z, tools.pickaxe.yaw || 0);
+      if (tools.pickaxe.held) this.pickaxe.take();
+    }
     // штабель поленницы — сколько было, столько и лежит
     if (this.woodpile && typeof head.pile === 'number') {
       this.woodpile.count = Math.min(head.pile, this.woodpile.capacity);
@@ -392,7 +416,8 @@ export class SaveGame {
         c.x = r.x;
         c.y = r.y;
         c.z = r.z;
-        this.digger.shovelStroke(c, r.yaw, r.sign, r.strength);
+        if (r.tool === 'pickaxe') this.digger.pickaxeStroke(c, r.strength, r.material);
+        else this.digger.shovelStroke(c, r.yaw, r.sign, r.strength, r.material);
       }
       if (fill < 1) this.digger.settle(fill, PIT_DEPTH);
     } finally {
@@ -439,7 +464,7 @@ export class SaveGame {
         forestV: FOREST_V,
         fuel: typeof d.fuel === 'number' ? d.fuel : 0.8,
         player: { x: d.px, y: d.py, z: d.pz, carry: d.carry ? 1 : 0 },
-        tools: { shovel: d.shv || null, axe: d.axe || null },
+        tools: { shovel: d.shv || null, axe: d.axe || null, pickaxe: null },
         logs: d.logs || [],
         pile: d.pile || 0,
       };
@@ -488,7 +513,7 @@ export class SaveGame {
         forestV: d.forestV,
         fuel: d.fuel,
         player: { x: d.px, y: d.py, z: d.pz, carry: d.carry },
-        tools: { shovel: d.shv || null, axe: d.axe || null },
+        tools: { shovel: d.shv || null, axe: d.axe || null, pickaxe: null },
         logs: d.logs || [],
         pile: d.pile || 0,
       };
@@ -532,9 +557,10 @@ export class SaveGame {
       forestV: FOREST_V,
       fuel: this.campfire.fuel,
       player: { x: p.x, y: p.y, z: p.z, carry: this.player.carrying ? 1 : 0 },
-      tools: { shovel: null, axe: null },
+      tools: { shovel: null, axe: null, pickaxe: null },
       logs: this.logs ? this.logs.serialize() : [],
       pile: this.woodpile ? this.woodpile.count : 0,
+      mined: { ...this.mined },
     };
     if (this.axe) {
       const a = this.axe.pos;
@@ -543,6 +569,10 @@ export class SaveGame {
     if (this.shovel) {
       const s = this.shovel.pos;
       head.tools.shovel = { x: s.x, y: s.y, z: s.z, yaw: this.shovel.yaw, held: this.shovel.held ? 1 : 0 };
+    }
+    if (this.pickaxe) {
+      const p = this.pickaxe.pos;
+      head.tools.pickaxe = { x: p.x, y: p.y, z: p.z, yaw: this.pickaxe.yaw, held: this.pickaxe.held ? 1 : 0 };
     }
     // Кэш вокселей: он ровно того возраста, что и голова журнала, — по этому
     // совпадению загрузка и решает, верить ему или воспроизводить копки.
@@ -668,6 +698,7 @@ export class SaveGame {
       } catch (e) { /* ignore */ }
     }
     this.journal = new Journal();
+    this.mined = { soil: 0, stone: 0, ore: 0 };
     this._wire();
   }
 
