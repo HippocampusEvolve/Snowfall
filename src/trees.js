@@ -1,199 +1,136 @@
 import * as THREE from 'three';
-import { createGLTFLoader } from './gltfload.js';
-import { asset } from './asset.js';
+import { material } from 'world-core/materials';
+import { matsets, prepareMatsets } from './matsets.js';
 import { snowTint } from './snowtint.js';
 import { createSpread } from './spread.js';
 import { createPlantScatter, cullThinCaveRoofs } from './planting.js';
+import { KINDS, VARIANTS, buildPine, kindOf, pineFoliageTexture, pineGeometry } from './pine.js';
+import { ROCK_VARIANTS, buildRock, rockGeometry } from './rock.js';
 
-// Лес: реалистичные сосны LOLIPOP (CC-BY, 15 вариантов × LOD0-2) + камни
-// Quaternius (CC0). Инстансинг по паре (вариант × LOD-кольцо): кольцо выбирается
-// по удалению точки от центра мира — игрок заперт в |x|,|z| ≤ 72 и почти всё
-// время у костра, так что статический LOD не «щёлкает» на ходу.
-// Снег на хвое/коре/камнях — snowTint, тени хвои — alpha-test depth-материал.
+// Лес кодом: сосны считает `pine.js` (ствол, мутовки, хвоя кистями), валуны -
+// `rock.js` (икосфера с шумом). Ни пака моделей, ни текстур с диска: 1.41 МБ
+// геометрии и шесть картинок ушли из входа целиком, а форма теперь правится
+// вместе с генератором, а не следующей закупкой ассетов.
+//
+// Инстансинг остался прежним: пара (вариант, кольцо LOD) -> InstancedMesh.
+// Кольцо выбирается по удалению точки от центра мира - игрок заперт в
+// |x|,|z| <= 72 и почти всё время у костра, так что статический LOD не
+// «щёлкает» на ходу.
+// Снег на хвое/коре/камнях - snowTint, тени хвои - alpha-test depth-материал.
 
 const LOD_RINGS = [40, 85]; // ближе 40 м — LOD0, до 85 — LOD1, дальше — LOD2
 
-// рост и радиус ствола (доля от роста) по типу сосны
-const KINDS = [
-  { re: /^Pine_big_/, h: [10.5, 13.5], trunk: 0.045 },
-  { re: /^Pine_large_/, h: [12, 15.5], trunk: 0.05 },
-  { re: /^Pine_medium_/, h: [7.5, 10.5], trunk: 0.042 },
-  { re: /^Pine_small_/, h: [5, 7.5], trunk: 0.04 },
-  { re: /^Pine_sapling_/, h: [1.7, 3.2], trunk: 0 }, // подлесок: проходим насквозь, но рубится с одного удара
-];
+export { KINDS };
 
-const ROCKS = ['Rock_1', 'Rock_2', 'Rock_3', 'Rock_4', 'Rock_5'];
+// Семя вариантов: сдвиг в этом числе - это ПЕРЕСЕВ ФОРМЫ всех сосен мира.
+// Рост и места не трогает (их считает planting.js), но менять без нужды не
+// стоит: игрок узнаёт свою поляну в лицо.
+const PINE_SHAPE_SEED = 20260904;
 
-// Билборды (LOD3) и служебные узлы вычищены из самого ассета при оптимизации
-// (см. CREDITS.md), но фильтр оставлен как страховка на случай замены пака.
-async function loadPinesScene() {
-  const json = await (await fetch(asset('models/pines/scene.gltf'))).json();
-  const drop = new Set();
-  json.nodes.forEach((n, i) => {
-    if (/Billboard|^Back$|^Ref_plane$/i.test(n.name || '')) drop.add(i);
-  });
-  for (const n of json.nodes) {
-    if (n.children) n.children = n.children.filter((c) => !drop.has(c));
-  }
-  for (const s of json.scenes) s.nodes = s.nodes.filter((c) => !drop.has(c));
-  const gltf = await createGLTFLoader().parseAsync(JSON.stringify(json), asset('models/pines/'));
-  return gltf.scene;
-}
-
-// Разбираем сцену пака на варианты: имя → геометрии LOD0-2 (кора + хвоя)
-// в мировом пространстве пака + матрица нормализации (низ y=0, центр XZ в
-// нуле, высота = 1). Матрица одна на вариант (по LOD0) — LOD-ы совмещены.
-async function collectPineVariants(root, breathe) {
-  root.updateMatrixWorld(true);
-  const byName = new Map();
-  // Сперва отбираем узлы, потом разбираем их с выдохами: разбор одного
-  // LOD-узла - это клон геометрии с прогоном матрицы по каждой вершине, и
-  // пятнадцать вариантов по три кольца подряд держали поток одним куском.
-  const lodNodes = [];
-  root.traverse((node) => {
-    const m = node.name.match(/^(Pine_[a-z]+_\d+)_LOD(\d+)$/);
-    if (m) lodNodes.push([node, m]);
-  });
-  for (const [node, m] of lodNodes) {
+/** Три LOD одного варианта плюс радиус кроны, посчитанные от семени. */
+async function makeVariant(THREE_, name, i, breathe) {
+  const seed = PINE_SHAPE_SEED + i * 977;
+  const lods = [];
+  for (const lod of [0, 1, 2]) {
+    // Стык на каждый LOD, а не на вариант: пятнадцать вариантов подряд держали
+    // поток одной задачей (замер китом входа 04.09.2026).
     await breathe();
-    const [, vname, lodS] = m;
-    let v = byName.get(vname);
-    if (!v) {
-      v = { name: vname, lods: [], kind: KINDS.find((k) => k.re.test(vname)) };
-      byName.set(vname, v);
-    }
-    const lod = { bark: null, clusters: null };
-    node.traverse((child) => {
-      if (!child.isMesh) return;
-      const geo = child.geometry.clone().applyMatrix4(child.matrixWorld);
-      if (/bark/i.test(child.material.name)) lod.bark = geo;
-      else lod.clusters = geo;
+    const p = buildPine(seed, lod, name);
+    lods.push({
+      bark: pineGeometry(THREE_, p.bark),
+      clusters: pineGeometry(THREE_, p.needles),
+      built: p,
     });
-    v.lods[+lodS] = lod;
   }
-
-  const variants = [...byName.values()].filter((v) => v.lods[0] && v.kind);
-  for (const v of variants) {
-    await breathe();
-    const box = new THREE.Box3();
-    for (const geo of [v.lods[0].bark, v.lods[0].clusters]) {
-      if (!geo) continue;
-      geo.computeBoundingBox();
-      box.union(geo.boundingBox);
-    }
-    const height = Math.max(box.max.y - box.min.y, 1e-3);
-    // Радиус кроны в долях от роста: сосна ставится с произвольным поворотом,
-    // поэтому берём больший из полуразмеров по x/z - получается круг, который
-    // крону гарантированно накрывает при любом повороте. Нужен, чтобы
-    // отбраковать сосну, влезшую ветками в постройку (см. cull).
-    v.crown = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2 / height;
-    v.pre = new THREE.Matrix4()
-      .makeScale(1 / height, 1 / height, 1 / height)
-      .multiply(
-        new THREE.Matrix4().makeTranslation(
-          -(box.min.x + box.max.x) / 2,
-          -box.min.y,
-          -(box.min.z + box.max.z) / 2
-        )
-      );
-  }
-  return variants;
+  return { name, kind: kindOf(name), lods, crown: lods[0].built.crown };
 }
 
-// Собираем геометрии одного камня в root-пространстве + матрица нормализации
-// (низ на y=0, центр в нуле, максимальный размер = 1).
-function prepareRock(node) {
-  const geos = [];
-  node.traverse((child) => {
-    if (!child.isMesh) return;
-    geos.push(child.geometry.clone().applyMatrix4(child.matrixWorld));
-  });
-  const box = new THREE.Box3();
-  for (const g of geos) {
-    g.computeBoundingBox();
-    box.union(g.boundingBox);
-  }
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const s = 1 / Math.max(size.x, size.y, size.z, 1e-3);
-  const pre = new THREE.Matrix4()
-    .makeScale(s, s, s)
-    .multiply(
-      new THREE.Matrix4().makeTranslation(
-        -(box.min.x + box.max.x) / 2,
-        -box.min.y,
-        -(box.min.z + box.max.z) / 2
-      )
-    );
-  return { geos, pre };
-}
-
-export async function createTrees(terrain, count = 170, rockCount = 45, avoid = [], caves = null) {
+export async function createTrees(
+  terrain,
+  count = 170,
+  rockCount = 45,
+  avoid = [],
+  caves = null,
+  workGate = Promise.resolve()
+) {
   // Лес собирается за уже открытым меню, и одним куском его собирать нельзя:
-  // разбор пака, нормализация пятнадцати вариантов и раскладка двух сотен
-  // инстансов держали поток 619 мс подряд. Стыки ниже (`await breathe()`) —
-  // места, где сборку можно отпустить, не разорвав ни одного этапа.
+  // пятнадцать вариантов по три кольца и две сотни инстансов держали поток
+  // сотнями миллисекунд. Стыки ниже (`await breathe()`) - места, где сборку
+  // можно отпустить, не разорвав ни одного этапа.
   const breathe = createSpread();
   const group = new THREE.Group();
   const obstacles = [];
   const pines = []; // рубимые сосны — записи для lumber.js
   const layout = createPlantScatter({ avoid });
 
-  const [pineScene, rockScene] = await Promise.all([
-    loadPinesScene(),
-    createGLTFLoader()
-      .loadAsync(asset('models/nature/rocks.glb'))
-      .then((g) => g.scene),
-  ]);
+  // кора и щебень печёт ядро в воркерах; кора к этому времени обычно уже готова
+  // Ворота: лес ждёт первого кадра. У избы ворота стоят на компиляторе - ей
+  // ещё ехать по сети, и ожидание прячется за загрузкой. У леса сети больше
+  // нет вовсе, и без ворот счёт пятнадцати вариантов лёг бы прямо в
+  // критический путь входа - четверть секунды до первого кадра.
+  await Promise.resolve(workGate);
+  const setsReady = prepareMatsets('bark', 'rubble');
 
-  await breathe();
-  const variants = await collectPineVariants(pineScene, breathe);
-  await breathe();
-  rockScene.updateMatrixWorld(true);
+  const variants = [];
+  for (let i = 0; i < VARIANTS.length; i++) {
+    variants.push(await makeVariant(THREE, VARIANTS[i], i, breathe));
+  }
   const rocks = [];
-  for (const n of ROCKS) {
-    rocks.push(prepareRock(rockScene.getObjectByName(n)));
+  for (let i = 0; i < ROCK_VARIANTS; i++) {
     await breathe();
+    rocks.push(rockGeometry(THREE, buildRock(PINE_SHAPE_SEED + 31 * (i + 1))));
   }
 
   // ---- материалы ----
-  // Кора и хвоя — PBR-материалы из пака (общие на все варианты). Хвою переводим
-  // из BLEND в alpha-test: с инстансингом и сотней крон сортировка прозрачности
-  // безнадёжна, а маска даёт чёткий контур и честный depth.
-  let barkMat = null;
-  let clustersMat = null;
-  pineScene.traverse((c) => {
-    if (!c.isMesh) return;
-    if (/bark/i.test(c.material.name)) barkMat ??= c.material;
-    else if (/clusters/i.test(c.material.name)) clustersMat ??= c.material;
-  });
+  await setsReady;
+  await breathe();
+  const sets = matsets('bark', 'rubble');
+  // Кора тёмная: светлая читалась издали белым столбом сквозь крону.
+  const barkMat = snowTint(
+    material(sets.bark, { normalScale: 1.4, color: 0x4a4136, roughness: 1 }),
+    '0.62, 0.68, 0.84',
+    0.35,
+    0.5
+  );
 
-  clustersMat.transparent = false;
-  clustersMat.alphaTest = 0.45;
-  clustersMat.depthWrite = true;
-  snowTint(clustersMat, '0.72, 0.78, 0.92', 0.8, 0.08);
-  snowTint(barkMat, '0.62, 0.68, 0.84', 0.45, 0.45);
+  // Хвоя: одна канва 256x256 на весь лес (кисть иголок слева, силуэт для
+  // LOD2-креста справа). Прозрачность через alphaTest, а не BLEND: с
+  // инстансингом и сотней крон сортировка прозрачности безнадёжна, а маска
+  // даёт чёткий контур и честный depth.
+  const foliage = pineFoliageTexture(THREE);
+  const clustersMat = snowTint(
+    new THREE.MeshStandardMaterial({
+      map: foliage,
+      // ночная хвоя: тёмная и холодная. Светлый оттенок под лунным светом
+      // выцветал в серый, и крона теряла глубину.
+      color: 0x7f9c8e,
+      roughness: 0.95,
+      metalness: 0,
+      alphaTest: 0.45,
+      side: THREE.DoubleSide,
+    }),
+    '0.80, 0.86, 0.98',
+    0.5,
+    0.52
+  );
 
   // тени хвои: depth-материал с той же маской, иначе тень — сплошная карточка
   const clustersDepth = new THREE.MeshDepthMaterial({
     depthPacking: THREE.RGBADepthPacking,
-    map: clustersMat.map,
+    map: foliage,
     alphaTest: 0.45,
   });
 
   // камни почти целиком под снегом: шапка сверху, иней на боках — отрицательный
-  // порог тянет налёт за горизонталь, голым остаётся только низ. Лоу-поли стиль
-  // Quaternius под таким слоем не читается.
+  // порог тянет налёт за горизонталь, голым остаётся только низ.
   const rockMat = snowTint(
-    new THREE.MeshStandardMaterial({ color: 0x2c3342, roughness: 0.95 }),
+    material(sets.rubble, { normalScale: 1.2, color: 0x6d7488, repeat: [1.6, 1.6] }),
     '0.58, 0.63, 0.76',
     0.95,
     -0.9
   );
 
   // ---- раскладка позиций ----
-  // Плотность леса — низкочастотное поле по координатам: где значение высокое,
-  // сосны встают часто (чаща), где низкое — кандидаты отсеиваются (прогалина).
   await breathe();
 
   // Опора по МИНИМУМУ рельефа под пятном основания: на склоне высота в центре
@@ -209,6 +146,10 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   };
 
   const dummy = new THREE.Object3D();
+  // Геометрия сосны уже нормирована самим генератором (основание в нуле, рост
+  // ровно 1), поэтому матрица нормализации - единичная. Поле оставлено: на нём
+  // держится контракт записи с `lumber.js`.
+  const PRE = new THREE.Matrix4();
   const inst = new THREE.Matrix4();
 
   // ---- сосны: группируем места по (вариант, LOD-кольцо) ----
@@ -256,7 +197,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       dummy.rotation.set(0, pose.yaw, 0);
       dummy.scale.set(s * j, s, s * j);
       dummy.updateMatrix();
-      inst.multiplyMatrices(dummy.matrix, v.pre);
+      inst.multiplyMatrices(dummy.matrix, PRE);
       meshes.forEach((m) => m.setMatrixAt(i, inst));
       // столб коллайдера — только у взрослых сосен; сквозь подлесок ходим
       let ob = null;
@@ -279,7 +220,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
         sapling: !ob,
         parts: meshes.map((m) => ({ mesh: m, i })),
         base: dummy.matrix.clone(),
-        pre: v.pre,
+        pre: PRE,
       });
     });
     meshes.forEach((m) => {
@@ -295,15 +236,12 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   rockSpots.forEach((sp, i) => perRock[i % rocks.length].push(sp));
   for (let ri = 0; ri < rocks.length; ri++) {
     await breathe();
-    const rock = rocks[ri];
     const list = perRock[ri];
     if (!list.length) continue;
-    const meshes = rock.geos.map((geo) => {
-      const m = new THREE.InstancedMesh(geo, rockMat, list.length);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      return m;
-    });
+    const mesh = new THREE.InstancedMesh(rocks[ri], rockMat, list.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    const meshes = [mesh];
     list.forEach(([x, z], i) => {
       const pose = layout.rockPose();
       const s = pose.size;
@@ -313,8 +251,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       dummy.rotation.set(0, pose.yaw, 0);
       dummy.scale.set(s * pose.scaleX, s, s * pose.scaleZ);
       dummy.updateMatrix();
-      inst.multiplyMatrices(dummy.matrix, rock.pre);
-      meshes.forEach((m) => m.setMatrixAt(i, inst));
+      meshes.forEach((m) => m.setMatrixAt(i, dummy.matrix));
       let ob = null;
       if (s > 0.8) {
         ob = { x, z, r: s * 0.5 };

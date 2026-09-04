@@ -11,8 +11,7 @@
 Коротко:
 
 - «Scandinavian Log Cabin» by rivetech — CC-BY-4.0
-- «Pine trees pack» by LOLIPOP — CC-BY-4.0
-- Камни Quaternius — CC0
+- Сосны и валуны - процедурные, без внешних источников
 - Пропсы и текстуры снега Poly Haven — CC0
 
 Модели пережаты для веба (WebP-текстуры + Draco-геометрия, gltf-transform);

@@ -1042,6 +1042,13 @@ function unveilWorld() {
 // байту в минуту). `allSettled` такого не ловит, и туман остался бы навсегда.
 setTimeout(unveilWorld, 15000);
 
+// Ворота отделки, которую можно считать только ПОСЛЕ первого кадра. Изба
+// ждёт компилятора (`coreSceneCompiled`) - ей ещё ехать по сети, и ожидание
+// прячется за загрузкой. У леса сети больше нет вовсе: сосны считаются кодом
+// и без ворот начали бы считаться прямо в критическом пути входа.
+let openWorldGate;
+const worldReady = new Promise((resolve) => { openWorldGate = resolve; });
+
 let warmed = false;
 function warmUp() {
   if (warmed) return;
@@ -1092,6 +1099,7 @@ function warmUp() {
     // длинную задачу. Меню получает отдельную очередь для первого ввода.
     await nextTask();
     startLoop();
+    openWorldGate(); // первый кадр показан - лес может считаться
     keepOffline(); // следующий приход в мир — без сети (offline.js)
     digger.bakeMaterialSets(); // наборы среза (камень, грунт, руда) уже при живом мире
     // Прогрев мира, собранного кодом: порциями по кадрам, при живом меню.
@@ -1121,7 +1129,7 @@ let dressed = null; // последняя волна: мебель внутри 
   const breathe = createSpread();
   const [cabinRes, treesRes] = await Promise.allSettled([
     createCabin(terrain, CABIN, coreSceneCompiled).then((v) => (mark('изба собрана'), v)),
-    createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }], caves)
+    createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }], caves, worldReady)
       .then((v) => (mark('лес собран'), v)),
   ]);
 
@@ -1131,6 +1139,9 @@ let dressed = null; // последняя волна: мебель внутри 
     snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
     await breathe();
     for (const light of cabinLightSlots) scene.remove(light);
+    // та же причина, что у леса: волна не должна попасть в чужой кадр целиком
+    cabin.group.visible = false;
+    cabin.group.userData.bootDeferredRoot = true;
     scene.add(cabin.group);
     // мебель внутри дома приезжает своей волной; её коллайдеры — следом
     dressed = cabin.dressed.then((late) => {
@@ -1160,6 +1171,15 @@ let dressed = null; // последняя волна: мебель внутри 
     saver.forestReady();
     colliders.push(...trees.obstacles);
     await breathe();
+    // Лес въезжает НЕВИДИМЫМ, как предметы переднего плана на старте: пока
+    // сосны считались паком, они доезжали позже прогрева и попадали в свою
+    // порцию. Считаясь кодом, лес готов уже к 2.1 с - ровно посреди первого
+    // прогрева, - и первый же его кадр компилировал ВЕСЬ лес разом (1616 мс
+    // одной задачей, замер китом входа 04.09.2026). Пометка `bootDeferredRoot`
+    // отдаёт группу порционному прогреву: он сам откроет её и оплатит
+    // программы порциями (см. warmSceneSpread).
+    trees.group.visible = false;
+    trees.group.userData.bootDeferredRoot = true;
     scene.add(trees.group);
   } else {
     console.warn('лес не приехал:', treesRes.reason);
