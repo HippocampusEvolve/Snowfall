@@ -3,6 +3,13 @@ import { SNOW_CONST, createDiggerMaterial } from './snowmaterial.js';
 import { PIT_DEPTH } from './growth.js';
 import { compose, DEPTH_MIN, Y_FLOOR } from './caves.js';
 import { meshChunk, VN, VS, SW } from './mesher.worker.js';
+import {
+  CAVE_LOAD_RADIUS,
+  SURFACE_LOAD_RADIUS,
+  chunkLoadRadius,
+  chunkKeepRadius,
+  mergeChunkParts,
+} from './cavebudget.js';
 
 // Воксельный объём мира: природные пещеры от семени плюс раскоп игрока.
 //
@@ -35,11 +42,10 @@ const CORE = 0.6; // доля радиуса с полной силой, дал�
 const EDGE_BLEND = 0.6; // ширина сшивки с мешем террейна у границы чанка, м
 const SKIRT = 0.35; // юбка по периметру выреза: лента вниз от кромки меша, м
 
-// Потоковая загрузка: радиус жизни чанков и гистерезис выгрузки. Гистерезис
-// нужен, чтобы игрок, топчущийся на самой кромке, не гонял туда-сюда мешинг
-// одной и той же колонки.
-const R_LOAD = 40;
-const R_KEEP = R_LOAD + 8;
+// Подземные части дальше 24 м не видны сквозь грунт. Приповерхностные части и
+// правки игрока остаются на прежних 40 м. У обоих радиусов есть одинаковый
+// гистерезис выгрузки, чтобы прогулка по кромке не гоняла мешинг туда-сюда.
+const R_LOAD = SURFACE_LOAD_RADIUS;
 const INSTALL_PER_FRAME = 2; // готовых чанков в кадр (см. рамку 4 мс на чанк)
 const PLAN_PER_FRAME = 4; // колонок, разбираемых на чанки за кадр
 
@@ -82,7 +88,11 @@ export class Digger {
     this.caves = caves;
 
     this.edits = new Map(); // key(ix,iy,iz) -> накопленная дельта плотности
-    this.chunks = new Map(); // key(cx,cy,cz) -> THREE.Mesh (только непустые)
+    // Один Mesh на колонку, а не на каждый вертикальный чанк. Части воркера
+    // хранятся отдельно и при установке склеиваются чистой mergeChunkParts.
+    // null означает, что чанк посчитан и оказался пустым: повторно его не мешим.
+    this._parts = new Map(); // key(cx,cy,cz): буферы воркера | null
+    this.chunks = new Map(); // colKey(cx,cz): THREE.Mesh
     // colKey(cx,cz) -> {h, hMin, hMax} — кэш baseHeight по узлам колонки чанков
     // (сетка SW² с кольцом в один сэмпл: кольцо уезжает в воркер под градиент).
     // Рельеф статичен → кэш вечный, но при выгрузке колонки он тоже уходит,
@@ -422,36 +432,41 @@ export class Digger {
       (ed && edHi >= bandLo && edLo <= bandHi) || this._caveNear(cx, cz, bandLo, bandHi);
 
     const set = new Set();
+    const wide = new Set(); // приповерхностные и правленые чанки живут до 40 м
     const cyTop = Math.floor(bandHi / CHUNK);
     const cyBottom = Math.min(CY_FLOOR, ed ? Digger._cmin(ed.jmin) : CY_FLOOR);
     for (let cy = cyBottom; cy <= cyTop; cy++) {
       const lo = cy * CHUNK, hi = (cy + 1) * CHUNK;
       const nearSurface = hi > bandLo && lo < bandHi;
       if (nearSurface) {
-        if (cut) set.add(cy); // разрезанная колонка мостится целиком
+        if (cut) {
+          set.add(cy); // разрезанная колонка мостится целиком
+          wide.add(cy);
+        }
         continue;
       }
       if (lo > bandHi) continue; // выше рельефа мешить нечего
       const hasEdit = ed && edHi >= lo - VS && edLo <= hi + VS;
-      if (hasEdit || this._caveNear(cx, cz, lo, hi)) set.add(cy);
+      if (hasEdit || this._caveNear(cx, cz, lo, hi)) {
+        set.add(cy);
+        if (hasEdit) wide.add(cy);
+      }
     }
 
     // Раскладка могла смениться (правка открыла или закрыла чанк) - меши,
     // которым в ней больше нет места, надо снять со сцены: иначе колонка,
     // перестав резать террейн, оставила бы вторую поверхность поверх первой.
+    let dropped = false;
     for (let cy = cyBottom - 1; cy <= cyTop + 1; cy++) {
       if (set.has(cy)) continue;
       const k = key(cx, cy, cz);
-      const m = this.chunks.get(k);
-      if (!m) continue;
-      this.group.remove(m);
-      m.geometry.dispose();
-      this.chunks.delete(k);
-      this._ver.set(k, (this._ver.get(k) || 0) + 1);
+      if (this._parts.has(k)) dropped = true;
+      this._retire(k);
     }
 
-    const plan = { cut, set };
+    const plan = { cut, set, wide };
     this._plan.set(ck, plan);
+    if (dropped) this._rebuildColumn(ck);
     if (cut) {
       if (!this._cutCols.has(ck)) { this._cutCols.add(ck); this._covDirty = true; }
     } else if (this._cutCols.delete(ck)) this._covDirty = true;
@@ -494,6 +509,58 @@ export class Digger {
     return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits };
   }
 
+  // Снять рассчитанную часть и отменить ещё не начатое задание. Результат уже
+  // идущего задания протухает по версии и будет отброшен при возвращении.
+  _retire(k) {
+    const changed = this._parts.delete(k);
+    this._ver.set(k, (this._ver.get(k) || 0) + 1);
+    if (this._queued.delete(k)) {
+      const i = this._queue.indexOf(k);
+      if (i >= 0) this._queue.splice(i, 1);
+    }
+    return changed;
+  }
+
+  // Собрать все готовые вертикальные части в одну геометрию колонки. Индексы
+  // частей независимы, mergeChunkParts сдвигает их на число прежних вершин.
+  _rebuildColumn(ck) {
+    const old = this.chunks.get(ck);
+    const plan = this._plan.get(ck);
+    const parts = [];
+    if (plan) {
+      const cx = unX(ck), cz = unZ(ck);
+      for (const cy of plan.set) {
+        const k = key(cx, cy, cz);
+        if (this._parts.has(k)) parts.push(this._parts.get(k));
+      }
+    }
+    const out = mergeChunkParts(parts);
+    if (!out) {
+      if (old) {
+        this.group.remove(old);
+        old.geometry.dispose();
+        this.chunks.delete(ck);
+      }
+      return;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(out.position, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(out.normal, 3));
+    geo.setIndex(new THREE.BufferAttribute(out.index, 1));
+    // Все части уже в мировых координатах, матрица меша единичная.
+    geo.computeBoundingSphere();
+    if (old) {
+      old.geometry.dispose();
+      old.geometry = geo;
+    } else {
+      const mesh = new THREE.Mesh(geo, this.material);
+      mesh.castShadow = mesh.receiveShadow = true;
+      this.chunks.set(ck, mesh);
+      this.group.add(mesh);
+    }
+  }
+
   _onWorkerMessage(i, msg) {
     if (msg.kind === 'ready') return;
     this._busy[i] = null;
@@ -526,32 +593,18 @@ export class Digger {
   // мешинг) выбрасывается по счётчику версии.
   _install(msg) {
     const k = key(msg.cx, msg.cy, msg.cz);
-    if (msg.ver !== this._ver.get(k)) return;
-    const old = this.chunks.get(k);
-    if (msg.empty) {
-      if (old) {
-        this.group.remove(old);
-        old.geometry.dispose();
-        this.chunks.delete(k);
-      }
+    if (msg.ver !== this._ver.get(k)) {
+      // Чанк мог выйти за радиус, пока воркер его считал, а затем снова войти.
+      // После отброса старого результата сразу восстанавливаем нужное задание.
+      if (this._lastPlanAt) this._syncColumn(colKey(msg.cx, msg.cz), this._lastPlanAt);
       return;
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(msg.position, 3));
-    geo.setAttribute('normal', new THREE.BufferAttribute(msg.normal, 3));
-    geo.setIndex(new THREE.BufferAttribute(msg.index, 1));
-    // позиции в мировых координатах, матрица меша единичная — сфера честная;
-    // считаем её здесь, чтобы чанк проходил frustum culling (камеры И теней)
-    geo.computeBoundingSphere();
-    if (old) {
-      old.geometry.dispose();
-      old.geometry = geo;
-    } else {
-      const mesh = new THREE.Mesh(geo, this.material);
-      mesh.castShadow = mesh.receiveShadow = true;
-      this.chunks.set(k, mesh);
-      this.group.add(mesh);
-    }
+    this._parts.set(k, msg.empty ? null : {
+      position: msg.position,
+      normal: msg.normal,
+      index: msg.index,
+    });
+    this._rebuildColumn(colKey(msg.cx, msg.cz));
   }
 
   /**
@@ -564,18 +617,15 @@ export class Digger {
    */
   update(pos) {
     if (this._quiet) return;
-    this._stream(pos);
+    const streamed = this._stream(pos);
 
     // разобрать несколько колонок из очереди
     for (let n = 0; n < PLAN_PER_FRAME && this._colQueue.length; n++) {
       const ck = this._colQueue.shift();
       this._colQueued.delete(ck);
       const cx = unX(ck), cz = unZ(ck);
-      const { set } = this._columnPlan(cx, cz);
-      for (const cy of set) {
-        const k = key(cx, cy, cz);
-        if (!this.chunks.has(k)) this._enqueue(k);
-      }
+      this._columnPlan(cx, cz);
+      this._syncColumn(ck, pos);
     }
 
     this._pump();
@@ -590,15 +640,38 @@ export class Digger {
       this._updateCoverage();
       installed++;
     }
-    if (installed && this.onChanged) this.onChanged();
+    if ((installed || streamed) && this.onChanged) this.onChanged();
   }
 
-  // Колонки в радиусе R_LOAD ставятся в очередь, за R_KEEP — выгружаются.
+  // Синхронизировать части колонки с двумя радиусами. В полосе гистерезиса
+  // готовая часть остаётся, но новая ещё не загружается.
+  _syncColumn(ck, pos) {
+    const plan = this._plan.get(ck);
+    if (!plan) return false;
+    const cx = unX(ck), cz = unZ(ck);
+    const d = Math.hypot((cx + 0.5) * CHUNK - pos.x, (cz + 0.5) * CHUNK - pos.z);
+    let changed = false;
+    for (const cy of plan.set) {
+      const k = key(cx, cy, cz);
+      const wide = plan.wide.has(cy);
+      if (d <= chunkLoadRadius(wide)) {
+        if (!this._parts.has(k) && !this._queued.has(k) && !this._busy.includes(k)) this._enqueue(k);
+      } else if (d > chunkKeepRadius(wide)) {
+        if (this._retire(k)) changed = true;
+      }
+    }
+    if (changed) this._rebuildColumn(ck);
+    return changed;
+  }
+
+  // Колонки ищутся в радиусе 40 м: только так находятся устья и вырезы.
+  // Полностью подземные части внутри них загружаются лишь в радиусе 24 м.
   _stream(pos) {
-    if (!pos) return;
+    if (!pos) return false;
     if (this._lastPlanAt && Math.hypot(pos.x - this._lastPlanAt.x, pos.z - this._lastPlanAt.z) < 2)
-      return;
+      return false;
     this._lastPlanAt = { x: pos.x, z: pos.z };
+    let changed = false;
 
     const c0x = Math.floor(pos.x / CHUNK), c0z = Math.floor(pos.z / CHUNK);
     const rad = Math.ceil(R_LOAD / CHUNK);
@@ -619,36 +692,40 @@ export class Digger {
       return da - db;
     });
 
-    // выгрузка: правки остаются в edits, уходят только меши и кэши колонки
+    // Правки остаются в edits. Глубокие части уходят за 32 м, приповерхностные
+    // за 48 м. Если широких частей в плане нет, вместе с глубокими уходит кэш.
     for (const ck of [...this._plan.keys()]) {
       const d = Math.hypot((unX(ck) + 0.5) * CHUNK - pos.x, (unZ(ck) + 0.5) * CHUNK - pos.z);
-      if (d <= R_KEEP) continue;
-      this._unloadColumn(ck);
+      const plan = this._plan.get(ck);
+      const keep = plan.wide.size ? chunkKeepRadius(true) : chunkKeepRadius(false);
+      if (d > keep) {
+        if (this._unloadColumn(ck)) changed = true;
+      } else if (this._syncColumn(ck, pos)) changed = true;
     }
+    return changed;
   }
 
   _unloadColumn(ck) {
     const plan = this._plan.get(ck);
+    let changed = false;
     if (plan) {
       const cx = unX(ck), cz = unZ(ck);
       for (const cy of plan.set) {
         const k = key(cx, cy, cz);
-        const m = this.chunks.get(k);
-        if (m) {
-          this.group.remove(m);
-          m.geometry.dispose();
-          this.chunks.delete(k);
-        }
-        this._ver.set(k, (this._ver.get(k) || 0) + 1); // задания в полёте протухли
-        if (this._queued.delete(k)) {
-          const i = this._queue.indexOf(k);
-          if (i >= 0) this._queue.splice(i, 1);
-        }
+        if (this._retire(k)) changed = true;
       }
+    }
+    const m = this.chunks.get(ck);
+    if (m) {
+      this.group.remove(m);
+      m.geometry.dispose();
+      this.chunks.delete(ck);
+      changed = true;
     }
     this._plan.delete(ck);
     this._heightCache.delete(ck);
     if (this._cutCols.delete(ck)) this._covDirty = true;
+    return changed;
   }
 
   // перестроить чанки, затронутые правкой в диапазоне воксельных индексов:
@@ -658,10 +735,13 @@ export class Digger {
     if (this._quiet) return; // воспроизведение журнала поставит всё разом в конце
     for (let cz = Digger._cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
       for (let cx = Digger._cmin(imin); cx <= Math.floor(imax / VN); cx++) {
-        const { set } = this._columnPlan(cx, cz);
+        const { set, wide } = this._columnPlan(cx, cz);
         // правка могла и открыть новые чанки, и попасть в уже размеченные
         const jlo = Digger._cmin(jmin), jhi = Math.floor(jmax / VN);
-        for (let cy = jlo; cy <= jhi; cy++) set.add(cy);
+        for (let cy = jlo; cy <= jhi; cy++) {
+          set.add(cy);
+          wide.add(cy);
+        }
         for (const cy of set) this._enqueue(key(cx, cy, cz), true);
       }
     }

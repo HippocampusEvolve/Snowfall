@@ -3,6 +3,7 @@ import { createGLTFLoader } from './gltfload.js';
 import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
 import { createSpread } from './spread.js';
+import { createPlantScatter, cullThinCaveRoofs } from './planting.js';
 
 // Лес: реалистичные сосны LOLIPOP (CC-BY, 15 вариантов × LOD0-2) + камни
 // Quaternius (CC0). Инстансинг по паре (вариант × LOD-кольцо): кольцо выбирается
@@ -11,20 +12,6 @@ import { createSpread } from './spread.js';
 // Снег на хвое/коре/камнях — snowTint, тени хвои — alpha-test depth-материал.
 
 const LOD_RINGS = [40, 85]; // ближе 40 м — LOD0, до 85 — LOD1, дальше — LOD2
-
-// Лес детерминирован (mulberry32 от константы): одна и та же раскладка каждую
-// ночь. Иначе «мир копится» ломается — сваленное дерево не найти после
-// перезагрузки, если сосны пересеялись по новым местам.
-const FOREST_SEED = 20260706; // день, когда началась эта ночь
-function mulberry32(a) {
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 // рост и радиус ствола (доля от роста) по типу сосны
 const KINDS = [
@@ -141,7 +128,7 @@ function prepareRock(node) {
   return { geos, pre };
 }
 
-export async function createTrees(terrain, count = 170, rockCount = 45, avoid = []) {
+export async function createTrees(terrain, count = 170, rockCount = 45, avoid = [], caves = null) {
   // Лес собирается за уже открытым меню, и одним куском его собирать нельзя:
   // разбор пака, нормализация пятнадцати вариантов и раскладка двух сотен
   // инстансов держали поток 619 мс подряд. Стыки ниже (`await breathe()`) —
@@ -150,7 +137,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   const group = new THREE.Group();
   const obstacles = [];
   const pines = []; // рубимые сосны — записи для lumber.js
-  const rand = mulberry32(FOREST_SEED);
+  const layout = createPlantScatter({ avoid });
 
   const [pineScene, rockScene] = await Promise.all([
     loadPinesScene(),
@@ -207,31 +194,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   // ---- раскладка позиций ----
   // Плотность леса — низкочастотное поле по координатам: где значение высокое,
   // сосны встают часто (чаща), где низкое — кандидаты отсеиваются (прогалина).
-  // Детерминировано (чистая функция координат) — чащи каждую ночь на своих местах.
-  const density = (x, z) =>
-    0.52 +
-    0.3 * Math.sin(x * 0.043 + 1.7) * Math.cos(z * 0.037 - 0.8) +
-    0.24 * Math.sin((x - z) * 0.021 + 0.5);
-
   await breathe();
-
-  const placed = [];
-  const scatter = (n, rMin, rMax, minGap2, dens = null) => {
-    const out = [];
-    let guard = 0;
-    while (out.length < n && guard++ < n * 40) {
-      const a = rand() * Math.PI * 2;
-      const r = rMin + Math.pow(rand(), 0.7) * (rMax - rMin);
-      const x = Math.cos(a) * r;
-      const z = Math.sin(a) * r;
-      if (dens && rand() >= dens(x, z)) continue;
-      if (avoid.some((av) => (av.x - x) ** 2 + (av.z - z) ** 2 < av.r * av.r)) continue;
-      if (placed.some((p) => (p[0] - x) ** 2 + (p[1] - z) ** 2 < minGap2)) continue;
-      placed.push([x, z]);
-      out.push([x, z]);
-    }
-    return out;
-  };
 
   // Опора по МИНИМУМУ рельефа под пятном основания: на склоне высота в центре
   // выше, чем у нижней кромки, и посаженный по центру объект «висит» краем
@@ -250,7 +213,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
 
   // ---- сосны: группируем места по (вариант, LOD-кольцо) ----
   const buckets = new Map(); // `${vi}:${ring}` -> [{x,z}]
-  const spots = scatter(count, 13, 140, 12, density);
+  const spots = layout.treeSpots(count);
   spots.forEach(([x, z], i) => {
     const vi = i % variants.length;
     const r = Math.hypot(x, z);
@@ -286,10 +249,11 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
 
     list.forEach(([x, z], i) => {
       const [hMin, hMax] = v.kind.h;
-      const s = hMin + rand() * (hMax - hMin);
-      const j = 0.9 + rand() * 0.2; // ширина кроны ±10%
+      const pose = layout.treePose(hMin, hMax);
+      const s = pose.height;
+      const j = pose.width; // ширина кроны ±10%
       dummy.position.set(x, groundY(x, z, 0.9) - 0.06 * Math.min(s, 4), z);
-      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
+      dummy.rotation.set(0, pose.yaw, 0);
       dummy.scale.set(s * j, s, s * j);
       dummy.updateMatrix();
       inst.multiplyMatrices(dummy.matrix, v.pre);
@@ -326,7 +290,7 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
 
   // ---- камни ----
   const boulders = []; // записи для cull, как pines у сосен
-  const rockSpots = scatter(rockCount, 10, 130, 6);
+  const rockSpots = layout.rockSpots(rockCount);
   const perRock = rocks.map(() => []);
   rockSpots.forEach((sp, i) => perRock[i % rocks.length].push(sp));
   for (let ri = 0; ri < rocks.length; ri++) {
@@ -341,12 +305,13 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
       return m;
     });
     list.forEach(([x, z], i) => {
-      const s = 0.5 + rand() * 1.5;
+      const pose = layout.rockPose();
+      const s = pose.size;
       // сажаем по нижней точке рельефа под камнем и топим на четверть роста:
       // валун сидит в сугробе, а не лежит НА снегу (и тем более не висит)
       dummy.position.set(x, groundY(x, z, 0.45 * s) - 0.26 * s, z);
-      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
-      dummy.scale.set(s * (0.9 + rand() * 0.2), s, s * (0.9 + rand() * 0.2));
+      dummy.rotation.set(0, pose.yaw, 0);
+      dummy.scale.set(s * pose.scaleX, s, s * pose.scaleZ);
       dummy.updateMatrix();
       inst.multiplyMatrices(dummy.matrix, rock.pre);
       meshes.forEach((m) => m.setMatrixAt(i, inst));
@@ -422,6 +387,15 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
     }
     return n;
   };
+
+  // Сначала раскладка и все позы потребляют прежний поток ГПСЧ, затем лишние
+  // объекты скрываются без добора. Так старые номера сосен не переезжают.
+  cullThinCaveRoofs(
+    [...pines, ...boulders],
+    caves,
+    (x, z) => terrain.getHeight(x, z),
+    hide
+  );
 
   return { group, obstacles, pines, cull };
 }
