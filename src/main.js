@@ -1007,7 +1007,7 @@ function onPickaxeImpact() {
     audio.shovelWhiff();
     return false;
   }
-  audio.pickaxeHit();
+  audio.pickaxeHit(digger.lastStroke?.material ?? 2);
   camera.getWorldDirection(_dirTmp);
   _sprayDir.copy(_dirTmp).multiplyScalar(-0.55);
   _sprayDir.y = 1.05;
