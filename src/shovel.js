@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { HeldTool, VIEW_Z } from 'world-core/core';
 import { Burst } from './burst.js';
-import { createGLTFLoader } from './gltfload.js';
-import { asset } from './asset.js';
+import { buildShovel, afterFirstFrames } from './props/index.js';
+import { snowTint } from './snowtint.js';
+import { matsets, prepareMatsets } from './matsets.js';
 
 // Лопата — инструмент копания (VISION.md: мир — это интерфейс, материя имеет
 // вес и место). Живёт в мире воткнутой в снег; F — взять в руки, F — воткнуть
@@ -50,59 +51,64 @@ const STROKES = {
   },
 };
 
-// Модель собрана в Blender (blender-web-agent-kit) и запечена в один материал:
-// base + ORM, 616 треугольников, один draw call. Конвенция рига соблюдена
-// самой моделью — остриё штыка в НАЧАЛЕ КООРДИНАТ, черенок вверх по +Y, совок
-// открыт в -Z, высота те же 1.45 м, — поэтому кейфреймы, PIVOT_Y и TIP ниже
-// остались нетронутыми. Прежняя процедурная сборка (плоскость с прогибом,
-// цилиндры черенка и перекладины) — в истории файла.
-const MODEL = 'models/props/shovel.glb';
+// Модель собрана КОДОМ (src/props/shovel-geometry.js): черенок с Т-образной
+// рукоятью, тулейка конусом, гранёный совок из трёх дощечек. Конвенция рига
+// соблюдена самой геометрией - остриё штыка в НАЧАЛЕ КООРДИНАТ, черенок вверх
+// по +Y, совок открыт в -Z, высота те же 1.45 м, - поэтому кейфреймы, PIVOT_Y
+// и TIP выше остались нетронутыми.
+//
+// До этого лопата была моделью из Blender (shovel.glb, 56 КБ плюс общий
+// Draco-декодер). Прежняя загрузка - в истории файла.
 
-let proto = null; // прототип, с которого снимаются копии
-const waiting = []; // группы, собранные до того, как модель доехала
+// Прототипов два, и это не расточительство. tool.js зовёт build() дважды:
+// первый раз - для копии, что стоит воткнутой в снегу, второй - для копии в
+// руках. Воткнутая обметена инеем (snowTint), та, что в руках, - нет: игрок
+// её только что вынул и обтёр о рукав. Одним материалом на обе так не сделать.
+const protos = { world: null, view: null };
+const waiting = []; // группы, собранные до того, как наборы допеклись
 let loading = null;
+let built = 0; // первый build() - мир, второй - руки (порядок задан tool.js)
 
-/** Грузит модель один раз. Полосу загрузки ведёт DefaultLoadingManager. */
+/** Печёт наборы и собирает обе лопаты один раз на весь мир. */
 export function loadShovelModel() {
   if (!loading) {
-    loading = createGLTFLoader()
-      .loadAsync(asset(MODEL))
-      .then((gltf) => {
-        proto = gltf.scene;
-        proto.traverse((o) => {
-          if (!o.isMesh) return;
-          o.castShadow = true;
-          // Металличность и шероховатость лежат в ORM-карте, множители
-          // материала их домножают. roughness=1 оставляет запечённое как есть,
-          // а сталь приглушена до той же 0.75, что стояла у процедурной
-          // модели: чистому металлу в этом мире нечего отражать.
-          o.material.metalness = 0.75;
-          o.material.roughness = 1;
-        });
-        while (waiting.length) waiting.pop().add(proto.clone(true));
-        return proto;
-      });
+    loading = prepareMatsets('iron', 'split').then(() => {
+      const sets = matsets('iron', 'split');
+      protos.world = buildShovel(sets);
+      protos.view = buildShovel(sets);
+      // воткнута в снег под открытым небом: иней на верхних гранях
+      for (const name of ['steel', 'wood']) {
+        snowTint(protos.world.getObjectByName(name).material, '0.78, 0.82, 0.9', 0.3, 0.5);
+      }
+      while (waiting.length) {
+        const { group, which } = waiting.pop();
+        group.add(protos[which].clone(true));
+      }
+      return protos.world;
+    });
   }
   return loading;
 }
 
 // сборка лопаты: остриё штыка в НАЧАЛЕ КООРДИНАТ, черенок вверх по +Y
-function buildShovel() {
+function buildShovelGroup() {
   const g = new THREE.Group();
-  // tool.js зовёт build() синхронно и дважды (копия в мире и копия в руках),
-  // поэтому группа отдаётся сразу, а модель доедет в неё сама
-  if (proto) g.add(proto.clone(true));
-  else waiting.push(g);
+  const which = built++ === 0 ? 'world' : 'view';
+  // группа отдаётся сразу, а модель доедет в неё сама
+  if (protos[which]) g.add(protos[which].clone(true));
+  else waiting.push({ group: g, which });
   return g;
 }
 
-loadShovelModel();
+// Заказ отложен до первого нарисованного кадра: почему именно так - в
+// props/index.js, у afterFirstFrames.
+afterFirstFrames(loadShovelModel);
 
 export class Shovel extends HeldTool {
   // scene — мир (воткнутая лопата и брызги), view — слой viewmodel (лопата в руках)
   constructor(scene, view) {
     super(scene, view, {
-      build: buildShovel,
+      build: buildShovelGroup,
       rest: REST,
       pivotY: PIVOT_Y,
       tip: TIP,
