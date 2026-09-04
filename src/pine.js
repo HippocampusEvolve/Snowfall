@@ -270,7 +270,7 @@ export function buildPine(seed, lod = 0, variant = 'medium_1') {
   const bare = Math.min(0.5, kind.bare * bareJit);
   const width = kind.width * wJit;
   const segs = near ? 2 : 1;
-  const brushes = near ? 8 : 3;
+  const brushes = near ? 5 : 3;
 
   buildTrunk(bark, {
     radial: near ? 7 : 5,

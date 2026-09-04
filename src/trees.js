@@ -28,20 +28,31 @@ export { KINDS };
 const PINE_SHAPE_SEED = 20260904;
 
 /** Три LOD одного варианта плюс радиус кроны, посчитанные от семени. */
-function makeVariant(THREE_, name, i) {
+async function makeVariant(THREE_, name, i, breathe) {
   const seed = PINE_SHAPE_SEED + i * 977;
-  const lods = [0, 1, 2].map((lod) => {
+  const lods = [];
+  for (const lod of [0, 1, 2]) {
+    // Стык на каждый LOD, а не на вариант: пятнадцать вариантов подряд держали
+    // поток одной задачей (замер китом входа 04.09.2026).
+    await breathe();
     const p = buildPine(seed, lod, name);
-    return {
+    lods.push({
       bark: pineGeometry(THREE_, p.bark),
       clusters: pineGeometry(THREE_, p.needles),
       built: p,
-    };
-  });
+    });
+  }
   return { name, kind: kindOf(name), lods, crown: lods[0].built.crown };
 }
 
-export async function createTrees(terrain, count = 170, rockCount = 45, avoid = [], caves = null) {
+export async function createTrees(
+  terrain,
+  count = 170,
+  rockCount = 45,
+  avoid = [],
+  caves = null,
+  workGate = Promise.resolve()
+) {
   // Лес собирается за уже открытым меню, и одним куском его собирать нельзя:
   // пятнадцать вариантов по три кольца и две сотни инстансов держали поток
   // сотнями миллисекунд. Стыки ниже (`await breathe()`) - места, где сборку
@@ -53,16 +64,20 @@ export async function createTrees(terrain, count = 170, rockCount = 45, avoid = 
   const layout = createPlantScatter({ avoid });
 
   // кора и щебень печёт ядро в воркерах; кора к этому времени обычно уже готова
+  // Ворота: лес ждёт первого кадра. У избы ворота стоят на компиляторе - ей
+  // ещё ехать по сети, и ожидание прячется за загрузкой. У леса сети больше
+  // нет вовсе, и без ворот счёт пятнадцати вариантов лёг бы прямо в
+  // критический путь входа - четверть секунды до первого кадра.
+  await Promise.resolve(workGate);
   const setsReady = prepareMatsets('bark', 'rubble');
 
   const variants = [];
   for (let i = 0; i < VARIANTS.length; i++) {
-    await breathe();
-    variants.push(makeVariant(THREE, VARIANTS[i], i));
+    variants.push(await makeVariant(THREE, VARIANTS[i], i, breathe));
   }
-  await breathe();
   const rocks = [];
   for (let i = 0; i < ROCK_VARIANTS; i++) {
+    await breathe();
     rocks.push(rockGeometry(THREE, buildRock(PINE_SHAPE_SEED + 31 * (i + 1))));
   }
 
