@@ -827,7 +827,7 @@ let dressed = null; // последняя волна: мебель внутри 
   const breathe = createSpread();
   const [cabinRes, treesRes] = await Promise.allSettled([
     createCabin(terrain, CABIN).then((v) => (mark('изба собрана'), v)),
-    createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }])
+    createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }], caves)
       .then((v) => (mark('лес собран'), v)),
   ]);
 

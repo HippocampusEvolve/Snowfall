@@ -73,7 +73,7 @@ test('у поверхности и ниже дна пещер нет', () => {
   }
 });
 
-test('доля объёма пещер укладывается в 4-10 %', () => {
+test('доля объёма пещер укладывается в 6-12 %', () => {
   let inside = 0, total = 0;
   for (let x = -100; x < 100; x += 1) {
     for (let z = -100; z < 100; z += 1) {
@@ -86,7 +86,38 @@ test('доля объёма пещер укладывается в 4-10 %', () =
   }
   const frac = (100 * inside) / total;
   console.log(`      доля объёма пещер: ${frac.toFixed(2)} % (${inside} из ${total})`);
-  assert.ok(frac >= 4 && frac <= 10, `доля объёма ${frac.toFixed(2)} % вне коридора 4-10 %`);
+  assert.ok(frac >= 6 && frac <= 12, `доля объёма ${frac.toFixed(2)} % вне коридора 6-12 %`);
+});
+
+test('нижний квартиль высоты ходов не меньше 2.2 м', () => {
+  const heights = [];
+  // Вертикальные срезы сети через 2 м. Шаг 0.1 м даёт точность, с которой
+  // различаются исходные 2.0 м и требуемые 2.2 м.
+  for (let x = -100; x <= 100; x += 2) {
+    for (let z = -100; z <= 100; z += 2) {
+      const h = base(x, z);
+      let start = null;
+      for (let d = 2; d <= 25 + 1e-6; d += 0.1) {
+        const inside = caves.sdf(x, h - d, z, d) < 0;
+        if (inside && start === null) start = d;
+        if (!inside && start !== null) {
+          // Срез, открытый на верхней границе диапазона, не является полным
+          // измерением хода и в статистику не входит.
+          if (start > 2 + 1e-6) heights.push(d - start);
+          start = null;
+        }
+      }
+    }
+  }
+  heights.sort((a, b) => a - b);
+  const quantile = (p) => heights[Math.floor((heights.length - 1) * p)];
+  const q25 = quantile(0.25);
+  const median = quantile(0.5);
+  console.log(
+    `      высота ходов: нижний квартиль ${q25.toFixed(2)} м, медиана ${median.toFixed(2)} м`
+  );
+  assert.ok(q25 >= 2.2 - 1e-6, `нижний квартиль высоты ${q25.toFixed(2)} м`);
+  assert.ok(median >= 2.5 - 1e-6, `медиана высоты ${median.toFixed(2)} м`);
 });
 
 test('каждый выход открыт сверху и связан с полосой ходов', () => {
