@@ -6,7 +6,7 @@ import sharp from 'sharp';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const dirs = ['public/models/cabin/textures', 'public/models/pines/textures', 'public/textures'];
+const dirs = ['public/models/pines/textures', 'public/textures'];
 for (const d of dirs) {
   for (const f of fs.readdirSync(d)) {
     const p = path.join(d, f);

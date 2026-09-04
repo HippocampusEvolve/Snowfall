@@ -8,80 +8,71 @@ import { material } from 'world-core/materials';
 import { bed, table, stool, rug, shelfWithBooks, logStack } from 'world-core/props';
 import { matset, prepareMatsets } from './matsets.js';
 import { createSpread } from './spread.js';
+import { buildCabin } from './cabin-geometry.js';
 
-// Домик: Scandinavian Log Cabin (rivetech, CC-BY). Масштаб к реальным метрам,
-// посадка в снег по рельефу, снег на крыше и кромках брёвен через snowTint.
-// В домик можно войти: дверь (узел Cabin_Door_3) открывается по F, стены —
-// коллизия-отрезки с проёмом, деревянный пол и ступенька на крыльцо.
-// Внутри — процедурный уют: камин, дрова, стол со свечой, кровать, коврик,
-// полка с книгами. Мебель — предметы каталога ядра (world-core/props):
+// Изба собирается из метрических буферов: сруб, крыша, дверь, окна и крыльцо.
+// В домик можно войти: дверь открывается по F, стены имеют свободный проём,
+// деревянный пол и ступенька на крыльцо отдают свои реальные высоты.
+// Внутри - процедурный уют: камин, дрова, стол со свечой, кровать, коврик,
+// полка с книгами. Мебель - предметы каталога ядра (world-core/props):
 // геометрия из примитивов, поверхность из наборов ядра, здесь только
 // расстановка и коллайдеры.
 
-const LENGTH = 9.6; // длина домика по большей стороне, м (дверь ≈ 2.1 м)
-const DOOR_OPEN = 2.2; // рад — дверь распахивается НАРУЖУ, на крыльцо (по-северному)
+const DOOR_OPEN = 2.2; // рад - дверь распахивается наружу, на крыльцо
 const DOOR_SPEED = 3.0; // скорость хода двери, 1/с
-
-// План домика в координатах gltf.scene (горизонталь — x/z, они не задеты
-// поворотами узлов Sketchfab; вертикаль пола НЕ берём из сырого accessor'а,
-// а меряем raycast'ом по мешу Floor — иначе мебель висит). FLOOR_Y здесь —
-// произвольный Y для l2w-вызовов, у которых важны только x/z (стены, углы).
 const FLOOR_Y = 0.81;
-const ROOM = { x0: -2.7, x1: 3.03, z0: -2.9, z1: 2.8 };
-const PORCH_Z1 = 4.67;
-// футпринт пола+крыльца+лестницы (локаль) — вне него не тратим raycast
-const FOOT = { x0: -2.85, x1: 4.6, z0: -3.05, z1: 5.1 };
+const INTERIOR_SCALE = 1.0545349463020333;
+const INTERIOR_X = -0.20205235481262207 * INTERIOR_SCALE;
+const INTERIOR_Z = -0.8637917041778564 * INTERIOR_SCALE;
 const CABIN_SETS = [
-  'bark', 'logend', 'split', 'brick', 'hearth', 'beam', 'ashlar',
+  'log', 'bark', 'logend', 'split', 'brick', 'hearth', 'beam', 'ashlar',
   'floor', 'cloth', 'wool', 'braid', 'leather', 'paper',
 ];
 
 export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = Promise.resolve()) {
-  // Изба приезжает за уже открытым меню, и собирается она порциями по кадрам.
-  // Одним куском это стоило 675 мс главного потока подряд: разбор gltf,
-  // снежные материалы по всем мешам, обмер рельефа под футпринтом, интерьер
-  // с процедурными поверхностями ядра и полсотни лучей по полу. Всё это время
-  // кнопка «войти в ночь» была нарисована, но нажатие не отрабатывала.
-  // `await breathe()` на стыках отдаёт кадр браузеру, когда набежал бюджет.
   const breathe = createSpread();
-  // После компиляции поляны сеть и выпечка отделки идут параллельно.
-  const setsReady = Promise.resolve(workGate).then(() => prepareMatsets(...CABIN_SETS));
-  const [gltf] = await Promise.all([
-    createGLTFLoader().loadAsync(asset('models/cabin/scene.gltf')),
-    setsReady,
-  ]);
-  const root = gltf.scene;
-
-  // нормализация: большая сторона = LENGTH, центр XZ в нуле, пол на y=0
-  root.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(root);
-  const size = box.getSize(new THREE.Vector3());
-  const s = LENGTH / Math.max(size.x, size.z);
-  root.scale.setScalar(s);
-  root.position.set(
-    -s * (box.min.x + box.max.x) / 2,
-    -s * box.min.y,
-    -s * (box.min.z + box.max.z) / 2
-  );
-  // Габарит сруба в его собственных осях (полуразмеры по x/z, вместе со свесом
-  // кровли). Отдаём наружу как footprint: лес обмеряет по нему, что налезло
-  // на дом, и убирает это из мира (см. cull в trees.js). Круг вокруг центра
-  // тут не годится - дом вытянут и повёрнут, круг либо режет лишнее, либо
-  // пропускает угол.
-  const half = new THREE.Vector2((size.x * s) / 2, (size.z * s) / 2);
-
-  await breathe();
-
+  const built = buildCabin();
+  await Promise.resolve(workGate).then(() => prepareMatsets(...CABIN_SETS));
   const group = new THREE.Group();
-  group.add(root);
+  group.name = 'ProceduralCabin';
+  const geometry = (data) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(data.position, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(data.normal, 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(data.uv, 2));
+    g.setIndex(new THREE.BufferAttribute(data.index, 1));
+    g.computeBoundingBox();
+    g.computeBoundingSphere();
+    return g;
+  };
+  const mesh = (data, mat) => {
+    const m = new THREE.Mesh(geometry(data), mat);
+    m.name = data.name;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  };
 
-  // ---- материалы: тени, снег, прозрачные окна ----
-  // Настоящее прозрачное стекло — БЕЗ дорогого transmission-прохода: обычный
-  // Standard-материал с transparent+низкой opacity. Видно и внутрь дома
-  // (горит очаг), и из дома наружу (ночь и снег). Тёплый emissive + bloom
-  // оставляют окна «маяком» в лесу издалека, а свет самого интерьера
-  // (подвесной фонарь + печь) читается сквозь стекло вблизи. depthWrite:false —
-  // стекло не перекрывает интерьер по глубине; панели сортируются сзади-наперёд.
+  const logMat = snowTint(
+    material(matset('log'), { normalScale: 1.35, color: 0x8b6242 }),
+    '0.78, 0.83, 0.94',
+    0.5,
+    0.5
+  );
+  const beamMat = snowTint(
+    material(matset('beam'), { normalScale: 0.8, color: 0x7b573d }),
+    '0.78, 0.83, 0.94',
+    0.45,
+    0.55
+  );
+  const boardMat = material(matset('floor'), { normalScale: 0.85, color: 0xb0875e });
+  const roofMat = snowTint(
+    material(matset('floor'), { normalScale: 1.0, color: 0x5a4030 }),
+    '0.85, 0.89, 0.98',
+    1.0,
+    0.1,
+    { geoNormal: true }
+  );
   const glassMat = new THREE.MeshStandardMaterial({
     color: 0x24313f,
     emissive: 0xffb262,
@@ -93,249 +84,209 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
     side: THREE.DoubleSide,
     depthWrite: false,
   });
-  const glassMeshes = [];
-  const tinted = new Set();
-  let floorMesh = null, supportMesh = null, roofMesh = null;
-  root.traverse((c) => {
-    if (!c.isMesh) return;
-    c.castShadow = true;
-    c.receiveShadow = true;
-    const name = c.material?.name || '';
-    if (name === 'Floor') floorMesh = c;
-    else if (name === 'Wooden_Support_Struct') supportMesh = c; // рама + ступени крыльца
-    else if (name === 'Roof') roofMesh = c;
-    if (name === 'WindowGlass') {
-      c.material = glassMat;
-      glassMeshes.push(c);
-      return;
+  const logMesh = mesh(built.meshes.logs, logMat);
+  const beamMesh = mesh(built.meshes.beam, beamMat);
+  const roofMesh = mesh(built.meshes.roof, roofMat);
+  const glassMesh = mesh(built.meshes.glass, glassMat);
+  glassMesh.castShadow = false;
+
+  const { layout } = built;
+  // Статичные доски и подвижная дверь остаются одним проходом материала.
+  // Малый хвост вершин двери поворачивается на ЦП только во время движения.
+  const staticBoards = built.meshes.boards;
+  const movingBoards = built.meshes.door;
+  const staticVertices = staticBoards.position.length / 3;
+  const boardPosition = new Float32Array(staticBoards.position.length + movingBoards.position.length);
+  const boardNormal = new Float32Array(staticBoards.normal.length + movingBoards.normal.length);
+  const boardUv = new Float32Array(staticBoards.uv.length + movingBoards.uv.length);
+  const boardIndex = new Uint32Array(staticBoards.index.length + movingBoards.index.length);
+  boardPosition.set(staticBoards.position);
+  boardNormal.set(staticBoards.normal);
+  boardUv.set(staticBoards.uv);
+  boardUv.set(movingBoards.uv, staticBoards.uv.length);
+  boardIndex.set(staticBoards.index);
+  for (let i = 0; i < movingBoards.index.length; i++) {
+    boardIndex[staticBoards.index.length + i] = movingBoards.index[i] + staticVertices;
+  }
+  const boardGeo = new THREE.BufferGeometry();
+  boardGeo.setAttribute('position', new THREE.BufferAttribute(boardPosition, 3));
+  boardGeo.setAttribute('normal', new THREE.BufferAttribute(boardNormal, 3));
+  boardGeo.setAttribute('uv', new THREE.BufferAttribute(boardUv, 2));
+  boardGeo.setIndex(new THREE.BufferAttribute(boardIndex, 1));
+  function setDoorGeometry(angle) {
+    const c = Math.cos(angle), s = Math.sin(angle);
+    const p0 = staticBoards.position.length;
+    for (let i = 0; i < movingBoards.position.length; i += 3) {
+      const dx = movingBoards.position[i];
+      const dy = movingBoards.position[i + 1];
+      const dz = movingBoards.position[i + 2];
+      boardPosition[p0 + i] = layout.door.hingeX + dx * c + dz * s;
+      boardPosition[p0 + i + 1] = dy;
+      boardPosition[p0 + i + 2] = layout.door.hingeZ - dx * s + dz * c;
+      const nx = movingBoards.normal[i];
+      const ny = movingBoards.normal[i + 1];
+      const nz = movingBoards.normal[i + 2];
+      boardNormal[p0 + i] = nx * c + nz * s;
+      boardNormal[p0 + i + 1] = ny;
+      boardNormal[p0 + i + 2] = -nx * s + nz * c;
     }
-    if (tinted.has(c.material)) return;
-    tinted.add(c.material);
-    if (name === 'Roof') snowTint(c.material, '0.85, 0.89, 0.98', 1.0, 0.1, { geoNormal: true });
-    // Floor — доски внутри дома и настил крыльца: всё под крышей, снега
-    // на них не бывает (снег внутри дома выглядел как изморозь на полу)
-    else if (name !== 'Floor') snowTint(c.material, '0.78, 0.83, 0.94', 0.5, 0.5);
-  });
+    boardGeo.attributes.position.needsUpdate = true;
+    boardGeo.attributes.normal.needsUpdate = true;
+  }
+  setDoorGeometry(0);
+  boardGeo.computeBoundingBox();
+  boardGeo.computeBoundingSphere();
+  const boardMesh = new THREE.Mesh(boardGeo, boardMat);
+  boardMesh.name = 'boards';
+  boardMesh.castShadow = true;
+  boardMesh.receiveShadow = true;
 
-  await breathe();
+  const doorNode = new THREE.Group();
+  doorNode.name = 'Cabin_Door_3';
+  doorNode.position.set(layout.door.hingeX, 0, layout.door.hingeZ);
+  group.add(logMesh, beamMesh, boardMesh, roofMesh, glassMesh, doorNode);
 
-  // дверь — отдельный узел модели, вращается вокруг своей петли
-  const doorNode = root.getObjectByName('Cabin_Door_3');
-
-  // ---- посадка: по подножию родной лестницы крыльца ----
-  // Сруб сажаем так, чтобы нижняя ступень его лестницы легла на снег —
-  // она и есть вход. Пол при этом держим выше рельефа под футпринтом,
-  // иначе снег прорастёт сквозь доски.
   const cos = Math.cos(rotY), sin = Math.sin(rotY);
-  const lw = (lx, lz) => [x + (lx * cos + lz * sin) * s, z + (-lx * sin + lz * cos) * s];
-  let ground = terrain.getHeight(x, z); // минимум под футпринтом — для света окон
+  const lw = (lx, lz) => [x + lx * cos + lz * sin, z - lx * sin + lz * cos];
   let maxUnder = -Infinity;
-  for (let lx = ROOM.x0; lx <= ROOM.x1 + 0.01; lx += (ROOM.x1 - ROOM.x0) / 6) {
-    for (let lz = ROOM.z0; lz <= PORCH_Z1 + 0.01; lz += (PORCH_Z1 - ROOM.z0) / 8) {
+  for (let lx = layout.room.x0; lx <= layout.room.x1 + 0.01; lx += (layout.room.x1 - layout.room.x0) / 6) {
+    for (let lz = layout.room.z0; lz <= layout.porch.z1 + 0.01; lz += (layout.porch.z1 - layout.room.z0) / 8) {
       const h = terrain.getHeight(...lw(lx, lz));
-      ground = Math.min(ground, h);
       maxUnder = Math.max(maxUnder, h);
     }
   }
-  const stairsGround = terrain.getHeight(...lw(4.6, 4.55)); // снег у подножия лестницы
+  const stepZ = layout.porch.z1 + layout.porch.stepDepth / 2;
+  const stairsGround = terrain.getHeight(...lw(layout.door.centerX, stepZ));
   const groupY = Math.max(
-    stairsGround - root.position.y + 0.3 * s, // нижняя ступень чуть выше снега
-    maxUnder + 0.12 - root.position.y - FLOOR_Y * s // но пол — над рельефом
+    stairsGround + 0.04 - layout.porch.stepTop,
+    maxUnder + 0.12 - layout.room.floorY
   );
   group.position.set(x, groupY, z);
   group.rotation.y = rotY;
-
   group.updateMatrixWorld(true);
 
-  // снег лежит ШАПКОЙ на кровле: оболочка поверх меша крыши (snowcap.js);
-  // толщину задаём в метрах через реальный мировой масштаб узла gltf
-  if (roofMesh) snowCap(roofMesh, 0.09 / roofMesh.getWorldScale(new THREE.Vector3()).x);
+  snowCap(roofMesh, 0.09);
 
-  // преобразования локаль gltf.scene <-> мир
-  const invRoot = root.matrixWorld.clone().invert();
   const _v = new THREE.Vector3();
-  const l2w = (lx, ly, lz) => root.localToWorld(_v.set(lx, ly, lz));
+  const l2w = (lx, ly, lz) => group.localToWorld(_v.set(lx, ly, lz));
+  const interiorPoint = (ix, iz) => ({
+    x: INTERIOR_X + ix * INTERIOR_SCALE,
+    z: INTERIOR_Z + iz * INTERIOR_SCALE,
+  });
 
-  // ---- реальный пол из геометрии: raycast вниз по мешу Floor/лестницы ----
-  // Никаких выдуманных плоскостей: высоту пола и ступеней берём с самих досок.
-  const ray = new THREE.Raycaster();
-  const _o = new THREE.Vector3();
-  const _down = new THREE.Vector3(0, -1, 0);
-  function castDown(wx, wz, fromY, meshes) {
-    ray.set(_o.set(wx, fromY, wz), _down);
-    ray.far = fromY + 40;
-    const hits = ray.intersectObjects(meshes, false);
-    return hits.length ? hits[0].point.y : null;
-  }
-  // калибровка: бьём вниз в центр bbox самого меша пола (точно над досками —
-  // мой план-центр в пространстве gltf.scene смещён узлом Cabin_5 и мимо квадрата)
-  floorMesh.geometry.computeBoundingBox();
-  const fbb = floorMesh.geometry.boundingBox.clone().applyMatrix4(floorMesh.matrixWorld);
-  const fcx = (fbb.min.x + fbb.max.x) / 2, fcz = (fbb.min.z + fbb.max.z) / 2;
-  const worldFloorTop = castDown(fcx, fcz, fbb.max.y + 4, [floorMesh]) ?? fbb.max.y;
-  const floorWorldY = worldFloorTop + 0.02;
-  // локальный Y пола: поворот по Y не мешает y, поэтому это простая формула
-  const localFloorY = (worldFloorTop - group.position.y - root.position.y) / s;
-
-  // ---- интерьер: примитивы в локали gltf.scene, база — на реальном полу ----
-  // Самый тяжёлый кусок избы: поверхности мебели считаются процедурно
-  // (world-core), а не грузятся картинками. Дышит он изнутри, своими стыками.
-  const interior = await buildInterior(localFloorY, breathe);
-  root.add(interior.group);
-  // Сколько коллайдеров у процедурной мебели: всё, что появится в этом списке
-  // сверх этого числа, принесли поздние модели (см. `dressed` ниже).
+  const interior = await buildInterior(FLOOR_Y, breathe);
+  const interiorHolder = new THREE.Group();
+  interiorHolder.position.set(
+    INTERIOR_X,
+    layout.room.floorY - FLOOR_Y * INTERIOR_SCALE,
+    INTERIOR_Z
+  );
+  interiorHolder.scale.setScalar(INTERIOR_SCALE);
+  interiorHolder.add(interior.group);
+  group.add(interiorHolder);
   const ownColliders = interior.colliders.length;
   group.updateMatrixWorld(true);
 
-  // ---- коллизия: стены-отрезки с дверным проёмом + столбы крыльца ----
   const obstacles = [];
   const wall = (x0, z0, x1, z1, r = 0.14) => {
-    const a = l2w(x0, FLOOR_Y, z0);
+    const a = l2w(x0, layout.room.floorY, z0);
     const seg = { x1: a.x, z1: a.z, r };
-    const b = l2w(x1, FLOOR_Y, z1);
+    const b = l2w(x1, layout.room.floorY, z1);
     seg.x2 = b.x;
     seg.z2 = b.z;
     obstacles.push(seg);
     return seg;
   };
-  wall(ROOM.x0, ROOM.z0 - 0.05, ROOM.x0, ROOM.z1 + 0.05); // левая
-  wall(ROOM.x1, ROOM.z0 - 0.05, ROOM.x1, ROOM.z1 + 0.05); // правая
-  wall(ROOM.x0, ROOM.z0, ROOM.x1, ROOM.z0); // задняя
-  wall(ROOM.x0, ROOM.z1, -1.42, ROOM.z1); // фронт слева от проёма
-  wall(0.02, ROOM.z1, ROOM.x1, ROOM.z1); // фронт справа от проёма
-  {
-    // столб навеса: только левый — правый стоит у верха лестницы, и его круг
-    // с радиусом игрока перегораживал бы весь узкий лестничный коридор
-    const p = l2w(-2.72, FLOOR_Y, 4.56);
-    obstacles.push({ x: p.x, z: p.z, r: 0.14 });
-  }
-  // под настил не поднырнуть: кромки крыльца толкаются, только пока ноги
-  // у земли (y1 между снегом и настилом); на настиле — свободно
-  const underMax = floorWorldY - 0.3;
-  for (const seg of [
-    wall(ROOM.x0, ROOM.z1, ROOM.x0, PORCH_Z1, 0.12), // левый край крыльца
-    // правый край — до z=3.55: концевые круги этого сегмента и фронтальной
-    // кромки с радиусом игрока перекрывались и пережимали устье лестницы
-    wall(ROOM.x1, ROOM.z1, ROOM.x1, 3.55, 0.12),
-    wall(ROOM.x0, PORCH_Z1, ROOM.x1, PORCH_Z1, 0.12), // фронтальная кромка
-  ]) {
+  for (const c of layout.wallColliders) wall(c.x1, c.z1, c.x2, c.z2, c.r);
+  const underMax = groupY + layout.room.floorY - 0.3;
+  for (const c of layout.porchColliders) {
+    const seg = wall(c.x1, c.z1, c.x2, c.z2, c.r);
     seg.y1 = underMax;
   }
-  // мебель: печка, стол, кровать (координаты — из buildInterior)
+  const post = l2w(layout.room.x0 + 0.11, layout.room.floorY, layout.porch.z1 - 0.1);
+  obstacles.push({ x: post.x, z: post.z, r: 0.14 });
+
   for (const c of interior.colliders) {
+    const a = interiorPoint(c.x1 ?? c.x, c.z1 ?? c.z);
     if (c.x2 !== undefined) {
-      const seg = wall(c.x1, c.z1, c.x2, c.z2, c.r);
-      seg.r = c.r;
+      const b = interiorPoint(c.x2, c.z2);
+      wall(a.x, a.z, b.x, b.z, c.r * INTERIOR_SCALE);
     } else {
-      const p = l2w(c.x, FLOOR_Y, c.z);
-      obstacles.push({ x: p.x, z: p.z, r: c.r });
+      const p = l2w(a.x, layout.room.floorY, a.z);
+      obstacles.push({ x: p.x, z: p.z, r: c.r * INTERIOR_SCALE });
     }
   }
-  // полотно двери — динамический отрезок, следует за углом открытия
   const doorSeg = { x1: 0, z1: 0, x2: 0, z2: 0, r: 0.1 };
   obstacles.push(doorSeg);
 
-  // ---- поздняя отделка: скачанные модели мебели ----
-  // Чугунок и стопка книг стоят ВНУТРИ дома: снаружи их не видно вовсе, а
-  // весят они четверть мегабайта. Держать на них вход в мир незачем — они
-  // уезжают в последнюю волну отделки, уже за спиной у игрока (см. «волны
-  // отделки» в main.js). Пока не приехали, на их местах стоят процедурные
-  // двойники, ради которых интерьер и собран примитивами.
-  //
-  // Коллайдеры этих моделей отдаются наружу списком, а не дописываются в
-  // `obstacles`: тот к моменту их приезда давно скопирован в общий реестр мира,
-  // и добавленное в него уже никем не читается.
-  const dressed = loadInteriorProps(interior.group, localFloorY, interior.colliders)
+  const dressed = loadInteriorProps(interior.group, FLOOR_Y, interior.colliders)
     .then(() => {
       group.updateMatrixWorld(true);
       return interior.colliders.slice(ownColliders).map((c) => {
-        const p = l2w(c.x, FLOOR_Y, c.z);
-        return { x: p.x, z: p.z, r: c.r };
+        const local = interiorPoint(c.x, c.z);
+        const p = l2w(local.x, layout.room.floorY, local.z);
+        return { x: p.x, z: p.z, r: c.r * INTERIOR_SCALE };
       });
     })
-    .catch(() => []); // нет файлов — процедурные двойники остаются на месте
+    .catch(() => []);
 
-  // ---- пол/крыльцо/ступени: реальная поверхность из геометрии ----
-  // В пределах футпринта пускаем луч вниз с уровня чуть выше пола (ниже
-  // кровли и навеса) — попадаем в верх ближайших досок или ступени.
-  const floorTargets = supportMesh ? [floorMesh, supportMesh] : [floorMesh];
   const _fv = new THREE.Vector3();
-  const castY = worldFloorTop + 1.3;
   function floorHeightAt(wx, wz) {
-    _fv.set(wx, 0, wz).applyMatrix4(invRoot);
-    if (_fv.x < FOOT.x0 || _fv.x > FOOT.x1 || _fv.z < FOOT.z0 || _fv.z > FOOT.z1) return null;
-    return castDown(wx, wz, castY, floorTargets);
+    group.worldToLocal(_fv.set(wx, groupY, wz));
+    const inWidth = _fv.x >= layout.room.x0 && _fv.x <= layout.room.x1;
+    if (inWidth && _fv.z >= layout.room.z0 && _fv.z <= layout.porch.z1) {
+      return groupY + layout.room.floorY;
+    }
+    const stepHalf = layout.door.width / 2 + 0.23;
+    if (
+      _fv.x >= layout.door.centerX - stepHalf && _fv.x <= layout.door.centerX + stepHalf
+      && _fv.z >= layout.porch.z1 && _fv.z <= layout.porch.z1 + layout.porch.stepDepth
+    ) return groupY + layout.porch.stepTop;
+    return null;
   }
   function isInside(wx, wz) {
-    _fv.set(wx, 0, wz).applyMatrix4(invRoot);
-    return _fv.x >= ROOM.x0 && _fv.x <= ROOM.x1 && _fv.z >= ROOM.z0 && _fv.z <= ROOM.z1;
+    group.worldToLocal(_fv.set(wx, groupY, wz));
+    return _fv.x >= layout.room.x0 && _fv.x <= layout.room.x1
+      && _fv.z >= layout.room.z0 && _fv.z <= layout.room.z1;
   }
 
-  await breathe();
-
-  // ---- свет из окон: кластеризуем вершины стёкол на отдельные окна ----
   const lights = [];
-  const centre = new THREE.Vector3();
-  group.getWorldPosition(centre);
-  const clusters = [];
-  const v = new THREE.Vector3();
-  for (const m of glassMeshes) {
-    const pos = m.geometry.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
-      let c = clusters.find((c) => c.p.distanceToSquared(v) < 1.3 * 1.3);
-      if (!c) {
-        c = { p: v.clone(), n: 1 };
-        clusters.push(c);
-      } else {
-        c.p.lerp(v, 1 / ++c.n); // бегущее среднее
-      }
+  for (const w of layout.windows) {
+    let wx = w.lightCenter ?? w.center, wz = w.fixed ?? layout.room.z1;
+    if (w.wall === 'back') wz = w.fixed ?? layout.room.z0;
+    else if (w.wall === 'left' || w.wall === 'right') {
+      wx = w.fixed ?? (w.wall === 'left' ? layout.room.x0 : layout.room.x1);
+      wz = w.lightCenter ?? w.center;
     }
-  }
-  const out = new THREE.Vector3();
-  for (const c of clusters) {
-    // наружу — от вертикальной оси домика через центр окна
-    out.copy(c.p).sub(centre).setY(0);
-    if (out.lengthSq() < 1e-4) continue;
-    out.normalize();
+    const outLength = Math.hypot(wx, wz) || 1;
+    const ox = wx / outLength, oz = wz / outLength;
     const l = new THREE.PointLight(0xffa550, 4.5, 7.5, 2);
-    l.position.copy(c.p).addScaledVector(out, 0.85);
-    l.position.y = Math.max(c.p.y - 0.4, ground + 0.7);
+    l.position.set(wx + ox * 0.85, w.centerY - 0.4, wz + oz * 0.85);
     lights.push(l);
-    group.attach(l);
+    group.add(l);
   }
-
-  await breathe();
-
-  // ---- маска снегопада: под крышей (по её реальным габаритам) снег не падает ----
-  const roofC = l2w(0.17, 0, 0.75);
-  let roofTopY = worldFloorTop + 3.5;
-  if (roofMesh) {
-    roofMesh.geometry.computeBoundingBox();
-    roofTopY = roofMesh.geometry.boundingBox.clone().applyMatrix4(roofMesh.matrixWorld).max.y;
-  }
+  const roofC = l2w(layout.roof.centerX, 0, layout.roof.centerZ);
   const snowMask = {
     x: roofC.x,
     z: roofC.z,
     cos, sin,
-    hx: 3.65 * s,
-    hz: 4.45 * s,
-    topY: roofTopY,
+    hx: layout.roof.hx,
+    hz: layout.roof.hz,
+    topY: groupY + layout.roof.topY,
   };
 
-  // ---- дверь: состояние + мировые точки петли/кромки для коллизии ----
   let doorOpen = false;
-  let doorT = 0; // 0 закрыта .. 1 открыта
+  let doorT = 0;
   const hingeW = new THREE.Vector3();
   const edgeW = new THREE.Vector3();
   const doorCenter = new THREE.Vector3();
   function syncDoor() {
+    doorNode.updateMatrix();
+    setDoorGeometry(doorNode.rotation.y);
     doorNode.updateWorldMatrix(true, false);
-    // отрезок коллизии — внешние 55% полотна: у петли его радиус
-    // иначе перекрывал бы проём даже при распахнутой двери
-    hingeW.set(-0.45, -0.7, 0);
+    hingeW.set(-layout.door.leafWidth * 0.45, layout.room.floorY + 1, 0);
     doorNode.localToWorld(hingeW);
-    edgeW.set(-0.99, -0.7, 0);
+    edgeW.set(-layout.door.leafWidth, layout.room.floorY + 1, 0);
     doorNode.localToWorld(edgeW);
     doorSeg.x1 = hingeW.x;
     doorSeg.z1 = hingeW.z;
@@ -349,36 +300,29 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
     doorOpen = !doorOpen;
     return doorOpen;
   }
+  const stoveLocal = interiorPoint(interior.hearth.x, interior.hearth.z);
+  const stovePos = l2w(stoveLocal.x, layout.room.floorY + 0.5, stoveLocal.z).clone();
 
-  // тепло очага: мировая позиция устья (x/z из плана, Y — реальный пол)
-  const stovePos = l2w(interior.hearth.x, FLOOR_Y, interior.hearth.z).clone();
-  stovePos.y = worldFloorTop + 0.5;
-
-  // мягкое «печное» дыхание света в окнах + дверь + огонь в печи и свеча
   function update(t, dt = 0) {
     const k = 0.9 + 0.06 * Math.sin(t * 1.7) + 0.04 * Math.sin(t * 3.9 + 1.2);
     glassMat.emissiveIntensity = 0.75 * k;
     for (const l of lights) l.intensity = 4.5 * k;
-
-    // дверь плавно доходит до цели; коллизию двигаем вместе с полотном
     const target = doorOpen ? 1 : 0;
     if (Math.abs(target - doorT) > 1e-4) {
       doorT += (target - doorT) * Math.min(1, DOOR_SPEED * dt);
       if (Math.abs(target - doorT) < 1e-3) doorT = target;
-      const e = doorT * doorT * (3 - 2 * doorT); // smoothstep
+      const e = doorT * doorT * (3 - 2 * doorT); // плавный ход у краёв
       doorNode.rotation.y = DOOR_OPEN * e;
       syncDoor();
     }
-
     interior.update(t, dt);
   }
 
   return {
     group, obstacles, update, toggleDoor, dressed,
     get doorOpen() { return doorOpen; },
-    doorCenter, floorHeightAt, isInside, snowMask, stovePos,
-    // повёрнутый прямоугольник габарита в мировых координатах
-    footprint: { x, z, rotY, hx: half.x, hz: half.y },
+    doorCenter, doorNode, floorHeightAt, isInside, snowMask, stovePos,
+    footprint: { x, z, rotY, hx: layout.roof.hx, hz: layout.roof.hz },
   };
 }
 

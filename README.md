@@ -23,7 +23,7 @@
 
 Атмосферная 3D-игра от первого лица: зимняя ночь в духе The Long Dark.
 Three.js + Vite, весь звук синтезируется процедурно (WebAudio).
-Модели и текстуры — CC-BY/CC0 (Sketchfab, Poly Haven), см. «Лицензии» ниже.
+Сторонние модели и текстуры - CC0 (Poly Haven), см. «Лицензии» ниже.
 
 ## Запуск
 
@@ -154,10 +154,9 @@ public/draco/     Draco-декодер (из пакета three)
 ## Лицензии
 
 - **Код** — [MIT](LICENSE).
-- **Ассеты** — под своими лицензиями (CC-BY-4.0 / CC0), не покрываются MIT
+- **Ассеты** — под своими лицензиями (CC0), не покрываются MIT
   (сводка — [NOTICE.md](NOTICE.md)):
   полный список с авторами и ссылками — [public/models/CREDITS.md](public/models/CREDITS.md).
-  - «Scandinavian Log Cabin» by rivetech — CC-BY-4.0
   - Пропсы и текстуры снега Poly Haven (CC0)
 - Модели пережаты для веба (WebP-текстуры + Draco-геометрия, gltf-transform);
   оригиналы доступны по ссылкам в CREDITS.md.
