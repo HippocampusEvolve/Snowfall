@@ -117,11 +117,12 @@ export class Digger {
       heightTex: terrain.heightTex,
       footprints,
     });
-    // Три тяжёлых набора считаются по одному между кадрами. Пока они едут,
-    // шейдер держит снежные карты и остаётся полностью рабочим.
-    this.materialSetsReady = loadDiggerMaterialSets(this.material).catch((e) => {
-      console.warn('[digger] наборы среза не выпечены', e);
-    });
+    // Три тяжёлых набора (около 0.6 с выпечки) считаются по одному между
+    // кадрами, но НЕ здесь: конструктор идёт в сборке мира, и выпечка отнимала
+    // кадры у главного потока до готовности (тёплый вход +0.7 с по киту).
+    // Мир зовёт bakeMaterialSets() после ready(); до этого шейдер держит
+    // снежные карты и остаётся полностью рабочим.
+    this.materialSetsReady = null;
 
     // Юбка по периметру выреза (см. _rebuildSkirt).
     this.skirt = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
@@ -525,6 +526,15 @@ export class Digger {
       if (list.length) edits = list;
     }
     return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits };
+  }
+
+  /** Выпечь наборы среза по одному на кадр; зовётся после готовности мира. */
+  bakeMaterialSets() {
+    if (this.materialSetsReady) return this.materialSetsReady;
+    this.materialSetsReady = loadDiggerMaterialSets(this.material).catch((e) => {
+      console.warn('[digger] наборы среза не выпечены', e);
+    });
+    return this.materialSetsReady;
   }
 
   // Снять рассчитанную часть и отменить ещё не начатое задание. Результат уже
