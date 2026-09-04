@@ -76,7 +76,14 @@
       animation: gate-in 0.7s ease both;
     }
     @keyframes gate-in { from { opacity: 0; } to { opacity: 1; } }
-    #gate.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+    #gate.hidden { opacity: 0; visibility: hidden; pointer-events: none; animation: none; }
+    /* Одноразовые анимации появления (`gate-in`, `gate-btn-in`) идут с `both`
+       и держат opacity: 1 и visibility: visible после конца - и перебивали бы
+       `.hidden` у гейта: кнопки «продолжить» и «начать заново» оставались в
+       кадре поверх мира (замечание с прода 04.09). У скрытого гейта анимаций
+       нет, кнопки спрятаны явно. */
+    body #gate.hidden .btn, body #gate.hidden .quiet,
+    body.unveiled #gate.hidden .btn, body.unveiled #gate.hidden .quiet { animation: none; visibility: hidden; opacity: 0; }
 
     /* --- туман экрана входа ---
        Пока мир собирается, за меню не должно быть видно ничего: ни того, как
