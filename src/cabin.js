@@ -1,12 +1,11 @@
 import * as THREE from 'three';
-import { createGLTFLoader } from './gltfload.js';
-import { asset } from './asset.js';
 import { snowTint } from './snowtint.js';
 import { snowCap } from './snowcap.js';
 import { buildFirebox } from './firebox.js';
 import { material } from 'world-core/materials';
 import { bed, table, stool, rug, shelfWithBooks, logStack } from 'world-core/props';
-import { matset, prepareMatsets } from './matsets.js';
+import { matset, matsets, prepareMatsets } from './matsets.js';
+import { buildFireplace, buildPot, buildBooks } from './props/index.js';
 import { createSpread } from './spread.js';
 import { buildCabin } from './cabin-geometry.js';
 
@@ -26,7 +25,7 @@ const INTERIOR_X = -0.20205235481262207 * INTERIOR_SCALE;
 const INTERIOR_Z = -0.8637917041778564 * INTERIOR_SCALE;
 const CABIN_SETS = [
   'log', 'bark', 'logend', 'split', 'brick', 'hearth', 'beam', 'ashlar',
-  'floor', 'cloth', 'wool', 'braid', 'leather', 'paper',
+  'floor', 'cloth', 'wool', 'braid', 'leather', 'paper', 'iron',
 ];
 
 export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = Promise.resolve()) {
@@ -328,7 +327,7 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
 
 // ---------------------------------------------------------------------------
 // Интерьер: камин с топкой, стопка дров, стол со свечой, табуретки, кровать с
-// пледом, коврик, полка с книгами. Всё в локали gltf.scene (1 ед. ≈ 1 м).
+// пледом, коврик, полка с книгами. Всё в метрической локали интерьера (Y-up).
 // F — реальный Y пола, замеренный raycast'ом снаружи: база мебели ставится
 // ровно на доски.
 //
@@ -394,35 +393,23 @@ async function buildInterior(F, breathe) {
   await breathe();
 
   // ---- камин у задней стены ----
-  // Сложен в Blender (blender-web-agent-kit), 1920 треугольников. Подиум,
-  // стойки с открытой топкой, брус полки поперёк, дымосборник трапецией до
-  // кровли. Нутро топки кирпичное и тёплое против холодного наружного камня —
-  // этот контраст читается как «горит» ещё до того, как в топке появится огонь.
+  // Сложен КОДОМ (src/props/fireplace-geometry.js), 372 треугольника: подиум,
+  // стойки с открытой топкой, перемычка, брус полки поперёк, дымосборник
+  // трапецией до кровли, квадры и наличники поверх кладки.
   //
-  // ПОВЕРХНОСТЬ СЧИТАЕТСЯ КОДОМ, файла текстур у камина нет.
+  // НИ ФАЙЛА МОДЕЛИ, НИ ФАЙЛА ТЕКСТУР: и форма, и поверхность считаются на
+  // месте. Раньше камин приезжал моделью из Blender (fireplace.glb) вместе с
+  // Draco-декодером на 192 КБ; поверхность ей и тогда считало ядро (см.
+  // историю файла), а геометрия была ровно тем набором коробок, что теперь
+  // стоит в props/. Платить за неё файлом и декодером было не за что.
   //
-  // До этого вся модель лежала в одном запечённом атласе 1024x1024, и он был
-  // не «низкого качества», а физически пуст: 56 пикселей карты на метр
-  // поверхности (тексель в 1.8 см), причём UV-острова занимали 15% атласа, а
-  // остальное было чёрной пустотой. Каждому каменному блоку доставалось пятно
-  // примерно 20 на 20 пикселей — на нём не помещается ни скол, ни фаска.
-  //
-  // Теперь модель развёрнута в метрах (`tools/fireplace-retile.mjs`) и
-  // разложена по ролям на три материала, а карты считает world-core: 512
-  // пикселей на метр, вдевятеро плотнее, и плотность больше не зависит от того,
-  // насколько велик предмет. Заодно .glb похудел с 630 до 176 КБ.
-  //
-  // Запечённую занятость при этом не жаль: three.js применяет aoMap ТОЛЬКО к
-  // непрямому свету, а картинку в этой комнате лепит точечный огонь. Объём
-  // даёт карта нормалей, и её генератор считает вместе с цветом.
-  //
-  // До него в этой комнате стояла каменка в углу, а до неё буржуйка — обе в
+  // До модели в этой комнате стояла каменка в углу, а до неё буржуйка — обе в
   // истории файла. Камин выбран за открытый огонь: он и источник света, и
   // картинка, а угловая печь ни того ни другого в полную силу не даёт.
   //
-  // Модель встаёт СВОИМ началом координат: середина по ширине, на полу, у
+  // Камин встаёт СВОИМ началом координат: середина по ширине, на полу, у
   // плоскости стены. Тело растёт от стены в комнату.
-  //     габарит модели: x ±1.16, z 0..1.18 (вперёд), высота 4.25
+  //     габарит: x ±1.18, z −0.05..1.18 (вперёд), высота 4.25
   // ROOM — коллизионный прямоугольник, а НЕ плоскость стены. Брёвна сруба
   // круглые и выпирают внутрь комнаты: у задней стены самая дальняя точка
   // геометрии лежит на z = -2.35, то есть на 55 см ближе к центру, чем
@@ -434,53 +421,8 @@ async function buildInterior(F, breathe) {
   const stoveGroup = new THREE.Group();
   stoveGroup.name = 'fireplaceModel';
   stoveGroup.position.set(stove.x, F, stove.z);
+  stoveGroup.add(buildFireplace(matsets('ashlar', 'beam')));
   g.add(stoveGroup);
-  // Материал по имени из .glb. Имена ставит `fireplace-retile.mjs`, разбирая
-  // модель по ролям: наружная кладка и дымосборник — тёсаный камень, нутро
-  // топки — тот же кирпич, что у футеровки, полка — брус.
-  //
-  // Материал ядра ОДНОСТОРОННИЙ, и это обязывает модель: каждая её грань
-  // должна смотреть лицом в комнату. В исходной модели дымосборник был
-  // вывернут целиком, и пока .glb нёс свой двусторонний материал, three
-  // дорисовывал изнанку; с материалом ядра у камина пропала передняя стенка
-  // дымосборника, а сквозь неё было видно изнанку боковых. За ориентацией
-  // теперь следит сам `fireplace-retile.mjs` (шаг «ориентация»).
-  const STOVE_MATS = { stone: 'ashlar', firebrick: 'brick', timber: 'beam' };
-  // Развёртка у модели одна на все роли — один тайл на метр, — а размер рисунка
-  // у материалов разный по их природе. Дереву метровый тайл мелок вдвое: у него
-  // рисунок вдоль волокна, и на полке в 20 см глубиной он сходится в рябь,
-  // которую глаз читает как мокрый металл. Ему тайл в два метра и рельеф
-  // вполовину; камню и кирпичу метровый тайл ровно впору.
-  //
-  // Брус ещё и подкрашен, и это тоже кадр, а не вкус: `beam` в ядре самый
-  // светлый из деревянных наборов (яркость 99 против 52 у бревна сруба), и в
-  // упор к огню полка вылетала в пересвет — светло-бежевая доска посреди
-  // тёмной кладки, будто мокрая. Множитель сажает её к тону сруба, сохраняя
-  // рисунок; замена набора на бревно тон чинила, но вместе с ним уносила и
-  // продольную фактуру, ради которой брус и выбран.
-  const STOVE_LOOK = {
-    ashlar: { normalScale: 1.15 },
-    brick: { normalScale: 1 },
-    beam: { repeat: [0.5, 0.5], normalScale: 0.6, color: 0x8a6f52 },
-  };
-  createGLTFLoader()
-    .loadAsync(asset('models/props/fireplace.glb'))
-    .then((gltf) => {
-      gltf.scene.traverse((o) => {
-        if (!o.isMesh) return;
-        // камин в лунной тени крыши, как и прочая мебель (см. mesh())
-        o.castShadow = false;
-        o.receiveShadow = true;
-        const set = STOVE_MATS[o.material?.name];
-        // Неизвестное имя оставляем как есть, а не подставляем камень наугад:
-        // молчаливая подмена спрятала бы разъезд модели и кода, а серый камень
-        // на месте бруса выглядит достаточно правдоподобно, чтобы не заметить.
-        if (!set) return;
-        o.material = material(matset(set), STOVE_LOOK[set]);
-      });
-      stoveGroup.add(gltf.scene);
-    })
-    .catch(() => {}); // нет файла — огонь и свет всё равно на месте
 
   // Нутро топки — в firebox.js: футеровка кирпичом, под с золой, угли,
   // поленья, объёмное пламя и свет. Числа полости там же, они обмерены по самой
@@ -516,7 +458,7 @@ async function buildInterior(F, breathe) {
   adopt(table({ w: 1.15, d: 0.75, h: 0.755, mats: tableMats() }), tableAt.x, tableAt.z);
   dest = g;
   colliders.push({ x: tableAt.x, z: tableAt.z, r: 0.6 });
-  // блюдце, свеча, огонёк — в группе candleSet (её переставим на верх модели стола)
+  // блюдце, свеча, огонёк — в группе candleSet
   groupNamed('candleSet');
   mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.02, 12), iron, tableAt.x + 0.2, TABLE_TOP + 0.01, tableAt.z);
   mesh(
@@ -635,58 +577,43 @@ async function buildInterior(F, breathe) {
   return { group: g, colliders, stove, hearth: firebox.hearth, update };
 }
 
-// Реальные ассеты мебели (Poly Haven, CC0, glTF 1k) поверх процедурного
-// интерьера. Модель ставим базой на пол (по её bbox), прячем процедурный
-// двойник (visible=false), добавляем коллайдер. Нет файла → тихо оставляем
-// примитив. Всё в локали интерьера g — метрическая Y-up, как процедурная мебель.
+// Мелочь на местах: чугунок у камина и стопка книг на столе. Оба собраны
+// кодом (src/props/), ставятся базой на пол или на столешницу и заводят свой
+// коллайдер. Всё в локали интерьера g — метрическая Y-up, как процедурная
+// мебель.
+//
+// Раньше здесь лежали модели Poly Haven (brass_pot_01, book_encyclopedia_set_01):
+// два .gltf с .bin и шестью картами 1k на каждый — 430 КБ на две мелочи, что
+// стоят в тёмном углу тёмной комнаты. Прочая мебель Poly Haven и тогда не
+// подошла по стилю (стул — резной трон 2.4 м, «стол» — кубик 0.44 м), её
+// роль держит процедурная мебель ядра (buildInterior).
 async function loadInteriorProps(g, F, colliders) {
-  // Оставлены только модели, что по стилю и размеру ложатся в рустик-сруб:
-  // чугунок у печи и стопка книг на столе. Прочая мебель Poly Haven не подошла
-  // (стул — резной трон 2.4 м, «стол» — кубик 0.44 м, «бочка» — современная
-  // стальная бочка с наклейкой) — роль мебели держит процедурная (buildInterior).
-  // Загрузчик умеет `hide` (спрятать процедурный двойник) — заготовка под
-  // будущие рустик-модели, что пользователь скачает со Sketchfab.
+  const sets = matsets('iron', 'leather', 'paper');
+  // x,z — якорь в локали; yaw — доворот; on — 'floor' (по умолчанию) или
+  // 'table'; col — радиус коллайдера
   const PROPS = [
-    // file — относительно /models/props/; x,z — якорь в локали; yaw — доворот;
-    // on — 'floor'(деф)|'table'; col — радиус коллайдера; scale — доп. масштаб;
-    // hide — имя процедурной группы-двойника ('table'|'seat0'|'seat1')
     // чугунок стоял у прежней печи; камин занял это место, и котелок
     // переехал к краю подиума, откуда его удобно снять с огня
-    { file: 'brass_pot_01/brass_pot_01_1k.gltf', x: 0.32, z: -1.32, yaw: 1.0, col: 0.22 },
-    { file: 'book_encyclopedia_set_01/book_encyclopedia_set_01_1k.gltf', x: 1.6, z: 1.5, yaw: 0.6, on: 'table' },
+    { build: () => buildPot(sets), x: 0.32, z: -1.32, yaw: 1.0, col: 0.22 },
+    { build: () => buildBooks(sets), x: 1.6, z: 1.45, yaw: 0.6, on: 'table' },
   ];
-  const loader = createGLTFLoader();
   const box = new THREE.Box3();
   const TOP0 = F + 0.755; // верх процедурной столешницы (свеча стоит здесь)
-  let tableTop = TOP0;
   for (const p of PROPS) {
-    let gltf;
-    try {
-      gltf = await loader.loadAsync(asset('models/props/' + p.file));
-    } catch (e) {
-      continue; // файла нет — процедурный двойник остаётся на месте
-    }
-    const scene = gltf.scene;
-    // castShadow=false: пропсы стоят в комнате, в лунной тени крыши (см. mesh())
-    scene.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = true; } });
-    if (p.scale) scene.scale.multiplyScalar(p.scale);
-    scene.updateMatrixWorld(true);
-    box.setFromObject(scene);
-    const baseTo = p.on === 'table' ? tableTop : F;
+    const model = p.build();
+    model.updateMatrixWorld(true);
+    box.setFromObject(model);
+    // Стопка книг задана от своего левого ближнего угла, чугунок — от донца
+    // по центру. Обе группы ставим так, чтобы их СЕРЕДИНА пришлась на якорь,
+    // а низ — на пол или на столешницу.
+    const baseTo = p.on === 'table' ? TOP0 : F;
     const holder = new THREE.Group();
-    holder.position.set(p.x, baseTo - box.min.y, p.z); // база модели — на пол/стол
+    holder.position.set(p.x, baseTo - box.min.y, p.z);
     holder.rotation.y = p.yaw || 0;
-    holder.add(scene);
+    model.position.x -= (box.min.x + box.max.x) / 2;
+    model.position.z -= (box.min.z + box.max.z) / 2;
+    holder.add(model);
     g.add(holder);
-    if (p.hide) {
-      const twin = g.getObjectByName(p.hide);
-      if (twin) twin.visible = false;
-    }
-    if (p.hide === 'table') {
-      tableTop = (F - box.min.y) + box.max.y; // верх модельного стола — под предметы
-      const cs = g.getObjectByName('candleSet');
-      if (cs) cs.position.y += tableTop - TOP0; // свечу переставляем на стол
-    }
     if (p.col) colliders.push({ x: p.x, z: p.z, r: p.col });
   }
 }

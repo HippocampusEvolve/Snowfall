@@ -2,11 +2,11 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { fbm } from 'world-core/materials';
 import { snowTint } from './snowtint.js';
-import { createGLTFLoader } from './gltfload.js';
-import { asset } from './asset.js';
+import { buildFirepit, afterFirstFrames } from './props/index.js';
+import { matsets, prepareMatsets } from './matsets.js';
 import { FlameSheets } from './flame.js';
 
-// Костёр: кольцо камней из Blender (firepit.glb), зола, поленья с процедурной
+// Костёр: кольцо камней и зола кодом (props/firepit-geometry.js), поленья с процедурной
 // корой, тлеющие угли; пламя покадровой текстурой, искры, дым, мерцающий
 // тёплый свет. Источник тепла для Stats.
 //
@@ -17,56 +17,45 @@ import { FlameSheets } from './flame.js';
 const FUEL_TIME = 480; // секунд от полного костра до углей
 const BURN_MIN = 0.1; // «угли»: нижний предел горения
 
-// Кольцо камней собрано в Blender (blender-web-agent-kit) и запечено в один
-// материал: base + ORM, 584 треугольника, один draw call. Камни разной породы
-// (плитняк, колотый, окатанный) лежат плоской стороной вниз, стык к стыку, а
-// внутренние бока закопчены — копоть запечена в атлас по расстоянию до огня,
-// поэтому чернота приходится ровно на ту сторону, что смотрит в пламя.
-// Прежнее процедурное кольцо (одиннадцать мятых икосфер) — в истории файла.
-const PIT_MODEL = 'models/props/firepit.glb';
+// Кольцо камней собрано КОДОМ (src/props/firepit-geometry.js): четырнадцать
+// булыжников разной породы и пять обломков в стыках, зола диском внутри.
+// Раскладка зашита числами, а не случайностью, - костёр в мире один, и он
+// обязан быть одним и тем же в каждом заходе.
+//
+// До этого здесь лежала модель из Blender (firepit.glb, 187 КБ с текстурами и
+// Draco-декодером на 192 КБ впридачу). Пород и копоти в ней было больше, но
+// платил за них КАЖДЫЙ первый заход, а декодер тянулся ради одного предмета.
+// Прежняя загрузка - в истории файла.
 
 let pitProto = null;
 const pitWaiting = [];
 let pitLoading = null;
 
-/** Грузит кольцо камней один раз. Полосу загрузки ведёт DefaultLoadingManager. */
+/** Печёт набор щебня и собирает кольцо один раз на весь мир. */
 export function loadFirepitModel() {
   if (!pitLoading) {
-    pitLoading = createGLTFLoader()
-      .loadAsync(asset(PIT_MODEL))
-      .then((gltf) => {
-        pitProto = gltf.scene;
-        pitProto.traverse((o) => {
-          if (!o.isMesh) return;
-          o.castShadow = true;
-          o.receiveShadow = true;
-          // шероховатость лежит в ORM, множитель её не трогает
-          o.material.roughness = 1;
-          o.material.metalness = 0;
-          // у огня снег на камнях тает — лишь лёгкий иней с наружной стороны
-          snowTint(o.material, '0.6, 0.65, 0.78', 0.18, 0.6);
-        });
-        while (pitWaiting.length) pitWaiting.pop().add(pitProto.clone(true));
-        return pitProto;
-      })
-      // кольцо камней не доехало — костёр горит и без него; тихий фолбэк,
-      // как у камина в cabin.js. Молчать нельзя только в консоли.
-      .catch((e) => {
-        console.warn('кольцо камней не загрузилось:', e);
-        return null;
-      });
+    pitLoading = prepareMatsets('rubble').then(() => {
+      pitProto = buildFirepit(matsets('rubble'));
+      // у огня снег на камнях тает - лишь лёгкий иней с наружной стороны
+      snowTint(pitProto.getObjectByName('rubble').material, '0.6, 0.65, 0.78', 0.18, 0.6);
+      while (pitWaiting.length) pitWaiting.pop().add(pitProto.clone(true));
+      return pitProto;
+    });
   }
   return pitLoading;
 }
 
-loadFirepitModel();
+// Заказ отложен до первого нарисованного кадра: почему именно так - в
+// props/index.js, у afterFirstFrames.
+afterFirstFrames(loadFirepitModel);
 
 // размер полотна пламени: мельче — видно ступеньки, крупнее — дорого на телефоне
 const FLAME_W = 72;
 const FLAME_H = 108;
 const FLAME_FPS = 30; // текстура перерисовывается 30 раз в секунду, глазу хватает
 // Полотно шире, чем высокое: костёр приземистый и разлапистый, в отличие от
-// вытянутого огня в камине. Ширина подобрана по просвету кладки.
+// вытянутого огня в камине. Ширина подобрана по просвету кладки
+// (CLEARANCE = 0.372 м, см. props/firepit-geometry.js).
 const FLAME_PW = 0.95;
 const FLAME_PH = 0.9;
 
@@ -83,21 +72,11 @@ export class Campfire {
     this.burn = 1; // 0..1 — сглаженная сила горения (BURN_MIN на углях)
     this._flare = 0; // вспышка при подброшенном полене
 
-    // ---- костровище: кольцо камней из Blender ----
-    // группа отдаётся сцене сразу, модель доедет в неё сама
+    // ---- костровище: кольцо камней и зола ----
+    // Группа отдаётся сцене сразу, кольцо доедет в неё само: наборы ядра
+    // пекутся в воркере, и ждать их первому кадру незачем.
     if (pitProto) this.group.add(pitProto.clone(true));
     else pitWaiting.push(this.group);
-
-    // ---- зола под костром ----
-    // радиус меряется по просвету кладки (0.372 у модели): диск шире просвета
-    // прошёл бы сквозь камни на уровне земли и замерцал в стыках
-    const ash = new THREE.Mesh(
-      new THREE.CircleGeometry(0.36, 24).rotateX(-Math.PI / 2),
-      new THREE.MeshStandardMaterial({ color: 0x0d0a08, roughness: 1 })
-    );
-    ash.position.y = 0.02;
-    ash.receiveShadow = true;
-    this.group.add(ash);
 
     // ---- поленья с процедурной корой ----
     const barkCanvas = document.createElement('canvas');

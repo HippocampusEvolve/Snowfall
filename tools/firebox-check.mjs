@@ -4,7 +4,8 @@
  *
  *     node tools/firebox-check.mjs
  *
- * Полость промеряется ЛУЧАМИ по самой fireplace.glb, а не берётся из головы.
+ * Полость промеряется ЛУЧАМИ по самой кладке камина (src/props/fireplace-
+ * geometry.js), а не берётся из головы.
  * Дальше каждая деталь нутра — футеровка, под, зола, поленья, щепа, пламя —
  * проверяется на два вопроса:
  *
@@ -22,9 +23,12 @@
  * Порог здесь общий и жёсткий (MIN_GAP), под конкретную деталь он не
  * подкручивается: претензия гасится правкой сцены, а не допуском в проверке.
  */
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { readGLB } from './glb.mjs'
+// Числа нутра лежат в firebox.js, а тот тянет за собой воркеры выпечки
+// материалов - на Node их подменяет заглушка, и она обязана быть ПЕРВЫМ
+// импортом.
+import './node-worker-shim.mjs'
+import { boxTriangles } from '../src/props/parts.js'
+import { fireplaceParts } from '../src/props/fireplace-geometry.js'
 import {
   CAVITY,
   sideAt,
@@ -38,39 +42,20 @@ import {
   CHIPS,
 } from '../src/firebox.js'
 
-const here = path.dirname(fileURLToPath(import.meta.url))
-const GLB = path.join(here, '..', 'public', 'models', 'props', 'fireplace.glb')
-
 /** Наименьший зазор между чужими поверхностями, м. */
 const MIN_GAP = 0.008
 
 // ---------------------------------------------------------------------------
-// Вся геометрия модели, ВСЕМИ примитивами.
+// Вся кладка камина, всеми деталями.
 //
-// Раньше здесь брался `meshes[0].primitives[0]` - пока камин был одним мешем с
-// одним запечённым атласом, это была вся модель. После перевода на тайлящиеся
-// материалы (`fireplace-retile.mjs`) он разложен по ролям: камень, кирпич
-// топки, брус полки - три примитива. Проверка, читающая первый, перестаёт
-// видеть заднюю стенку и свод полости и меряет расстояние до наружной кладки:
-// «задняя стенка 0.357 вместо 0.115». Симптом выглядит как поехавшая модель, а
-// поехала - проверка.
-function loadModel(file) {
-  const { json, accessor } = readGLB(file)
-  const pos = []
-  const idx = []
-  for (const mesh of json.meshes) {
-    for (const prim of mesh.primitives) {
-      const p = accessor(prim.attributes.POSITION)
-      const i = accessor(prim.indices)
-      const base = pos.length / 3
-      for (const v of p) pos.push(v)
-      for (const v of i) idx.push(v + base)
-    }
-  }
-  return { pos: Float64Array.from(pos), idx: Float64Array.from(idx) }
-}
-
-const { pos, idx } = loadModel(GLB)
+// Раньше геометрия читалась из fireplace.glb, и был соблазн взять из неё один
+// первый примитив - пока камин был одним мешем, это была вся модель. После
+// разбора по ролям такая проверка переставала видеть заднюю стенку и свод и
+// меряла расстояние до наружной кладки: «задняя стенка 0.357 вместо 0.115».
+// Симптом выглядел как поехавшая модель, а поехала - проверка. Теперь камин
+// собирается кодом, и лучи идут по ТОМУ ЖЕ списку деталей, из которого его
+// строит сцена: разойтись им негде.
+const { pos, idx } = boxTriangles(fireplaceParts())
 const TRIS = idx.length / 3
 
 /** Ближайшее пересечение луча с моделью, или null. Мёллер-Трумбор. */
@@ -116,7 +101,7 @@ const claim = (name, ok, note = '') => {
 
 // ---------------------------------------------------------------------------
 // 1. Обмер полости: сетка лучей, а не один из середины
-console.log(`fireplace.glb: ${TRIS} треугольников\n`)
+console.log(`кладка камина: ${TRIS} треугольников\n`)
 console.log('обмер полости лучами:')
 const midY = (CAVITY.floor + CAVITY.roof) / 2
 const midZ = (CAVITY.back + CAVITY.mouth) / 2

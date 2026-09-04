@@ -35,6 +35,9 @@ for (const worker of workers) {
   };
 }
 
+let firstOrder = true; // первый заказ - это карты первого кадра
+let spare = 1; // следующий свободный воркер для мелких заказов
+
 function request(names) {
   if (failed) return;
   const fresh = names.filter((name) => waits.has(name) && !requested.has(name));
@@ -42,11 +45,22 @@ function request(names) {
   for (const name of fresh) requested.add(name);
   // Три карты первого кадра идут последовательно и не отнимают ядра у
   // компилятора. Большую отделку избы делим между фоновыми потоками.
-  if (fresh.length <= 3) workers[0].postMessage(fresh);
-  else {
+  if (fresh.length > 3) {
     const batches = workers.map(() => []);
     fresh.forEach((name, i) => batches[i % workers.length].push(name));
     batches.forEach((batch, i) => workers[i].postMessage(batch));
+  } else if (firstOrder) {
+    firstOrder = false;
+    workers[0].postMessage(fresh);
+  } else {
+    // А вот КАЖДЫЙ СЛЕДУЮЩИЙ мелкий заказ на нулевой воркер ставить нельзя.
+    // Щебень кострища и железо лопаты заказываются позже трёх карт первого
+    // кадра, но раньше снега, и, встав на тот же воркер, они отодвигали снег
+    // на две выпечки - готовность мира ждала предметов, которых ещё не видно.
+    // Мелочь уходит на свободные воркеры по кругу, нулевой остаётся за первым
+    // кадром и за тем, что за ним следом.
+    workers[spare].postMessage(fresh);
+    spare = 1 + (spare % (workers.length - 1));
   }
 }
 
