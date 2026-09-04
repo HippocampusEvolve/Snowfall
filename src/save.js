@@ -27,8 +27,11 @@
 // меню (reset()) или открыть с ?reset.
 import { Journal, KIND } from './journal.js';
 import { Inventory } from './inventory.js';
-import { itemByMaterial } from './data/items.js';
+import { itemByMaterial, ITEM_INDEX } from './data/items.js';
 import { RECIPES } from './data/recipes.js';
+import { placedItemsFrom } from './placements.js';
+import { MATERIAL } from './caves.js';
+import { HAMMER_BLOCK } from './hammer-block.js';
 import {
   regrowStage, healedHits, fuelAfter, trailFade, pitFill, PIT_DEPTH,
 } from './growth.js';
@@ -166,7 +169,8 @@ export function forestFrom(records, worldNow) {
 export class SaveGame {
   constructor({
     digger, footprints, campfire, player,
-    shovel = null, logs = null, axe = null, pickaxe = null, woodpile = null, lumber = null,
+    shovel = null, logs = null, axe = null, pickaxe = null, hammer = null,
+    torch = null, woodpile = null, lumber = null,
   }) {
     this.digger = digger;
     this.footprints = footprints;
@@ -176,6 +180,8 @@ export class SaveGame {
     this.logs = logs;
     this.axe = axe;
     this.pickaxe = pickaxe;
+    this.hammer = hammer;
+    this.torch = torch;
     this.woodpile = woodpile;
     this.lumber = lumber;
     this.disabled = false; // взводит reset(): не дать автосейву записать мир обратно
@@ -224,6 +230,13 @@ export class SaveGame {
   /** Поленница изменилась (зовёт main.js: своего события у штабеля нет). */
   notePile(count) {
     this.journal.pile(count);
+  }
+
+  /** Предмет поставлен в мир или снят с прежней позиции. */
+  notePlace(item, position, take = false) {
+    const id = ITEM_INDEX[item];
+    if (id === undefined) return 0;
+    return this.journal.place(id, position.x, position.y, position.z, undefined, take);
   }
 
   /**
@@ -343,6 +356,9 @@ export class SaveGame {
     for (const id of ['soil', 'stone', 'ore']) {
       moved += this.inventory.add(id, Math.max(0, Math.floor(Number(mined[id]) || 0)));
     }
+    const p = head.player || {};
+    // Старые заголовки знали полено в руках, но ещё не писали его как ITEM.
+    if (p.carry && this.inventory.count('log') === 0) moved += this.inventory.add('log', 1);
     this.mined = { soil: 0, stone: 0, ore: 0 };
     head.mined = { ...this.mined };
     if (moved) {
@@ -380,7 +396,6 @@ export class SaveGame {
     // ---- костёр прогорел на углях, пока игрока не было
     if (typeof head.fuel === 'number') this.campfire.fuel = fuelAfter(head.fuel, away);
 
-    const p = head.player || {};
     if (sanePos(p.x, p.y, p.z)) {
       this.player.pos.set(p.x, p.y + 0.05, p.z); // чуть выше — не провалиться
     }
@@ -400,6 +415,11 @@ export class SaveGame {
       this.pickaxe.place(tools.pickaxe.x, tools.pickaxe.y, tools.pickaxe.z, tools.pickaxe.yaw || 0);
       if (tools.pickaxe.held) this.pickaxe.take();
     }
+    if (this.hammer && tools.hammer) {
+      this.hammer.place(tools.hammer.x, tools.hammer.y, tools.hammer.z, tools.hammer.yaw || 0);
+      if (tools.hammer.held) this.hammer.take();
+    }
+    if (this.torch) this.torch.restore(placedItemsFrom(this.journal.records(), 'torch'));
     // штабель поленницы — сколько было, столько и лежит
     if (this.woodpile && typeof head.pile === 'number') {
       this.woodpile.count = Math.min(head.pile, this.woodpile.capacity);
@@ -441,15 +461,25 @@ export class SaveGame {
     this.digger.replayBegin();
     try {
       for (const r of this.journal.records()) {
-        if (r.kind !== KIND.DIG) continue;
-        c.x = r.x;
-        c.y = r.y;
-        c.z = r.z;
-        if (r.tool === 'pickaxe') this.digger.pickaxeStroke(c, r.strength, r.material);
-        else if (r.tool === 'hand') {
-          const recipe = RECIPES.find((entry) => entry.give.material === r.material);
-          this.digger.buildStroke(c, recipe?.give.radius || 0.5, r.strength, r.material);
-        } else this.digger.shovelStroke(c, r.yaw, r.sign, r.strength, r.material);
+        if (r.kind === KIND.PLACE && r.id === ITEM_INDEX.block && !r.take) {
+          this.digger.blockStroke(
+            { x: r.x, y: r.y + HAMMER_BLOCK.half.y, z: r.z },
+            MATERIAL.STONE
+          );
+          continue;
+        }
+        if (r.kind === KIND.DIG) {
+          c.x = r.x;
+          c.y = r.y;
+          c.z = r.z;
+          if (r.tool === 'pickaxe') this.digger.pickaxeStroke(c, r.strength, r.material);
+          else if (r.tool === 'hand') {
+            const recipe = RECIPES.find((entry) =>
+              entry.verb === 'build' && entry.give.material === r.material
+            );
+            this.digger.buildStroke(c, recipe?.give.radius || 0.5, r.strength, r.material);
+          } else this.digger.shovelStroke(c, r.yaw, r.sign, r.strength, r.material);
+        }
       }
       if (fill < 1) this.digger.settle(fill, PIT_DEPTH);
     } finally {
@@ -496,7 +526,7 @@ export class SaveGame {
         forestV: FOREST_V,
         fuel: typeof d.fuel === 'number' ? d.fuel : 0.8,
         player: { x: d.px, y: d.py, z: d.pz, carry: d.carry ? 1 : 0 },
-        tools: { shovel: d.shv || null, axe: d.axe || null, pickaxe: null },
+        tools: { shovel: d.shv || null, axe: d.axe || null, pickaxe: null, hammer: null },
         logs: d.logs || [],
         pile: d.pile || 0,
       };
@@ -544,7 +574,7 @@ export class SaveGame {
         forestV: d.forestV,
         fuel: d.fuel,
         player: { x: d.px, y: d.py, z: d.pz, carry: d.carry },
-        tools: { shovel: d.shv || null, axe: d.axe || null, pickaxe: null },
+        tools: { shovel: d.shv || null, axe: d.axe || null, pickaxe: null, hammer: null },
         logs: d.logs || [],
         pile: d.pile || 0,
       };
@@ -612,7 +642,7 @@ export class SaveGame {
       forestV: FOREST_V,
       fuel: this.campfire.fuel,
       player: { x: p.x, y: p.y, z: p.z, carry: this.player.carrying ? 1 : 0 },
-      tools: { shovel: null, axe: null, pickaxe: null },
+      tools: { shovel: null, axe: null, pickaxe: null, hammer: null },
       logs: this.logs ? this.logs.serialize() : [],
       pile: this.woodpile ? this.woodpile.count : 0,
       mined: { ...this.mined },
@@ -628,6 +658,10 @@ export class SaveGame {
     if (this.pickaxe) {
       const p = this.pickaxe.pos;
       head.tools.pickaxe = { x: p.x, y: p.y, z: p.z, yaw: this.pickaxe.yaw, held: this.pickaxe.held ? 1 : 0 };
+    }
+    if (this.hammer) {
+      const h = this.hammer.pos;
+      head.tools.hammer = { x: h.x, y: h.y, z: h.z, yaw: this.hammer.yaw, held: this.hammer.held ? 1 : 0 };
     }
     // Кэш вокселей: он ровно того возраста, что и голова журнала, — по этому
     // совпадению загрузка и решает, верить ему или воспроизводить копки.

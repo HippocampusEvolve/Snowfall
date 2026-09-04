@@ -3,7 +3,10 @@ import { SNOW_CONST, createDiggerMaterial, loadDiggerMaterialSets } from './snow
 import { PIT_DEPTH } from './growth.js';
 import { compose, Y_FLOOR, MATERIAL } from './caves.js';
 import { meshChunk, VN, VS, SW } from './mesher.worker.js';
-import { DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength } from './dig-rules.js';
+import {
+  DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength, hammerAppliedStrength,
+} from './dig-rules.js';
+import { HAMMER_BLOCK } from './hammer-block.js';
 import {
   CAVE_LOAD_RADIUS,
   SURFACE_LOAD_RADIUS,
@@ -927,6 +930,16 @@ export class Digger {
     return hit ? hit.point.clone().addScaledVector(this._dir, 0.04) : null;
   }
 
+  /** Точка и мировая нормаль поверхности для факела и каменного блока. */
+  aimSurface(camera, reach = 2.5) {
+    const hit = this._aim(camera, reach);
+    if (!hit) return null;
+    const normal = hit.face
+      ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
+      : this._dir.clone().negate();
+    return { point: hit.point.clone(), normal };
+  }
+
   // Копок лопатой из камеры: штык входит по взгляду в точку прицела.
   shovelEdit(camera, sign, reach = 3.4) {
     const hit = this._aim(camera, reach);
@@ -992,12 +1005,43 @@ export class Digger {
     return { material: code, strength };
   }
 
+  // Молот долбит только камень и тем же журнальным видом, что кирка.
+  // Сила 0.4 укладывается в существующий шаг DIG без потери.
+  hammerEdit(camera, reach = 3.2) {
+    const hit = this._aim(camera, reach);
+    if (!hit) return null;
+    const c = hit.point.clone().addScaledVector(this._dir, 0.1);
+    const material = this.materialAt(c.x, c.y, c.z);
+    const strength = hammerAppliedStrength(material);
+    this.lastStroke = this.hammerStroke(c, strength, material);
+    return hit.point;
+  }
+
+  hammerStroke(center, strength = DIG_RULES.HAMMER_STONE_STRENGTH, material) {
+    const code = material === undefined
+      ? this.materialAt(center.x, center.y, center.z)
+      : material;
+    if (strength > 0) this.edit(center, DIG_RULES.PICK_RADIUS, -1, strength);
+    if (this.onStroke && !this._quiet)
+      this.onStroke(center, 0, -1, strength, code, 'pickaxe');
+    return { material: code, strength };
+  }
+
   /** Положить материал рукой по рецепту. */
   buildStroke(center, radius, strength, material) {
     this.edit(center, radius, 1, strength, material);
     if (this.onStroke && !this._quiet)
       this.onStroke(center, 0, 1, strength, material, 'hand');
     return { material, strength };
+  }
+
+  /** Поставить каменный блок размером 1 на 0.5 на 1 м. */
+  blockStroke(center, material = MATERIAL.STONE) {
+    this.editBox(
+      center, 0, HAMMER_BLOCK.half, 1,
+      HAMMER_BLOCK.strength, HAMMER_BLOCK.falloff, material
+    );
+    return { material, strength: HAMMER_BLOCK.strength };
   }
 
   /** Начать воспроизведение журнала: правки копятся, меши ждут. */

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { MATERIAL } from '../src/caves.js';
-import { DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength } from '../src/dig-rules.js';
+import {
+  DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength, hammerAppliedStrength,
+} from '../src/dig-rules.js';
 
 test('лопата не правит камень и руду', () => {
   assert.equal(shovelAppliedStrength(MATERIAL.STONE, -1), 0);
@@ -14,5 +16,13 @@ test('кирка правит камень с третью силы лопаты
   assert.equal(
     pickaxeAppliedStrength(MATERIAL.STONE),
     DIG_RULES.SHOVEL_STRENGTH / 3
+  );
+});
+
+test('молот правит только камень и вдвое слабее кирки', () => {
+  assert.equal(hammerAppliedStrength(MATERIAL.SOIL), 0);
+  assert.equal(
+    hammerAppliedStrength(MATERIAL.STONE),
+    pickaxeAppliedStrength(MATERIAL.STONE) / 2
   );
 });

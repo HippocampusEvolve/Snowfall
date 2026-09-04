@@ -865,15 +865,15 @@ export class GameAudio {
   }
 
   // сложить полено в поленницу: пара деревянных стуков — штабель принял
-  woodStack() {
+  woodStack(pitch = 1) {
     if (!this.ctx) return;
     const ctx = this.ctx;
     for (let i = 0; i < 2; i++) {
       const t = ctx.currentTime + 0.02 + i * (0.1 + Math.random() * 0.04);
       const o = ctx.createOscillator();
       o.type = 'sine';
-      o.frequency.setValueAtTime(200 - i * 45 + Math.random() * 25, t);
-      o.frequency.exponentialRampToValueAtTime(85 - i * 20, t + 0.06);
+      o.frequency.setValueAtTime((200 - i * 45 + Math.random() * 25) * pitch, t);
+      o.frequency.exponentialRampToValueAtTime((85 - i * 20) * pitch, t + 0.06);
       const og = ctx.createGain();
       og.gain.setValueAtTime(0.0001, t);
       og.gain.linearRampToValueAtTime(0.32 - i * 0.08, t + 0.004);
@@ -884,9 +884,10 @@ export class GameAudio {
       o.stop(t + 0.13);
       const src = ctx.createBufferSource();
       src.buffer = this.noise;
+      src.playbackRate.value = pitch;
       const bp = ctx.createBiquadFilter();
       bp.type = 'bandpass';
-      bp.frequency.value = 420 + Math.random() * 260;
+      bp.frequency.value = (420 + Math.random() * 260) * pitch;
       bp.Q.value = 2;
       const g = ctx.createGain();
       g.gain.setValueAtTime(0.0001, t);

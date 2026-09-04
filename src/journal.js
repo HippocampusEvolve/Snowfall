@@ -34,6 +34,9 @@
 //   PILE   9     u8  сколько поленьев стало в поленнице
 //   ITEM   9     u8  id предмета (индекс в data/items.js),
 //          10..11 i16 изменение количества
+//   PLACE  байт 8: бит 4 - предмет снят, а не поставлен;
+//          9     u8  id предмета (индекс в data/items.js),
+//          10..11 i16 x, 12..13 i16 y, 14..15 i16 z, шаг 2 см
 //
 // Почему фиксированная длина: журнал дописывается порциями по CHUNK записей
 // (ключ порции - её номер), и автосейв кладёт в IndexedDB только последнюю
@@ -44,7 +47,9 @@
 
 export const REC = 16; // байт на запись
 export const CHUNK = 4096; // записей в порции хранилища
-export const KIND = { DIG: 1, CHOP: 2, FELL: 3, SPLIT: 4, FUEL: 5, PILE: 6, ITEM: 7 };
+export const KIND = {
+  DIG: 1, CHOP: 2, FELL: 3, SPLIT: 4, FUEL: 5, PILE: 6, ITEM: 7, PLACE: 8,
+};
 
 const Q = 0.02; // шаг квантования центра копка, м
 const YAW_STEPS = 16; // делений азимута в 4 битах
@@ -52,6 +57,7 @@ const STRENGTH_STEP = 0.4; // шаг силы в 3 битах (0 .. 2.8)
 const KIND_MASK = 0x0f;
 const BUILD_BIT = 0x10;
 const PICKAXE_BIT = 0x20;
+const TAKE_BIT = 0x10;
 
 const clampI16 = (v) => Math.max(-32768, Math.min(32767, v));
 
@@ -171,6 +177,16 @@ export class Journal {
     return this.seqHead;
   }
 
+  /** Поставить предмет в мир или снять его с той же квантованной позиции. */
+  place(id, x, y, z, t, take = false) {
+    const o = this._head(KIND.PLACE | (take ? TAKE_BIT : 0), t);
+    this._buf[o + 9] = Math.max(0, Math.min(255, id | 0));
+    this._view.setInt16(o + 10, clampI16(Math.round(x / Q)), true);
+    this._view.setInt16(o + 12, clampI16(Math.round(y / Q)), true);
+    this._view.setInt16(o + 14, clampI16(Math.round(z / Q)), true);
+    return this.seqHead;
+  }
+
   /** Запись по номеру (0-based) в виде объекта. */
   at(i) {
     const o = i * REC;
@@ -201,6 +217,12 @@ export class Journal {
     } else if (r.kind === KIND.ITEM) {
       r.id = this._buf[o + 9];
       r.delta = v.getInt16(o + 10, true);
+    } else if (r.kind === KIND.PLACE) {
+      r.id = this._buf[o + 9];
+      r.x = v.getInt16(o + 10, true) * Q;
+      r.y = v.getInt16(o + 12, true) * Q;
+      r.z = v.getInt16(o + 14, true) * Q;
+      r.take = !!(tag & TAKE_BIT);
     }
     return r;
   }

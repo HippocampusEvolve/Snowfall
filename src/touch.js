@@ -21,6 +21,8 @@ const ICONS = {
   axe: '<line x1="6" y1="20.5" x2="14.2" y2="7.2"/><path d="M13 4.5 18.5 9c-1.7 1.1-3.3 1.4-5.2 1L11.6 7.6c.4-1.1 .8-2.1 1.4-3.1z"/>',
   // кирка: рукоять и два конца головки
   pickaxe: '<line x1="9" y1="21" x2="13" y2="7"/><path d="M4 8.5c4-3 11-3.5 16 .5M4 8.5l2.5-3M20 9l-2.5-3"/>',
+  // молот: рукоять и боёк
+  hammer: '<line x1="9" y1="21" x2="12" y2="9"/><path d="M5 6.5h13v5H5z"/>',
 };
 
 /**
@@ -63,6 +65,8 @@ export function createTouch(input, look) {
       ? 'Рубить топором'
       : tool === 'pickaxe'
         ? 'Долбить киркой'
+        : tool === 'hammer'
+          ? 'Долбить молотом'
         : 'Копать лопатой';
     if (tool) touch.setIcon('tbTool1', ICONS[tool] || ICONS.shovel, label);
     else touch.get('tbTool1')?.setAttribute('aria-label', label);
