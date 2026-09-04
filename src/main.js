@@ -28,14 +28,16 @@ import { Axe } from './axe.js';
 import { Pickaxe } from './pickaxe.js';
 import { Lumber } from './lumber.js';
 import { SaveGame } from './save.js';
+import { applyRecipe, buildAvoided, buildRecipeFor } from './building.js';
 import { createAwakening } from './awaken.js';
 import { createSpread } from './spread.js';
 import { createTouch, touchForced, touchSupported } from './touch.js';
 import { createSupport } from './support.js';
 import { Body, Input, SmoothLook, ViewModel, VIEW_Z } from 'world-core/core';
+import { material } from 'world-core/materials';
 import { createShell } from './shell.js';
 import { keepOffline } from './offline.js';
-import { prepareMatsets } from './matsets.js';
+import { matset, prepareMatsets } from './matsets.js';
 
 // Вехи загрузки уходят в трассу boot.js: измерять её надо числами, а не
 // секундомером у экрана (см. `__FTE_BOOT__.trace()`).
@@ -188,6 +190,7 @@ const caves = createCaves({
     { x: 0, z: 0, r: 14 }, // стартовая площадка
   ],
 });
+const buildAvoid = caves.avoid.slice(0, 2); // для стройки закрыты изба и костёр
 
 // воксельное копание (Digger): реальный 3D-объём — ямы, тоннели, пещеры
 const digger = new Digger(scene, terrain, snowPatch, footprints, caves);
@@ -546,6 +549,48 @@ scene.add(camera);
 // Всё, что в руках, живёт в слое viewmodel: своя камера с узким FOV и свой
 // depth — предмет не растягивается у края кадра и не протыкает стены (world-core/core)
 const view = new ViewModel(camera, { keyDir: moonDir });
+
+// Мешочек висит на поясе у левого края кадра. Три формы показывают запас
+// телом самого мешочка, без цифр и подписей.
+function createBeltPouch() {
+  const group = new THREE.Group();
+  group.position.set(-0.42, -0.38, -0.58 * VIEW_Z);
+  group.rotation.set(0.08, 0.3, -0.08);
+  const plain = new THREE.MeshStandardMaterial({ color: 0x6b4228, roughness: 0.92 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), plain);
+  body.scale.set(1, 0.7, 0.42);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.1, 0.055, 8), plain);
+  neck.position.y = 0.075;
+  const cord = new THREE.Mesh(new THREE.TorusGeometry(0.078, 0.008, 4, 10), plain);
+  cord.position.set(0, 0.1, 0.005);
+  cord.rotation.x = Math.PI / 2;
+  group.add(body, neck, cord);
+  group.visible = false;
+  let shown = -1;
+  return {
+    group,
+    update(inventory) {
+      const total = inventory.total();
+      group.visible = total > 0;
+      const part = total / Math.max(1, inventory.capacity());
+      const stage = part < 1 / 3 ? 0 : part < 2 / 3 ? 1 : 2;
+      if (stage === shown) return;
+      shown = stage;
+      const height = [0.62, 0.82, 1][stage];
+      body.scale.y = height;
+      body.position.y = [-0.02, 0, 0.018][stage];
+      neck.position.y = [0.055, 0.075, 0.095][stage];
+      cord.position.y = neck.position.y + 0.025;
+    },
+    setMaterial(leather) {
+      for (const mesh of [body, neck, cord]) mesh.material = leather;
+      plain.dispose();
+    },
+  };
+}
+
+const beltPouch = createBeltPouch();
+view.add(beltPouch.group);
 const carriedLog = createCarriedLog();
 carriedLog.position.z *= VIEW_Z; // компенсация узкого FOV — кадр остаётся прежним
 view.add(carriedLog);
@@ -619,6 +664,7 @@ if (returning) {
   player.syncCamera();
 }
 carriedLog.visible = player.carrying; // недонесённое полено пережило перезагрузку
+beltPouch.update(saver.inventory);
 
 // debug (?debug): доступ к системам из консоли — удобно щупать копание,
 // подгонять зверей (__snow.critters.timer = 0) и жечь дрова (__snow.campfire.fuel = 0)
@@ -629,7 +675,7 @@ if (debug)
     // поле пещер: __snow.caves.exits - выходы наверх, к ним удобно телепортироваться
     caves,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
-    axe, pickaxe, lumber, woodpile, groundLogs,
+    axe, pickaxe, lumber, woodpile, groundLogs, inventory: saver.inventory,
     // журнал мира: `__snow.journal.stats()` — сколько записей, байт, как въехал
     journal: saver.journal,
     // Сдвинуть мир в прошлое и перезагрузиться: так живой мир (growth.js)
@@ -818,6 +864,10 @@ function doHandAction() {
       carriedLog.visible = true;
       audio.woodTake();
       carryHintT = 5; // подсказка, что полено можно просто бросить
+    } else if (buildTarget && buildRecipe) {
+      if (applyRecipe(buildRecipe, saver.inventory, digger, buildTarget, buildAvoid)) {
+        shadowDirty = true;
+      }
     } else if (shovel.held && !shovel.busy) {
       // воткнуть перед собой — лопата остаётся стоять, где оставил
       camera.getWorldDirection(_dirTmp);
@@ -1048,6 +1098,10 @@ setTimeout(unveilWorld, 15000);
 // и без ворот начали бы считаться прямо в критическом пути входа.
 let openWorldGate;
 const worldReady = new Promise((resolve) => { openWorldGate = resolve; });
+worldReady.then(async () => {
+  await prepareMatsets('leather');
+  beltPouch.setMaterial(material(matset('leather'), { normalScale: 1.2, color: 0x8a6244 }));
+});
 
 let warmed = false;
 function warmUp() {
@@ -1230,6 +1284,8 @@ let nearDoor = false; // рядом с дверью — работает F
 let nearFire = false; // рядом с костром — F подбрасывает полено
 let nearPile = false; // рядом с поленницей — F складывает принесённое полено
 let handTarget = null; // ближайший к прицелу предмет, который возьмёт F
+let buildTarget = null; // поверхность, на которую пустая рука положит материал
+let buildRecipe = null; // первый доступный рецепт: камень, грунт, снег
 let shovelHintT = 0; // сек показа подсказки после взятия лопаты
 let axeHintT = 0; // сек показа подсказки после взятия топора
 let pickaxeHintT = 0; // сек показа подсказки после взятия кирки
@@ -1417,6 +1473,7 @@ function tick(frameAt) {
   // велика: дрожь длится около секунды после КАЖДОГО удара топором, и на этом
   // флаге полная карта теней перерисовывалась каждый кадр всю рубку.
   if (lumber.felling) shadowDirty = true;
+  beltPouch.update(saver.inventory);
   view.update(dt, player); // sway/bob/дыхание/просадка — общие для всего, что в руках
   if (dbg) _fm[3] = performance.now(); // ловец: конец лопаты/рук
 
@@ -1470,6 +1527,8 @@ function tick(frameAt) {
   nearFire = fireDist < 2.4;
   nearPile = camera.position.distanceTo(woodpile.position) < 2.3;
   handTarget = null;
+  buildTarget = null;
+  buildRecipe = null;
   if (!player.carrying && !shovel.held && !axe.held && !pickaxe.held) {
     // Порог прицела: рука тянется к тому, на что игрок СМОТРИТ. Без него
     // (bestDot = -1) единственный предмет рядом брался даже строго за спиной.
@@ -1495,6 +1554,11 @@ function tick(frameAt) {
     if (!axe.held) consider('axe', axe.pos.x, axe.pos.y + 0.35, axe.pos.z);
     consider('pickaxe', pickaxe.pos.x, pickaxe.pos.y + 0.4, pickaxe.pos.z);
     for (const l of groundLogs.list) consider('log', l.x, l.y + 0.1, l.z, l);
+    buildRecipe = buildRecipeFor(saver.inventory);
+    if (buildRecipe) {
+      const point = digger.aimPoint(camera, 2.5);
+      if (point && !buildAvoided(point, buildAvoid, buildRecipe.give.radius)) buildTarget = point;
+    }
   }
   // намерение руки видно на самом штабеле: призрак — куда ляжет, подсветка — что возьмётся
   woodpile.preview(
@@ -1523,6 +1587,7 @@ function tick(frameAt) {
       pickaxe: 'F - взять кирку',
       log: 'F — поднять полено',
     }[handTarget.kind];
+  else if (buildTarget && buildRecipe) promptText = `F - ${buildRecipe.name}`;
   else if (shovel.held && shovelHintT > 0)
     promptText = 'ЛКМ — копать · ПКМ — намыть · F — воткнуть';
   else if (axe.held && axeHintT > 0)
@@ -1532,13 +1597,14 @@ function tick(frameAt) {
   if (touch && touch.active) {
     // кнопка «рука» показывается, когда F что-то сделает; тексты — без клавиш
     touch.setButtons({
-      action: nearDoor || player.carrying || !!handTarget || shovel.held || axe.held || pickaxe.held,
+      action: nearDoor || player.carrying || !!handTarget || !!buildTarget
+        || shovel.held || axe.held || pickaxe.held,
       tool: shovel.held ? 'shovel' : axe.held ? 'axe' : pickaxe.held ? 'pickaxe' : null,
     });
     if (promptText)
       promptText = promptText.startsWith('ЛКМ')
         ? 'кнопки справа - ' + (shovel.held ? 'копать и намыть' : axe.held ? 'рубить' : 'долбить')
-        : promptText.replace('F — ', '');
+        : promptText.replace(/^F [-—] /, '');
   }
   // DOM трогаем только на смене. Раньше подсказка писалась каждый кадр:
   // класс и текст переставлялись 60 раз в секунду, чтобы остаться теми же.

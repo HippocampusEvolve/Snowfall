@@ -10,7 +10,8 @@
 // Раскладка хранилища (база `snowfall`):
 //   world    - заголовок, одна запись: версия, эпоха, время сохранения,
 //              голова журнала, позиция, инструменты, поленья, поленница,
-//              топливо и счётчики добытого. То, чего мало и что меняется
+//              топливо и старые счётчики добытого для одноразового переноса.
+//              То, чего мало и что меняется
 //              редко, живёт последним состоянием - записи под него не нужны.
 //   journal  - сам журнал порциями по 4096 записей (ключ - номер порции):
 //              автосейв дописывает последнюю, а не переписывает всё.
@@ -25,7 +26,9 @@
 // и квота — сотни МБ против ~5 МБ. Смерть мир НЕ стирает. Сброс: кнопка в
 // меню (reset()) или открыть с ?reset.
 import { Journal, KIND } from './journal.js';
-import { MATERIAL } from './caves.js';
+import { Inventory } from './inventory.js';
+import { itemByMaterial } from './data/items.js';
+import { RECIPES } from './data/recipes.js';
 import {
   regrowStage, healedHits, fuelAfter, trailFade, pitFill, PIT_DEPTH,
 } from './growth.js';
@@ -40,7 +43,7 @@ const JOURNAL_STORE = 'journal';
 const CACHE_STORE = 'cache';
 const CACHE_KEY = 'voxels';
 const LS_KEY = 'snowfall.save.v1'; // самый старый формат — источник миграции
-const LS_KEY3 = 'snowfall.save.v3'; // фолбэк без IndexedDB: заголовок и кэш, без истории
+const LS_KEY3 = 'snowfall.save.v3'; // фолбэк без IndexedDB: заголовок, кэш и журнал
 const INTERVAL = 30_000; // автосейв, мс
 // Версия раскладки seeded-леса: записи журнала ссылаются на сосны по id, и
 // после пересева (другой scatter/count) старые id указывают на другие деревья.
@@ -181,6 +184,7 @@ export class SaveGame {
     // раньше, чем приедет прочитанное, и попасть им некуда быть не должно.
     // Эпоху load() подменит на ту, что лежит в заголовке.
     this.journal = new Journal();
+    this.inventory = new Inventory(this.journal);
     this._db = null; // кэш соединения; null после неудачи → фолбэк на localStorage
     this._dbPromise = null; // один общий open: параллельный вызов не получает ложный null
     this._fpCache = null; // последний RLE-снапшот следов — для sync-сейва (pagehide)
@@ -192,7 +196,7 @@ export class SaveGame {
     // Прочитанная, но ещё не применённая рубка: лес приезжает по сети позже,
     // чем читается сейв (см. forestReady).
     this._forest = null;
-    this.mined = { soil: 0, stone: 0, ore: 0 };
+    this.mined = { soil: 0, stone: 0, ore: 0 }; // читается только при переносе старого заголовка
     this._wire();
   }
 
@@ -202,15 +206,9 @@ export class SaveGame {
   _wire() {
     this.digger.onStroke = (c, yaw, sign, strength, material = 0, tool = 'shovel') => {
       this.journal.dig(c.x, c.y, c.z, yaw, sign, strength, undefined, material, tool);
-      if (sign < 0 && strength > 0) {
-        const name = material === MATERIAL.SOIL
-          ? 'soil'
-          : material === MATERIAL.STONE
-            ? 'stone'
-            : material === MATERIAL.ORE
-              ? 'ore'
-              : null;
-        if (name) this.mined[name]++;
+      if (tool === 'pickaxe' && sign < 0 && strength > 0) {
+        const item = itemByMaterial(material);
+        if (item) this.inventory.add(item.id, 1);
       }
     };
     if (this.lumber) {
@@ -314,7 +312,8 @@ export class SaveGame {
     try {
       this.journal.epoch = head.epoch;
       if (chunks) chunks.forEach((bytes, i) => this.journal.adopt(i, bytes));
-      this._apply(head, cache, debug);
+      const moved = this._apply(head, cache, debug);
+      if (moved) await this._persistMinedMigration(db, head, cache);
     } catch (e) {
       // мир восстановлен наполовину: это плохо, но не повод забыть его
       console.warn('сейв применён не целиком:', e);
@@ -336,19 +335,29 @@ export class SaveGame {
   _apply(head, cache, debug = false) {
     const away = Math.max(0, nowSec() - (head.savedAt || nowSec()));
     const worldNow = this.journal.now();
+    const oldSeq = head.seqHead;
+    const cacheWasCurrent = !!cache && cache.seq === oldSeq;
+    this.inventory.restore(this.journal.records());
     const mined = head.mined || {};
-    this.mined = {
-      soil: Math.max(0, Math.floor(Number(mined.soil) || 0)),
-      stone: Math.max(0, Math.floor(Number(mined.stone) || 0)),
-      ore: Math.max(0, Math.floor(Number(mined.ore) || 0)),
-    };
+    let moved = 0;
+    for (const id of ['soil', 'stone', 'ore']) {
+      moved += this.inventory.add(id, Math.max(0, Math.floor(Number(mined[id]) || 0)));
+    }
+    this.mined = { soil: 0, stone: 0, ore: 0 };
+    head.mined = { ...this.mined };
+    if (moved) {
+      head.seqHead = this.journal.seqHead;
+      if (cacheWasCurrent) cache.seq = head.seqHead;
+    }
 
     // ---- воксели: кэш, если он совпал с головой журнала, иначе воспроизведение
     const fill = pitFill(away);
     if (cache && cache.seq === head.seqHead && cache.editsK) {
       const entries = new Array(cache.editsK.length);
       for (let i = 0; i < cache.editsK.length; i++) entries[i] = [cache.editsK[i], cache.editsV[i]];
-      this.digger.load(entries, { fill });
+      const materials = new Array(cache.editMatK?.length || 0);
+      for (let i = 0; i < materials.length; i++) materials[i] = [cache.editMatK[i], cache.editMatV[i]];
+      this.digger.load(entries, { fill, materials });
       this.journal.mode = 'cache';
     } else {
       this._replayDigs(fill);
@@ -402,6 +411,26 @@ export class SaveGame {
     // брошенные поленья лежат, где их бросили; недонесённое — снова в руках
     if (this.logs && Array.isArray(head.logs)) this.logs.restore(head.logs);
     if (p.carry) this.player.carrying = true;
+    return moved;
+  }
+
+  // Перенос счётчиков и их обнуление ложатся одной транзакцией, поэтому
+  // повторная загрузка не сможет начислить старую добычу второй раз.
+  async _persistMinedMigration(db, head, cache) {
+    const pending = this.journal.pending();
+    try {
+      const tx = db.transaction([HEAD_STORE, JOURNAL_STORE, CACHE_STORE], 'readwrite');
+      tx.objectStore(HEAD_STORE).put(head, HEAD_KEY);
+      for (const [index, bytes] of pending) tx.objectStore(JOURNAL_STORE).put(bytes, index);
+      if (cache) tx.objectStore(CACHE_STORE).put(cache, CACHE_KEY);
+      await new Promise((resolve, reject) => {
+        tx.oncomplete = resolve;
+        tx.onerror = tx.onabort = () => reject(tx.error);
+      });
+      this.journal.flushed = this.journal.count;
+    } catch (e) {
+      console.warn('старая добыча перенесена только в памяти:', e);
+    }
   }
 
   // Воспроизведение копок из журнала: тот же метод копателя, что зовёт лопата,
@@ -417,7 +446,10 @@ export class SaveGame {
         c.y = r.y;
         c.z = r.z;
         if (r.tool === 'pickaxe') this.digger.pickaxeStroke(c, r.strength, r.material);
-        else this.digger.shovelStroke(c, r.yaw, r.sign, r.strength, r.material);
+        else if (r.tool === 'hand') {
+          const recipe = RECIPES.find((entry) => entry.give.material === r.material);
+          this.digger.buildStroke(c, recipe?.give.radius || 0.5, r.strength, r.material);
+        } else this.digger.shovelStroke(c, r.yaw, r.sign, r.strength, r.material);
       }
       if (fill < 1) this.digger.settle(fill, PIT_DEPTH);
     } finally {
@@ -497,8 +529,7 @@ export class SaveGame {
     return { head, chunks: null, cache };
   }
 
-  // Фолбэк-среда без IndexedDB: заголовок и кэш JSON-ом в localStorage,
-  // журнал туда не пишем — истории у такого мира честно нет.
+  // Фолбэк-среда без IndexedDB: заголовок, кэш и журнал в localStorage.
   _loadLS() {
     let raw;
     try { raw = localStorage.getItem(LS_KEY3) || localStorage.getItem(LS_KEY); } catch (e) { return false; }
@@ -523,8 +554,23 @@ export class SaveGame {
         editsK.push(k);
         editsV.push(v);
       }
+      const editMatK = [];
+      const editMatV = [];
+      for (const [k, v] of d.editMaterials || []) {
+        editMatK.push(k);
+        editMatV.push(v);
+      }
+      if (d.journal) this.journal.adopt(0, unb64(d.journal));
       this.journal.epoch = head.epoch;
-      this._apply(head, { seq: head.seqHead, editsK, editsV, fp: d.fp ? unb64(d.fp) : null });
+      const moved = this._apply(head, {
+        seq: head.seqHead, editsK, editsV, editMatK, editMatV,
+        fp: d.fp ? unb64(d.fp) : null,
+      });
+      if (moved && d.v === 3) {
+        d.head = head;
+        d.journal = b64(this.journal.snapshot());
+        localStorage.setItem(LS_KEY3, JSON.stringify(d));
+      }
       // рубка старого формата: у неё нет журнала, применяем как лежала
       if (d.v !== 3 && Array.isArray(d.fells) && d.forestV === FOREST_V) {
         this._forest = { fells: d.fells, regrow: [] };
@@ -546,6 +592,15 @@ export class SaveGame {
     for (const [k, v] of e) {
       editsK[i] = k;
       editsV[i] = v;
+      i++;
+    }
+    const em = this.digger.editMaterials || new Map();
+    const editMatK = new Int32Array(em.size);
+    const editMatV = new Uint8Array(em.size);
+    i = 0;
+    for (const [k, v] of em) {
+      editMatK[i] = k;
+      editMatV[i] = v;
       i++;
     }
     const p = this.player.pos;
@@ -576,7 +631,7 @@ export class SaveGame {
     }
     // Кэш вокселей: он ровно того возраста, что и голова журнала, — по этому
     // совпадению загрузка и решает, верить ему или воспроизводить копки.
-    const cache = { seq: head.seqHead, editsK, editsV, fp: this._fpCache };
+    const cache = { seq: head.seqHead, editsK, editsV, editMatK, editMatV, fp: this._fpCache };
     return { head, cache, chunks: this.journal.pending(), count: this.journal.count };
   }
 
@@ -649,17 +704,23 @@ export class SaveGame {
     }
   }
 
-  // фолбэк-среда без IndexedDB: заголовок и кэш JSON-ом, журнала нет
+  // Фолбэк-среда без IndexedDB: журнал идёт base64 рядом с JSON заголовка.
   _saveLS(d) {
     const edits = new Array(d.cache.editsK.length);
     for (let i = 0; i < d.cache.editsK.length; i++) {
       edits[i] = [d.cache.editsK[i], Math.round(d.cache.editsV[i] * 100) / 100];
+    }
+    const editMaterials = new Array(d.cache.editMatK.length);
+    for (let i = 0; i < d.cache.editMatK.length; i++) {
+      editMaterials[i] = [d.cache.editMatK[i], d.cache.editMatV[i]];
     }
     try {
       localStorage.setItem(LS_KEY3, JSON.stringify({
         v: 3,
         head: d.head,
         edits,
+        editMaterials,
+        journal: b64(this.journal.snapshot()),
         fp: d.cache.fp ? b64(d.cache.fp) : undefined,
       }));
     } catch (e) { /* квота — живём без памяти */ }
@@ -698,6 +759,7 @@ export class SaveGame {
       } catch (e) { /* ignore */ }
     }
     this.journal = new Journal();
+    this.inventory = new Inventory(this.journal);
     this.mined = { soil: 0, stone: 0, ore: 0 };
     this._wire();
   }

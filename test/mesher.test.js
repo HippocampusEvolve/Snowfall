@@ -115,6 +115,21 @@ test('правка игрока попадает в меш', () => {
   assert.ok(lowest < 1.2, `правка не углубила меш: низшая вершина ${lowest}`);
 });
 
+test('материал положенной правки важнее природного материала', () => {
+  const editMaterials = [];
+  const at = (i, j, k) => ((k + 1) * SW + (j + 1)) * SW + (i + 1);
+  for (let k = -1; k <= VN + 1; k++) {
+    for (let j = -1; j <= VN + 1; j++) {
+      for (let i = -1; i <= VN + 1; i++) editMaterials.push([at(i, j, k), 0]);
+    }
+  }
+  const m = meshChunk({
+    cx: 0, cy: 0, cz: 0, colH: colFlat(2.13), edits: null, editMaterials,
+  }, { ...flatCaves, materialAt: () => 3 });
+  assert.ok(m);
+  assert.ok([...m.material].every((value) => value === 0));
+});
+
 test('чанк с пещерой мешится не дольше 4 мс', () => {
   const caves = createCaves({ seed: WORLD_SEED, avoid: [] });
   const H = (x, z) => 2 * Math.sin(x * 0.03) + 1.5 * Math.cos(z * 0.021);
