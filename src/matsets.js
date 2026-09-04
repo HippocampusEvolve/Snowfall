@@ -4,7 +4,7 @@ import { makeSet, toTextures } from 'world-core/materials';
 // считает чистые байтовые карты по очереди, а главный поток только оборачивает
 // готовые массивы в канвы и текстуры.
 const NAMES = [
-  'bark', 'logend', 'split',
+  'log', 'bark', 'logend', 'split',
   'rubble', 'rubbleWarm', 'iron',
   'brick', 'hearth', 'beam', 'ashlar', 'floor',
   'cloth', 'wool', 'braid', 'leather', 'paper',

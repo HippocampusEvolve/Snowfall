@@ -25,7 +25,6 @@ const DRY = process.argv.includes('--dry');
 // значим только G (roughness), остальное константа.
 const SETS = [
   { from: 'public/textures', to: 'public/tex', mrMax: 512 },
-  { from: 'public/models/cabin/textures', to: 'public/models/cabin/tex', mrMax: 512 },
   { from: 'public/models/pines/textures', to: 'public/models/pines/tex', mrMax: 1024 },
   {
     from: 'public/models/props/book_encyclopedia_set_01/textures',
