@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { SaveGame } from '../src/save.js';
 import { KIND } from '../src/journal.js';
+import { ITEM_INDEX } from '../src/data/items.js';
 
 function deferred() {
   let resolve;
@@ -124,4 +125,37 @@ test('материалы воксельных правок уходят в кэ�
   };
   restored._apply(head, { ...saved.cache, seq: 0 });
   assert.deepEqual(options.materials, [[91, 2]]);
+});
+
+test('воткнутые факелы восстанавливаются свёрткой PLACE', () => {
+  let torches = null;
+  const saver = new SaveGame({
+    digger: { edits: new Map(), load() {} },
+    footprints: { restore() {} },
+    campfire: { fuel: 1 },
+    player: { pos: { set() {} }, carrying: false },
+    torch: { restore(records) { torches = records; } },
+  });
+  saver.journal.place(ITEM_INDEX.torch, 1, 2, 3, 1);
+  saver.journal.place(ITEM_INDEX.torch, -4, 5, 6, 2);
+  saver.journal.place(ITEM_INDEX.torch, 1, 2, 3, 3, true);
+  const head = {
+    epoch: saver.journal.epoch,
+    savedAt: Math.round(Date.now() / 1000),
+    seqHead: saver.journal.seqHead,
+    mined: {},
+  };
+  saver._apply(head, { seq: saver.journal.seqHead, editsK: [], editsV: [] });
+  assert.deepEqual(torches.map((r) => [r.x, r.y, r.z]), [[-4, 5, 6]]);
+});
+
+test('PLACE блока при переигрывании восстанавливает центр над нижней гранью', () => {
+  const saver = game(async () => new Uint8Array());
+  const blocks = [];
+  saver.digger.replayBegin = () => {};
+  saver.digger.replayEnd = () => {};
+  saver.digger.blockStroke = (center, material) => blocks.push({ ...center, material });
+  saver.journal.place(ITEM_INDEX.block, 1, 2, -3, 1);
+  saver._replayDigs(1);
+  assert.deepEqual(blocks, [{ x: 1, y: 2.25, z: -3, material: 2 }]);
 });

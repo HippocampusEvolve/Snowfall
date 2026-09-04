@@ -6,6 +6,7 @@ export const DIG_RULES = Object.freeze({
   SHOVEL_STRENGTH: 2.4,
   PICK_RADIUS: 0.32,
   PICK_STONE_STRENGTH: 2.4 / 3,
+  HAMMER_STONE_STRENGTH: 2.4 / 6,
 });
 
 export function shovelAppliedStrength(material, sign, strength = DIG_RULES.SHOVEL_STRENGTH) {
@@ -16,4 +17,8 @@ export function pickaxeAppliedStrength(material) {
   return material >= MATERIAL.STONE
     ? DIG_RULES.PICK_STONE_STRENGTH
     : DIG_RULES.SHOVEL_STRENGTH;
+}
+
+export function hammerAppliedStrength(material) {
+  return material >= MATERIAL.STONE ? DIG_RULES.HAMMER_STONE_STRENGTH : 0;
 }

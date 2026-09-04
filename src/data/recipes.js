@@ -9,8 +9,19 @@ const build = (id, name, item, material) => Object.freeze({
   verb: 'build',
 });
 
+const craft = (id, name, take, give) => Object.freeze({
+  id,
+  name,
+  take: Object.freeze(take),
+  give: Object.freeze(give),
+  verb: 'craft',
+  station: 'workbench',
+});
+
 export const RECIPES = Object.freeze([
   build('place-stone', 'положить камень', 'stone', MATERIAL.STONE),
   build('pour-soil', 'насыпать грунт', 'soil', MATERIAL.SOIL),
   build('shape-snow', 'слепить снег', 'snow', MATERIAL.SNOW),
+  craft('make-torch', 'сделать факел', { log: 1, soil: 1 }, { torch: 2 }),
+  craft('make-block', 'сделать каменный блок', { stone: 4 }, { block: 1 }),
 ]);

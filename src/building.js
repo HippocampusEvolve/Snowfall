@@ -1,7 +1,7 @@
 import { RECIPES } from './data/recipes.js';
 
 export function buildRecipeFor(inventory) {
-  return RECIPES.find((recipe) =>
+  return RECIPES.find((recipe) => recipe.verb === 'build' &&
     Object.entries(recipe.take).every(([id, n]) => inventory.count(id) >= n)
   ) || null;
 }

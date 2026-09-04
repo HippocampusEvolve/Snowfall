@@ -26,9 +26,16 @@ import { initSnowCap } from './snowcap.js';
 import { Shovel, loadShovelModel } from './shovel.js';
 import { Axe } from './axe.js';
 import { Pickaxe } from './pickaxe.js';
+import { Hammer } from './hammer.js';
+import { Torch } from './torch.js';
+import { Workbench } from './workbench.js';
 import { Lumber } from './lumber.js';
 import { SaveGame } from './save.js';
 import { applyRecipe, buildAvoided, buildRecipeFor } from './building.js';
+import { applyRecipeAt, recipeAt } from './crafting.js';
+import {
+  HAMMER_BLOCK, hammerBlockAvoided, hammerBlockCenter, placeHammerBlock,
+} from './hammer-block.js';
 import { createAwakening } from './awaken.js';
 import { createSpread } from './spread.js';
 import { createTouch, touchForced, touchSupported } from './touch.js';
@@ -474,7 +481,7 @@ let trees = null;
 colliders.push({ x: FIRE.x, z: FIRE.z, r: 0.85 });
 
 // Дрова входят в первый кадр, но их карты считает отдельный поток.
-await prepareMatsets('bark', 'logend', 'split');
+await prepareMatsets('bark', 'logend', 'split', 'floor', 'beam');
 
 // поленница у боковой стены дома (за углом от крыльца): запас дров, который
 // ВИДНО, а не цифра — и он КОНЕЧЕН. F у поленницы — взять полено (в руках,
@@ -492,6 +499,12 @@ colliders.push(block.obstacle);
 // брошенные поленья: F с поленом в руках (вне костра) — бросить перед собой,
 // полено ляжет в снег и останется лежать; F рядом — поднять обратно
 const groundLogs = new GroundLogs(scene);
+
+// Верстак стоит у боковой стены рядом с хозяйственным углом, но не пересекает
+// поленницу, колоду и оставленные инструменты.
+const workbench = new Workbench(terrain);
+scene.add(workbench.group);
+colliders.push(workbench.obstacle);
 
 // ---------- аудио, игрок, дыхание, статы ----------
 const audio = new GameAudio();
@@ -614,6 +627,12 @@ axe.place(block.x, block.topY, block.z, 2.6);
 const pickaxe = new Pickaxe(scene, view);
 pickaxe.place(4.2, terrain.getHeight(4.2, -16.2), -16.2, 2.35);
 
+// Факел - четвёртый инструмент, он появляется в руках из инвентаря после крафта.
+const torch = new Torch(scene, view);
+// Молот - пятый инструмент, лежит у верстака.
+const hammer = new Hammer(scene, view);
+hammer.place(0.75, terrain.getHeight(0.75, -19.55), -19.55, 2.2);
+
 // рубка леса: удары, дрожь кроны, валка, лежащие стволы, разделка (lumber.js)
 // Лес приезжает волной отделки, поэтому рубка заводится пустой: до приезда
 // топору просто не во что попасть (`setForest` в lumber.js).
@@ -642,7 +661,7 @@ const critters = new Critters(footprints, camera);
 // поленья, поленница, сваленные деревья (сброс — кнопка в меню или ?reset)
 const saver = new SaveGame({
   digger, footprints, campfire, player, shovel, logs: groundLogs,
-  axe, pickaxe, woodpile, lumber,
+  axe, pickaxe, hammer, torch, woodpile, lumber,
 });
 // Предметы переднего плана не нужны за плотной пеленой первого кадра. Они
 // входят в порционный прогрев сразу после ready и не мешают линковке поляны.
@@ -675,7 +694,8 @@ if (debug)
     // поле пещер: __snow.caves.exits - выходы наверх, к ним удобно телепортироваться
     caves,
     campfire, critters, saver, audio, sky, footprints, stats, shovel, view, look, freezes,
-    axe, pickaxe, lumber, woodpile, groundLogs, inventory: saver.inventory,
+    axe, pickaxe, hammer, torch, workbench, lumber, woodpile, groundLogs,
+    inventory: saver.inventory,
     // журнал мира: `__snow.journal.stats()` — сколько записей, байт, как въехал
     journal: saver.journal,
     // Сдвинуть мир в прошлое и перезагрузиться: так живой мир (growth.js)
@@ -792,7 +812,8 @@ function setToolHeld(slot, down) {
   if (slot === 1) {
     digHeld = down && shovel.held;
     chopHeld = down && !shovel.held && axe.held;
-    mineHeld = down && !shovel.held && !axe.held && pickaxe.held;
+    mineHeld = down && !shovel.held && !axe.held
+      && (pickaxe.held || (hammer.held && saver.inventory.count('block') === 0));
   } else buildHeld = down && shovel.held;
 }
 // поверхность под точкой: срез диггера → рельеф; пол/крыльцо домика — если выше
@@ -814,13 +835,23 @@ function doHandAction() {
     } else if (player.carrying && nearFire) {
       player.carrying = false;
       carriedLog.visible = false;
+      saver.inventory.take('log', 1);
       campfire.addFuel();
       audio.fireFeed();
       shadowDirty = true;
+    } else if (handTarget && handTarget.kind === 'workbench' && workbenchRecipe) {
+      if (applyRecipeAt(workbenchRecipe, saver.inventory, 'workbench')) {
+        if (player.carrying && saver.inventory.count('log') === 0) {
+          player.carrying = false;
+          carriedLog.visible = false;
+        }
+        audio.woodStack(1.35);
+      }
     } else if (player.carrying && nearPile && woodpile.count < woodpile.capacity) {
       // принесённое из леса — в штабель: запас, который видно
       player.carrying = false;
       carriedLog.visible = false;
+      saver.inventory.take('log', 1);
       woodpile.add();
       saver.notePile(woodpile.count); // штабель своего события не подаёт
       audio.woodStack();
@@ -829,6 +860,7 @@ function doHandAction() {
       // просто бросить: полено ляжет перед ногами и останется лежать
       player.carrying = false;
       carriedLog.visible = false;
+      saver.inventory.take('log', 1);
       camera.getWorldDirection(_dirTmp);
       const lx = player.pos.x + _dirTmp.x * 0.7;
       const lz = player.pos.z + _dirTmp.z * 0.7;
@@ -850,12 +882,25 @@ function doHandAction() {
       audio.pickaxeTake();
       shadowDirty = true;
       pickaxeHintT = 9;
+    } else if (handTarget && handTarget.kind === 'hammer') {
+      hammer.take();
+      audio.pickaxeTake();
+      shadowDirty = true;
+      hammerHintT = 9;
+    } else if (handTarget && handTarget.kind === 'torch') {
+      if (torch.takePlaced(
+        handTarget.ref,
+        saver.inventory,
+        (position, take) => saver.notePlace('torch', position, take)
+      )) shadowDirty = true;
     } else if (handTarget) {
       // поленница или лежащее полено — в руки
       if (handTarget.kind === 'log') {
+        if (saver.inventory.add('log', 1) !== 1) return;
         groundLogs.take(handTarget.ref);
         shadowDirty = true;
-      } else if (woodpile.take()) {
+      } else if (saver.inventory.count('log') === 0 && woodpile.take()) {
+        saver.inventory.add('log', 1);
         saver.notePile(woodpile.count); // штабель своего события не подаёт
       } else {
         return; // штабель пуст: рука потянулась — а брать нечего
@@ -864,6 +909,11 @@ function doHandAction() {
       carriedLog.visible = true;
       audio.woodTake();
       carryHintT = 5; // подсказка, что полено можно просто бросить
+    } else if (
+      !player.carrying && !shovel.held && !axe.held && !pickaxe.held
+      && !hammer.held && !torch.held && saver.inventory.count('torch') > 0
+    ) {
+      torch.take();
     } else if (buildTarget && buildRecipe) {
       if (applyRecipe(buildRecipe, saver.inventory, digger, buildTarget, buildAvoid)) {
         shadowDirty = true;
@@ -889,6 +939,32 @@ function doHandAction() {
       const px = player.pos.x + _dirTmp.x * 0.8;
       const pz = player.pos.z + _dirTmp.z * 0.8;
       pickaxe.plant(px, groundAt(px, pz), pz, Math.atan2(_dirTmp.x, _dirTmp.z));
+      audio.pickaxePlant();
+      shadowDirty = true;
+    } else if (torch.held && torchTarget) {
+      if (torch.plantAt(
+        torchTarget,
+        saver.inventory,
+        (position, take) => saver.notePlace('torch', position, take)
+      )) shadowDirty = true;
+    } else if (hammer.held && saver.inventory.count('block') > 0) {
+      if (hammerBlockTarget && placeHammerBlock(
+        saver.inventory,
+        digger,
+        hammerBlockTarget,
+        buildAvoid,
+        (center) => saver.notePlace('block', {
+          x: center.x, y: center.y - HAMMER_BLOCK.half.y, z: center.z,
+        })
+      )) {
+        audio.pickaxePlant();
+        shadowDirty = true;
+      }
+    } else if (hammer.held && !hammer.busy) {
+      camera.getWorldDirection(_dirTmp);
+      const hx = player.pos.x + _dirTmp.x * 0.8;
+      const hz = player.pos.z + _dirTmp.z * 0.8;
+      hammer.plant(hx, groundAt(hx, hz), hz, Math.atan2(_dirTmp.x, _dirTmp.z));
       audio.pickaxePlant();
       shadowDirty = true;
     }
@@ -1286,9 +1362,13 @@ let nearPile = false; // рядом с поленницей — F складыв
 let handTarget = null; // ближайший к прицелу предмет, который возьмёт F
 let buildTarget = null; // поверхность, на которую пустая рука положит материал
 let buildRecipe = null; // первый доступный рецепт: камень, грунт, снег
+let workbenchRecipe = null; // первый доступный рецепт верстака
+let torchTarget = null; // точка поверхности для воткнутого факела
+let hammerBlockTarget = null; // поверхность, к которой прилипнет каменный блок
 let shovelHintT = 0; // сек показа подсказки после взятия лопаты
 let axeHintT = 0; // сек показа подсказки после взятия топора
 let pickaxeHintT = 0; // сек показа подсказки после взятия кирки
+let hammerHintT = 0; // сек показа подсказки после взятия молота
 let carryHintT = 0; // сек показа подсказки «бросить полено»
 let shadowAcc = 0; // таймер перерисовки карты теней
 const _sRight = new THREE.Vector3(); // базис плоскости окна теней (⊥ лучу луны)
@@ -1363,6 +1443,22 @@ function onPickaxeImpact() {
   _sprayDir.copy(_dirTmp).multiplyScalar(-0.55);
   _sprayDir.y = 1.05;
   pickaxe.spray(p, _sprayDir);
+  shadowDirty = true;
+  return true;
+}
+
+// Молот без готового блока долбит камень вдвое слабее кирки.
+function onHammerImpact() {
+  const p = digger.hammerEdit(camera);
+  if (!p || !digger.lastStroke?.strength) {
+    audio.shovelWhiff();
+    return false;
+  }
+  audio.pickaxeHit(digger.lastStroke.material);
+  camera.getWorldDirection(_dirTmp);
+  _sprayDir.copy(_dirTmp).multiplyScalar(-0.45);
+  _sprayDir.y = 0.9;
+  hammer.spray(p, _sprayDir);
   shadowDirty = true;
   return true;
 }
@@ -1468,6 +1564,11 @@ function tick(frameAt) {
   axe.update(dt, onAxeImpact);
   if (pickaxe.held && mineHeld) pickaxe.trySwing('mine');
   pickaxe.update(dt, onPickaxeImpact);
+  if (hammer.held && mineHeld && saver.inventory.count('block') === 0) {
+    hammer.trySwing('mine');
+  }
+  hammer.update(dt, onHammerImpact);
+  torch.update(dt, t, camera);
   lumber.update(dt, player.pos); // дрожь крон и валка — после ударов этого кадра
   // Падающее дерево тащит тень за собой; дрожь кроны — нет. Разница в цене
   // велика: дрожь длится около секунды после КАЖДОГО удара топором, и на этом
@@ -1529,7 +1630,12 @@ function tick(frameAt) {
   handTarget = null;
   buildTarget = null;
   buildRecipe = null;
-  if (!player.carrying && !shovel.held && !axe.held && !pickaxe.held) {
+  workbenchRecipe = null;
+  torchTarget = null;
+  hammerBlockTarget = null;
+  const emptyTools = !shovel.held && !axe.held && !pickaxe.held
+    && !hammer.held && !torch.held;
+  if (emptyTools) {
     // Порог прицела: рука тянется к тому, на что игрок СМОТРИТ. Без него
     // (bestDot = -1) единственный предмет рядом брался даже строго за спиной.
     // У рубки такой порог свой и строже — AIM в lumber.js.
@@ -1544,20 +1650,42 @@ function tick(frameAt) {
         handTarget = { kind, ref };
       }
     };
-    // пустой штабель не предлагает полено — брать нечего, и это видно глазами;
-    // целимся в реальное верхнее полено, оно же и подсветится
-    if (woodpile.count > 0) {
-      woodpile.topWorld(_aim2);
-      consider('pile', _aim2.x, _aim2.y, _aim2.z);
+    if (!player.carrying) {
+      // Пустой штабель не предлагает полено - брать нечего.
+      if (woodpile.count > 0) {
+        woodpile.topWorld(_aim2);
+        consider('pile', _aim2.x, _aim2.y, _aim2.z);
+      }
+      consider('shovel', shovel.pos.x, shovel.pos.y + 0.5, shovel.pos.z);
+      consider('axe', axe.pos.x, axe.pos.y + 0.35, axe.pos.z);
+      consider('pickaxe', pickaxe.pos.x, pickaxe.pos.y + 0.4, pickaxe.pos.z);
+      consider('hammer', hammer.pos.x, hammer.pos.y + 0.25, hammer.pos.z);
+      for (const l of groundLogs.list) consider('log', l.x, l.y + 0.1, l.z, l);
+      for (const placed of torch.placed) {
+        const p = placed.position;
+        consider('torch', p.x, p.y + 0.55, p.z, placed);
+      }
     }
-    consider('shovel', shovel.pos.x, shovel.pos.y + 0.5, shovel.pos.z);
-    if (!axe.held) consider('axe', axe.pos.x, axe.pos.y + 0.35, axe.pos.z);
-    consider('pickaxe', pickaxe.pos.x, pickaxe.pos.y + 0.4, pickaxe.pos.z);
-    for (const l of groundLogs.list) consider('log', l.x, l.y + 0.1, l.z, l);
-    buildRecipe = buildRecipeFor(saver.inventory);
-    if (buildRecipe) {
+    workbenchRecipe = recipeAt(saver.inventory, 'craft', 'workbench');
+    if (workbenchRecipe) {
+      const p = workbench.position;
+      consider('workbench', p.x, p.y, p.z);
+    }
+    buildRecipe = !player.carrying ? buildRecipeFor(saver.inventory) : null;
+    if (buildRecipe && !player.carrying) {
       const point = digger.aimPoint(camera, 2.5);
       if (point && !buildAvoided(point, buildAvoid, buildRecipe.give.radius)) buildTarget = point;
+    }
+  }
+  if (torch.held) {
+    const surface = digger.aimSurface(camera, 3.2);
+    if (surface) torchTarget = surface.point.addScaledVector(surface.normal, 0.03);
+  }
+  if (hammer.held && saver.inventory.count('block') > 0) {
+    const surface = digger.aimSurface(camera, 3.2);
+    if (surface) {
+      const center = hammerBlockCenter(surface);
+      if (!hammerBlockAvoided(center, buildAvoid)) hammerBlockTarget = surface;
     }
   }
   // намерение руки видно на самом штабеле: призрак — куда ляжет, подсветка — что возьмётся
@@ -1571,22 +1699,31 @@ function tick(frameAt) {
   if (shovel.held && shovelHintT > 0) shovelHintT -= dt;
   if (axe.held && axeHintT > 0) axeHintT -= dt;
   if (pickaxe.held && pickaxeHintT > 0) pickaxeHintT -= dt;
+  if (hammer.held && hammerHintT > 0) hammerHintT -= dt;
   if (carryHintT > 0) carryHintT -= dt;
+  const canDrawTorch = !player.carrying && emptyTools && saver.inventory.count('torch') > 0;
   let promptText = null;
   if (nearDoor) promptText = cabin.doorOpen ? 'F — закрыть дверь' : 'F — открыть дверь';
   else if (player.carrying && nearFire) promptText = 'F — подбросить в огонь';
+  else if (handTarget && handTarget.kind === 'workbench')
+    promptText = `F - ${workbenchRecipe.name}`;
   else if (player.carrying && nearPile && woodpile.count < woodpile.capacity)
     promptText = 'F — сложить в поленницу';
   else if (player.carrying && nearPile) promptText = 'поленница полна';
   else if (player.carrying && carryHintT > 0) promptText = 'F — бросить полено';
-  else if (handTarget)
+  else if (handTarget) {
     promptText = {
       pile: 'F — взять полено',
       shovel: 'F — взять лопату',
       axe: 'F — взять топор',
       pickaxe: 'F - взять кирку',
+      hammer: 'F - взять молот',
+      torch: 'F - взять факел',
       log: 'F — поднять полено',
     }[handTarget.kind];
+  } else if (hammerBlockTarget) promptText = 'F - поставить блок';
+  else if (torch.held && torchTarget) promptText = 'F - воткнуть факел';
+  else if (canDrawTorch) promptText = 'F - достать факел';
   else if (buildTarget && buildRecipe) promptText = `F - ${buildRecipe.name}`;
   else if (shovel.held && shovelHintT > 0)
     promptText = 'ЛКМ — копать · ПКМ — намыть · F — воткнуть';
@@ -1594,12 +1731,17 @@ function tick(frameAt) {
     promptText = 'ЛКМ — рубить · F — воткнуть';
   else if (pickaxe.held && pickaxeHintT > 0)
     promptText = 'ЛКМ - долбить · F - воткнуть';
+  else if (hammer.held && saver.inventory.count('block') === 0 && hammerHintT > 0)
+    promptText = 'ЛКМ - долбить · F - положить молот';
   if (touch && touch.active) {
     // кнопка «рука» показывается, когда F что-то сделает; тексты — без клавиш
     touch.setButtons({
-      action: nearDoor || player.carrying || !!handTarget || !!buildTarget
-        || shovel.held || axe.held || pickaxe.held,
-      tool: shovel.held ? 'shovel' : axe.held ? 'axe' : pickaxe.held ? 'pickaxe' : null,
+      action: nearDoor || player.carrying || !!handTarget || canDrawTorch || !!buildTarget
+        || !!torchTarget || !!hammerBlockTarget || shovel.held || axe.held || pickaxe.held
+        || (hammer.held && saver.inventory.count('block') === 0),
+      tool: shovel.held ? 'shovel' : axe.held ? 'axe'
+        : pickaxe.held ? 'pickaxe'
+          : hammer.held && saver.inventory.count('block') === 0 ? 'hammer' : null,
     });
     if (promptText)
       promptText = promptText.startsWith('ЛКМ')
@@ -1654,8 +1796,10 @@ function tick(frameAt) {
   // punch читался бы как рывок мыши. Дёргается мир — не viewmodel: он привязан
   // к виду, своя отдача у него в кейфреймах замаха.
   // отдача инструментов, в руках всегда максимум один
-  const pitch = shovel.punch.pitch + axe.punch.pitch + pickaxe.punch.pitch;
-  const roll = shovel.punch.roll + axe.punch.roll + pickaxe.punch.roll;
+  const pitch = shovel.punch.pitch + axe.punch.pitch + pickaxe.punch.pitch
+    + hammer.punch.pitch;
+  const roll = shovel.punch.roll + axe.punch.roll + pickaxe.punch.roll
+    + hammer.punch.roll;
   let fzProg = 0, fzGeo = 0, fzTex = 0, fzShadow = false;
   if (dbg) {
     _fm[5] = performance.now(); // ловец: конец HUD/прочего, старт рендера

@@ -7,6 +7,8 @@ export const ITEMS = Object.freeze([
   Object.freeze({ id: 'stone', name: 'камень', stack: 24, material: MATERIAL.STONE }),
   Object.freeze({ id: 'ore', name: 'руда', stack: 12, material: MATERIAL.ORE }),
   Object.freeze({ id: 'log', name: 'полено', stack: 1, material: null }),
+  Object.freeze({ id: 'torch', name: 'факел', stack: 8, material: null }),
+  Object.freeze({ id: 'block', name: 'каменный блок', stack: 8, material: null }),
 ]);
 
 export const ITEM_INDEX = Object.freeze(
