@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { cachedSet } from 'world-core/materials';
 import { asset } from './asset.js';
+import { matset, prepareMatsets } from './matsets.js';
 
 // Общий материал снега для базового террейна и деформируемого патча.
 // base  — обычный меш, следы только шейдингом; дырка (discard) под патчем.
@@ -75,6 +75,54 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
     uniforms.uPatchRect = { value: new THREE.Vector4(9e9, 9e9, 9e9, 9e9) };
   } else {
     uniforms.uHeight = { value: heightTex };
+  }
+
+  // Дальний базовый меш не повторяет шейдер близкого деформируемого патча.
+  // Ему нужны обычный снежный PBR и два выреза: под патчем и над копанием.
+  // Следы, протектор и искры остаются на плотном патче вокруг игрока.
+  if (mode === 'base') {
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vWp;')
+        .replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;'
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+          varying vec3 vWp;
+          uniform sampler2D uTrail;
+          uniform float uTrailArea;
+          uniform sampler2D uCut;
+          uniform float uCutArea;
+          uniform float uCutOn;
+          uniform vec4 uPatchRect;`
+        )
+        .replace(
+          '#include <clipping_planes_fragment>',
+          `if (vWp.x > uPatchRect.x && vWp.z > uPatchRect.y &&
+               vWp.x < uPatchRect.z && vWp.z < uPatchRect.w) discard;
+          if (uCutOn > 0.5 && texture2D(uCut, vec2(vWp.x, vWp.z) / uCutArea + 0.5).r > 0.5) discard;
+          #include <clipping_planes_fragment>`
+        )
+        .replace(
+          '#include <map_fragment>',
+          `#include <map_fragment>
+          vec2 trailUv = vec2(vWp.x, -vWp.z) / uTrailArea + 0.5;
+          float trail = 0.0;
+          if (!any(greaterThan(abs(trailUv - 0.5), vec2(0.499)))) {
+            vec2 packedTrail = texture2D(uTrail, trailUv).rg;
+            trail = max(packedTrail.r, packedTrail.g);
+          }
+          diffuseColor.rgb *= 1.0 - trail * 0.38;
+          diffuseColor.b *= 1.0 + trail * 0.06;`
+        );
+    };
+    mat.customProgramCacheKey = () => 'snow-base-light';
+    return { material: mat, uniforms };
   }
 
   mat.onBeforeCompile = (shader) => {
@@ -265,7 +313,7 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         // утоптанный снег темнее и синее
         diffuseColor.rgb *= 1.0 - tr * 0.38;
         diffuseColor.b *= 1.0 + tr * 0.06;
-        // искры на снегу — мерцают при движении взгляда
+        // искры видны на близком снегу и меняются с направлением взгляда
         float camDist = length(cameraPosition - vWp);
         vec3 vdir = normalize(cameraPosition - vWp);
         vec2 cell = floor(vWp.xz * 24.0);
@@ -569,7 +617,8 @@ export async function loadDiggerMaterialSets(material) {
   if (!uniforms) return;
   for (const [slot, name] of DIGGER_SETS) {
     await nextBakeFrame();
-    const set = cachedSet(name);
+    await prepareMatsets(name);
+    const set = matset(name);
     uniforms[`u${slot}`].value = set.map;
     uniforms[`u${slot}N`].value = set.normalMap;
     uniforms[`u${slot}R`].value = set.roughnessMap;

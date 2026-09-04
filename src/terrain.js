@@ -12,27 +12,24 @@ export class Terrain {
     const geo = new THREE.PlaneGeometry(size, size, seg, seg);
     geo.rotateX(-Math.PI / 2);
 
+    // Геометрия и heightmap имеют одну сетку 241 на 241. Высоту считаем
+    // один раз: прежний второй проход повторял весь трёхоктавный шум.
+    const N = SNOW_CONST.HN;
+    const data = new Uint16Array(N * N);
+    this.gridHalf = new Float32Array(N * N);
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
-      pos.setY(i, this.getHeight(pos.getX(i), pos.getZ(i)));
+      const height = this.getHeight(pos.getX(i), pos.getZ(i));
+      pos.setY(i, height);
+      const hf = THREE.DataUtils.toHalfFloat(height);
+      data[i] = hf;
+      this.gridHalf[i] = THREE.DataUtils.fromHalfFloat(hf);
     }
     geo.computeVertexNormals();
 
     // heightmap: та же сетка, что и вершины (241²), полуплавающая точность.
     // Узлы кэшируем В ТОЧНОСТИ ТЕКСТУРЫ (half-float туда-обратно) — их читает
     // getPatchHeight, и CPU-высота совпадает с тем, что видит шейдер патча
-    const N = SNOW_CONST.HN;
-    const data = new Uint16Array(N * N);
-    this.gridHalf = new Float32Array(N * N);
-    for (let j = 0; j < N; j++) {
-      const z = -size / 2 + (j * size) / seg;
-      for (let i = 0; i < N; i++) {
-        const x = -size / 2 + (i * size) / seg;
-        const hf = THREE.DataUtils.toHalfFloat(this.getHeight(x, z));
-        data[j * N + i] = hf;
-        this.gridHalf[j * N + i] = THREE.DataUtils.fromHalfFloat(hf);
-      }
-    }
     this.heightTex = new THREE.DataTexture(data, N, N, THREE.RedFormat, THREE.HalfFloatType);
     this.heightTex.minFilter = THREE.LinearFilter;
     this.heightTex.magFilter = THREE.LinearFilter;

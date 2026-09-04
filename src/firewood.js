@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { cylinderUV, discUV } from 'world-core/materials';
+import { cylinderUV, discUV, material } from 'world-core/materials';
 import {
   splitLogGeometry,
   roundLogGeometry,
@@ -9,6 +9,7 @@ import {
 } from 'world-core/props';
 import { snowTint } from './snowtint.js';
 import { snowCap } from './snowcap.js';
+import { matsets } from './matsets.js';
 
 // Дрова без инвентаря: поленница у дома — это и есть «сколько у меня дров»
 // (VISION.md: материя имеет вес и место, куча = счётчик). Полено берут по F,
@@ -25,9 +26,18 @@ import { snowCap } from './snowcap.js';
 // Снаружи кора несёт снежный налёт (snowTint) — та же метель, что на всём
 // остальном; в руках полено «домашнее», без снега.
 function outdoorLogMaterials() {
-  const m = logMaterials();
+  const m = preparedLogMaterials();
   snowTint(m.bark, '0.82, 0.86, 0.96', 0.55, 0.35);
   return m;
+}
+
+function preparedLogMaterials() {
+  const sets = matsets('bark', 'logend', 'split');
+  return logMaterials({
+    bark: material(sets.bark, { normalScale: 1.6 }),
+    end: material(sets.logend, { normalScale: 1.2 }),
+    split: material(sets.split, { normalScale: 1.3 }),
+  });
 }
 
 /** Радиус и длина полена в штабеле и на земле. */
@@ -253,7 +263,7 @@ export function createCarriedLog() {
   const holder = new THREE.Group();
   const log = new THREE.Mesh(
     splitLogGeometry(0.055, 0.55, Math.PI, 8),
-    splitLogMaterials(logMaterials())
+    splitLogMaterials(preparedLogMaterials())
   );
   log.rotation.z = Math.PI / 2 - 0.18;
   log.rotation.y = 0.35;

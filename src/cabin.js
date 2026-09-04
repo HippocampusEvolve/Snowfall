@@ -6,7 +6,7 @@ import { snowCap } from './snowcap.js';
 import { buildFirebox } from './firebox.js';
 import { material } from 'world-core/materials';
 import { bed, table, stool, rug, shelfWithBooks, logStack } from 'world-core/props';
-import { matset } from './matsets.js';
+import { matset, prepareMatsets } from './matsets.js';
 import { createSpread } from './spread.js';
 
 // Домик: Scandinavian Log Cabin (rivetech, CC-BY). Масштаб к реальным метрам,
@@ -31,8 +31,12 @@ const ROOM = { x0: -2.7, x1: 3.03, z0: -2.9, z1: 2.8 };
 const PORCH_Z1 = 4.67;
 // футпринт пола+крыльца+лестницы (локаль) — вне него не тратим raycast
 const FOOT = { x0: -2.85, x1: 4.6, z0: -3.05, z1: 5.1 };
+const CABIN_SETS = [
+  'bark', 'logend', 'split', 'brick', 'hearth', 'beam', 'ashlar',
+  'floor', 'cloth', 'wool', 'braid', 'leather', 'paper',
+];
 
-export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
+export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = Promise.resolve()) {
   // Изба приезжает за уже открытым меню, и собирается она порциями по кадрам.
   // Одним куском это стоило 675 мс главного потока подряд: разбор gltf,
   // снежные материалы по всем мешам, обмер рельефа под футпринтом, интерьер
@@ -40,7 +44,12 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}) {
   // кнопка «войти в ночь» была нарисована, но нажатие не отрабатывала.
   // `await breathe()` на стыках отдаёт кадр браузеру, когда набежал бюджет.
   const breathe = createSpread();
-  const gltf = await createGLTFLoader().loadAsync(asset('models/cabin/scene.gltf'));
+  // После компиляции поляны сеть и выпечка отделки идут параллельно.
+  const setsReady = Promise.resolve(workGate).then(() => prepareMatsets(...CABIN_SETS));
+  const [gltf] = await Promise.all([
+    createGLTFLoader().loadAsync(asset('models/cabin/scene.gltf')),
+    setsReady,
+  ]);
   const root = gltf.scene;
 
   // нормализация: большая сторона = LENGTH, центр XZ в нуле, пол на y=0
@@ -390,6 +399,17 @@ async function buildInterior(F, breathe) {
   const iron = new THREE.MeshStandardMaterial({ color: 0x23252b, roughness: 0.55, metalness: 0.7 });
 
   const colliders = []; // {x,z,r} или {x1,z1,x2,z2,r} — в локали модели
+  const make = (name, options) => material(matset(name), options);
+  const logMats = () => ({
+    bark: make('bark', { normalScale: 1.6 }),
+    end: make('logend', { normalScale: 1.2 }),
+    split: make('split', { normalScale: 1.3 }),
+  });
+  const tableMats = () => ({
+    top: make('floor', { normalScale: 0.8, color: 0xc9a473 }),
+    seat: make('floor', { normalScale: 0.8, color: 0xc9a473 }),
+    legs: make('beam', { normalScale: 0.7, color: 0x8a6a4a }),
+  });
 
   // мебель складываем в `dest` (по умолчанию корень g). Для предметов, которые
   // заменяет реальная модель (стол, сиденья, свеча), временно переключаем dest
@@ -540,7 +560,7 @@ async function buildInterior(F, breathe) {
   // а сложенная вдоль стены стопка показывала комнате одну тёмную кору и
   // сливалась с брёвнами. Прежние шесть цилиндров «по x» вдобавок лежали друг
   // в друге по оси.
-  adopt(logStack({ r: 0.055, len: 0.52, rows: [3, 2, 1] }), 0.62, -2.06, Math.PI / 2);
+  adopt(logStack({ r: 0.055, len: 0.52, rows: [3, 2, 1], mats: logMats() }), 0.62, -2.06, Math.PI / 2);
 
   await breathe();
 
@@ -549,7 +569,7 @@ async function buildInterior(F, breathe) {
   const tableAt = { x: 1.75, z: 1.35 };
   const TABLE_TOP = F + 0.755; // верх столешницы (свеча стоит на нём)
   groupNamed('table');
-  adopt(table({ w: 1.15, d: 0.75, h: 0.755 }), tableAt.x, tableAt.z);
+  adopt(table({ w: 1.15, d: 0.75, h: 0.755, mats: tableMats() }), tableAt.x, tableAt.z);
   dest = g;
   colliders.push({ x: tableAt.x, z: tableAt.z, r: 0.6 });
   // блюдце, свеча, огонёк — в группе candleSet (её переставим на верх модели стола)
@@ -577,7 +597,7 @@ async function buildInterior(F, breathe) {
   // ---- табуретки (каждая в группе 'seatN' — её заменит модель стула) ----
   [[1.15, 0.7], [2.3, 0.9]].forEach(([sx, sz], i) => {
     groupNamed('seat' + i);
-    adopt(stool({ r: 0.19, h: 0.45 }), sx, sz, i * 1.3);
+    adopt(stool({ r: 0.19, h: 0.45, mats: tableMats() }), sx, sz, i * 1.3);
     dest = g;
     colliders.push({ x: sx, z: sz, r: 0.24 });
   });
@@ -589,13 +609,22 @@ async function buildInterior(F, breathe) {
   // (см. BACK_WALL), и кровать, поставленная по ROOM, изголовьем сидела в
   // брёвнах. То же с правой стеной — кровать сдвинута к середине.
   const bedAt = { x: 2.0, z: -1.25 };
-  adopt(bed({ w: 1.02, l: 2.1 }), bedAt.x, bedAt.z);
+  adopt(bed({
+    w: 1.02,
+    l: 2.1,
+    mats: {
+      frame: make('beam', { normalScale: 0.7, color: 0x8a6a4a }),
+      sheet: make('cloth', { normalScale: 0.8, color: 0xe6dcc8 }),
+      blanket: make('wool', { normalScale: 1.1 }),
+      pillow: make('cloth', { normalScale: 0.9, color: 0xf2ebdc }),
+    },
+  }), bedAt.x, bedAt.z);
   colliders.push({ x1: bedAt.x, z1: bedAt.z - 0.85, x2: bedAt.x, z2: bedAt.z + 0.85, r: 0.5 });
 
   await breathe();
 
   // ---- круглый плетёный коврик по центру ----
-  adopt(rug({ r: 0.85 }), 0.25, 0);
+  adopt(rug({ r: 0.85, mats: { braid: make('braid', { normalScale: 0.7 }) } }), 0.25, 0);
 
   await breathe();
 
@@ -603,7 +632,15 @@ async function buildInterior(F, breathe) {
   // Задняя кромка полки — на линии выпуклости брёвен (BACK_WALL); прежняя
   // полка стояла на z −2.72, то есть целиком в толще стены, и книг в комнате
   // видно не было.
-  const shelf = shelfWithBooks({ width: 1.2, depth: 0.24, n: 5 });
+  const coverColors = [0x6b3434, 0x35502f, 0x2f3f5c, 0x77582a, 0x4c3355];
+  const shelfMats = {
+    wood: make('beam', { normalScale: 0.7, color: 0xa88a66 }),
+    pages: make('paper', { normalScale: 0.8, repeat: [2, 2] }),
+  };
+  coverColors.forEach((color, i) => {
+    shelfMats[`cover${i}`] = make('leather', { color, normalScale: 0.8 });
+  });
+  const shelf = shelfWithBooks({ width: 1.2, depth: 0.24, n: 5, mats: shelfMats });
   shelf.group.position.set(0.9, F + 1.5, BACK_WALL + 0.12);
   shelf.group.traverse((o) => {
     if (!o.isMesh) return;

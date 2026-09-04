@@ -35,6 +35,7 @@ import { createSupport } from './support.js';
 import { Body, Input, SmoothLook, ViewModel, VIEW_Z } from 'world-core/core';
 import { createShell } from './shell.js';
 import { keepOffline } from './offline.js';
+import { prepareMatsets } from './matsets.js';
 
 // Вехи загрузки уходят в трассу boot.js: измерять её надо числами, а не
 // секундомером у экрана (см. `__FTE_BOOT__.trace()`).
@@ -52,6 +53,7 @@ const STAGE = {
 };
 const mark = (n) => window.__FTE_BOOT__?.mark(n, STAGE[n]);
 mark('модуль разобран');
+const bootBreathe = createSpread();
 
 // ---------- прогресс заставки ----------
 // Саму полосу ведёт `boot.js`: он знает и ход по вехам, и вот эти доли, и
@@ -98,16 +100,22 @@ const SHADOW_HALF = 38; // полуразмер окна карты теней �
 // При EffectComposer MSAA сглаживает только финальный quad и зря держит
 // дополнительный буфер. Края смягчаются постобработкой и разрешением яруса.
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+// В проде ошибки шейдеров ловит сборка. Синхронное чтение логов у каждого
+// первого использования ждало SwiftShader и держало поток больше секунды.
+renderer.debug.checkShaderErrors = false;
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY.dpr));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = SHADOW_TIER.soft ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false; // взводим needsUpdate сами (см. блок теней в тике)
-renderer.shadowMap.needsUpdate = true; // первый кадр — с тенями
+// Первый кадр скрыт плотной пеленой. Карту теней строит первая порция
+// прогрева сразу после ready, когда это уже не задерживает кнопки входа.
+renderer.shadowMap.needsUpdate = false;
 let shadowDirty = false; // событие изменило кастеры → перерисовать тень в следующем кадре
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
 document.body.appendChild(renderer.domElement);
+await bootBreathe();
 
 // ---------- сцена ----------
 const scene = new THREE.Scene();
@@ -152,8 +160,12 @@ scene.add(hemi);
 
 // ---------- мир ----------
 const footprints = new Footprints(renderer, 160);
-const terrain = new Terrain(footprints, renderer.capabilities.getMaxAnisotropy());
+await bootBreathe();
+const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+await bootBreathe();
+const terrain = new Terrain(footprints, maxAnisotropy);
 scene.add(terrain.mesh);
+await bootBreathe();
 
 // снежные шапки (крыша, дрова) берут те же текстуры снега, что земля и раскоп —
 // вещество едино по всему миру; задаём до создания сруба/поленницы
@@ -180,6 +192,7 @@ const caves = createCaves({
 // воксельное копание (Digger): реальный 3D-объём — ямы, тоннели, пещеры
 const digger = new Digger(scene, terrain, snowPatch, footprints, caves);
 digger.onChanged = () => { shadowDirty = true; }; // перестройка ямы → тень заново
+await bootBreathe();
 
 const sky = new Sky(moonDir);
 scene.add(sky.group);
@@ -193,6 +206,224 @@ scene.add(aurora.mesh);
 const snow = new Snowfall();
 scene.add(snow.points);
 
+const CABIN = { x: -4.5, z: -13, rotY: 0.95 };
+const FIRE = { x: 2.5, z: -9 };
+// ---------- постобработка ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  QUALITY.bloom,
+  0.65,
+  0.82
+);
+composer.addPass(bloom);
+const output = new OutputPass();
+// OutputPass выставляет эти два define при первом render. Задаём их до
+// фоновой компиляции, чтобы первый настоящий кадр не создавал второй вариант.
+output.material.defines = { SRGB_TRANSFER: '', ACES_FILMIC_TONE_MAPPING: '' };
+output._outputColorSpace = renderer.outputColorSpace;
+output._toneMapping = renderer.toneMapping;
+composer.addPass(output);
+
+const postScene = new THREE.Scene();
+const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const postGeometry = new THREE.PlaneGeometry(2, 2);
+const postMaterials = [
+  composer.copyPass.material,
+  bloom.basic,
+  bloom.materialHighPassFilter,
+  ...bloom.separableBlurMaterials,
+  bloom.compositeMaterial,
+  bloom.blendMaterial,
+  output.material,
+];
+for (const material of postMaterials) postScene.add(new THREE.Mesh(postGeometry, material));
+
+// compileAsync ждёт линковку программ без синхронной остановки JavaScript.
+// Рендер-таргет совпадает с композером, поэтому ключи программ тоже совпадают.
+function compileSceneAsync(settleMs = 100) {
+  const previous = renderer.getRenderTarget();
+  renderer.setRenderTarget(composer.readBuffer);
+  const compiling = renderer.compileAsync(scene, camera);
+  renderer.setRenderTarget(previous);
+  // SwiftShader не отдаёт KHR_parallel_shader_compile. Three в этом случае
+  // ждёт лишь один таймер на 10 мс и считает программу готовой, а первое
+  // чтение uniform-полей затем синхронно ждёт линковку сотни миллисекунд.
+  // Даём драйверу закончить её в фоне, пока главный поток свободен.
+  const settled = new Promise((resolve) => setTimeout(resolve, settleMs));
+  return Promise.all([compiling, settled]);
+}
+
+async function compileObjectsAsync(objects, settleMs = 100) {
+  const settled = new Promise((resolve) => setTimeout(resolve, settleMs));
+  const compilations = [];
+  let sliceStarted = performance.now();
+  for (let at = 0; at < objects.length; at += 8) {
+    const compileScene = new THREE.Scene();
+    compileScene.fog = scene.fog;
+    scene.traverse((object) => {
+      if (object.isLight) compileScene.add(object.clone(false));
+    });
+    for (const object of objects.slice(at, at + 8)) {
+      const copy = object.clone(false);
+      copy.visible = true;
+      copy.frustumCulled = false;
+      compileScene.add(copy);
+      if (!object.castShadow) continue;
+      const source = Array.isArray(object.material) ? object.material : [object.material];
+      const depth = object.customDepthMaterial
+        ? source.map(() => object.customDepthMaterial)
+        : source.map((material) => {
+          const derived = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+          derived.map = material.map;
+          derived.alphaMap = material.alphaMap;
+          derived.alphaTest = material.alphaTest;
+          derived.displacementMap = material.displacementMap;
+          derived.displacementScale = material.displacementScale;
+          derived.displacementBias = material.displacementBias;
+          derived.side = material.side === THREE.FrontSide
+            ? THREE.BackSide
+            : material.side === THREE.BackSide ? THREE.FrontSide : THREE.DoubleSide;
+          return derived;
+        });
+      const shadowCopy = object.clone(false);
+      shadowCopy.material = Array.isArray(object.material) ? depth : depth[0];
+      shadowCopy.visible = true;
+      shadowCopy.frustumCulled = false;
+      compileScene.add(shadowCopy);
+    }
+    const previous = renderer.getRenderTarget();
+    renderer.setRenderTarget(composer.readBuffer);
+    compilations.push(renderer.compileAsync(compileScene, camera));
+    renderer.setRenderTarget(previous);
+    if (performance.now() - sliceStarted >= PROGRAM_BUDGET_MS) {
+      await nextTask();
+      sliceStarted = performance.now();
+    }
+  }
+  await Promise.all([...compilations, settled]);
+}
+
+function compilePostAsync(settleMs = 800) {
+  const previous = renderer.getRenderTarget();
+  renderer.setRenderTarget(composer.readBuffer);
+  const compiling = renderer.compileAsync(postScene, postCamera);
+  renderer.setRenderTarget(previous);
+  const settled = new Promise((resolve) => setTimeout(resolve, settleMs));
+  return Promise.all([compiling, settled]);
+}
+
+const reflectedPrograms = new Set();
+const PROGRAM_BUDGET_MS = 12;
+async function reflectProgramsAsync(programs) {
+  let sliceStarted = performance.now();
+  for (const program of programs) {
+    if (reflectedPrograms.has(program)) continue;
+    reflectedPrograms.add(program);
+    const reflectStarted = performance.now();
+    program.getUniforms();
+    console.log('reflect', program.id, program.name, program.type, Math.round(performance.now() - reflectStarted));
+    // Готовые программы читаются за единицы миллисекунд. Отдаём кадр только
+    // когда их сумма исчерпала бюджет, а не перед каждой программой.
+    if (performance.now() - sliceStarted >= PROGRAM_BUDGET_MS) {
+      await nextFrame();
+      sliceStarted = performance.now();
+    }
+  }
+}
+
+async function reflectSceneProgramsAsync(root = scene) {
+  const programs = new Set();
+  const priorities = new Map();
+  root.traverse((object) => {
+    if (!object.material) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      const program = renderer.properties.get(material).currentProgram;
+      if (program && !reflectedPrograms.has(program)) {
+        programs.add(program);
+        const key = material.customProgramCacheKey?.() || '';
+        let priority = material.isShaderMaterial || material.isMeshBasicMaterial ? 0 : 1;
+        if (key === 'snow-patch') priority = 2;
+        if (key === 'snow-base-light') priority = 3;
+        priorities.set(program, Math.max(priorities.get(program) || 0, priority));
+      }
+    }
+  });
+  const ordered = [...programs].sort((a, b) => priorities.get(a) - priorities.get(b));
+  await reflectProgramsAsync(ordered);
+}
+
+async function reflectRendererProgramsAsync() {
+  await reflectProgramsAsync(renderer.info.programs || []);
+}
+
+const primedTextures = new Set();
+async function primeSceneTexturesAsync(root = scene, include = () => true) {
+  const textures = new Set();
+  root.traverse((object) => {
+    if (!object.material || !include(object)) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      for (const value of Object.values(material)) if (value?.isTexture) textures.add(value);
+      for (const uniform of Object.values(material.uniforms || {})) {
+        if (uniform.value?.isTexture) textures.add(uniform.value);
+      }
+    }
+  });
+  let sliceStarted = performance.now();
+  for (const texture of textures) {
+    if (primedTextures.has(texture)) continue;
+    const image = texture.source?.data;
+    // Внешняя картинка могла ещё ехать. Её загрузчик сам подхватит позже,
+    // а пустой image нельзя считать загруженной текстурой.
+    if (image && 'complete' in image && !image.complete) continue;
+    primedTextures.add(texture);
+    renderer.initTexture(texture);
+    if (performance.now() - sliceStarted >= PROGRAM_BUDGET_MS) {
+      await nextFrame();
+      sliceStarted = performance.now();
+    }
+  }
+}
+
+// Костёр горит с первого кадра, поэтому его настоящий источник заводим до
+// первой компиляции.
+const campfire = new Campfire(scene, terrain, FIRE.x, FIRE.z);
+
+// В избе четыре окна, два источника топки, свеча и фонарь. Изба приезжает
+// позднее, но число источников PBR должно быть постоянным с первой компиляции.
+// Нулевые слоты заменяются реальными источниками одним изменением сцены.
+const cabinLightSlots = [
+  ...Array.from({ length: 4 }, () => new THREE.PointLight(0xffa550, 4.5, 7.5, 2)),
+  new THREE.PointLight(0xff8a40, 2.6, 8.5, 2),
+  new THREE.PointLight(0xff6a24, 1.5, 1.9, 2),
+  new THREE.PointLight(0xffc070, 1.15, 4, 2),
+  new THREE.PointLight(0xffb060, 2.2, 8, 2),
+];
+for (const light of cabinLightSlots) {
+  light.intensity = 0;
+  scene.add(light);
+}
+
+// Самый тяжёлый снежный шейдер начинает собираться, пока приезжают карты дров
+// и открывается хранилище сохранения. На повторном входе программы уже есть в
+// кэше драйвера, поэтому холодная страховочная пауза не нужна.
+const warmEntry = navigator.serviceWorker?.controller != null;
+const coreSceneCompiled = compileSceneAsync(warmEntry ? 100 : 900)
+  .then(() => reflectSceneProgramsAsync());
+const postProgramsCompiled = compilePostAsync(warmEntry ? 100 : 800)
+  .then(() => reflectSceneProgramsAsync(postScene));
+const coreDrawables = new Set();
+scene.traverse((object) => {
+  if (object.isMesh || object.isPoints || object.isLine) coreDrawables.add(object);
+});
+const coreSceneRoots = new Set(scene.children);
+const coreTexturesPrimed = coreSceneCompiled
+  .then(() => primeSceneTexturesAsync(scene, (object) => coreDrawables.has(object)));
+await bootBreathe();
+
 // ---------- то, что приезжает по сети ----------
 // Домик с тёплыми окнами и лес (сосны LOLIPOP, камни Quaternius) — четыре
 // мегабайта на двоих, и раньше мир ждал их здесь, top-level await'ом. Ждал
@@ -203,7 +434,6 @@ scene.add(snow.points);
 // зовёт игрока внутрь по первому кадру. Изба и лес приезжают следом, волной
 // отделки (она в конце файла, там же и порядок). Отсюда до неё живут три
 // вещи, которые эту отсрочку и делают возможной.
-const CABIN = { x: -4.5, z: -13, rotY: 0.95 };
 
 // Первая: реестр коллайдеров (формат — см. collide.js) ЖИВОЙ и поначалу
 // пустой. Игрок и рубка держат на этот массив ссылку, поэтому дописанное
@@ -238,9 +468,10 @@ let cabin = NO_CABIN;
 let trees = null;
 
 // костёр — очаг перед домом; он ЕСТ ДРОВА (затухает до углей без подброса)
-const FIRE = { x: 2.5, z: -9 };
-const campfire = new Campfire(scene, terrain, FIRE.x, FIRE.z);
 colliders.push({ x: FIRE.x, z: FIRE.z, r: 0.85 });
+
+// Дрова входят в первый кадр, но их карты считает отдельный поток.
+await prepareMatsets('bark', 'logend', 'split');
 
 // поленница у боковой стены дома (за углом от крыльца): запас дров, который
 // ВИДНО, а не цифра — и он КОНЕЧЕН. F у поленницы — взять полено (в руках,
@@ -368,6 +599,14 @@ const saver = new SaveGame({
   digger, footprints, campfire, player, shovel, logs: groundLogs,
   axe, pickaxe, woodpile, lumber,
 });
+// Предметы переднего плана не нужны за плотной пеленой первого кадра. Они
+// входят в порционный прогрев сразу после ready и не мешают линковке поляны.
+for (const object of scene.children) {
+  if (!coreSceneRoots.has(object) && object.visible) {
+    object.userData.bootDeferredRoot = true;
+    object.visible = false;
+  }
+}
 const returning = await saver.load();
 saver.start();
 // Вернувшийся мог выйти из мира, стоя на полу избы, а изба едет волной
@@ -406,18 +645,6 @@ if (debug)
     get cabin() { return cabin; },
     get trees() { return trees; },
   };
-
-// ---------- постобработка ----------
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  QUALITY.bloom,
-  0.65,
-  0.82
-);
-composer.addPass(bloom);
-composer.addPass(new OutputPass());
 
 // ---------- оболочка мира ----------
 // Вход, пауза и выход на витрину — общий для всех миров экран (shell.js).
@@ -653,6 +880,10 @@ function nextFrame() {
   return new Promise((r) => requestAnimationFrame(() => r()));
 }
 
+function nextTask() {
+  return new Promise((r) => setTimeout(r, 0));
+}
+
 let warmQueue = Promise.resolve();
 
 /** Поставить прогрев в очередь. Два прогрева разом рисовали бы кадр дважды. */
@@ -664,13 +895,27 @@ function warmSpread() {
 async function warmSceneSpread() {
   mark('прогрев начат');
   const pend = [];
+  const deferredRoots = new Set();
+  const deferredRoot = (object) => {
+    for (let node = object; node && node !== scene; node = node.parent) {
+      if (node.userData.bootDeferredRoot) return node;
+    }
+    return null;
+  };
   scene.traverse((o) => {
     // Только то, что рисуется: группы и пустышки прогревать нечем, а порции
     // из них состояли бы наполовину.
-    if ((o.isMesh || o.isPoints || o.isLine) && o.frustumCulled && !o.userData.warmed) {
+    const drawable = o.isMesh || o.isPoints || o.isLine;
+    const root = deferredRoot(o);
+    if (root) deferredRoots.add(root);
+    if (drawable && o.frustumCulled && !o.userData.warmed && (o.visible || root)) {
       pend.push(o);
     }
   });
+  if (pend.length === 0) {
+    mark('прогрев кончен (0 объектов)');
+    return;
+  }
   // Приехавшее ПРЯЧЕТСЯ и открывается порциями — иначе порции не значат ничего
   // (замер трассой, 03.09.2026). Погашенный frustum culling решает только одну
   // задачу: втянуть в кадр то, чего в нём нет. А только что добавленная волна
@@ -681,9 +926,28 @@ async function warmSceneSpread() {
   // свои объекты и лишь потом рисует: в кадре ровно то, что мы готовы оплатить.
   const hidden = new Set();
   for (const o of pend) {
-    if (!o.visible) continue; // спрятанное самим миром (двойники мебели) не трогаем
+    if (!o.visible && !deferredRoot(o)) continue;
     o.visible = false;
     hidden.add(o);
+  }
+  // Сначала дожидаемся программ без блокировки потока. После этого порционные
+  // кадры платят только за буферы, текстуры и собственно рисование.
+  await compileObjectsAsync(pend, 1700);
+  await reflectSceneProgramsAsync();
+  await reflectRendererProgramsAsync();
+  await primeSceneTexturesAsync();
+  // Модель могла доехать внутрь скрытой группы, пока работал компилятор.
+  // Перед открытием корня такие дочерние меши тоже прячем в порции.
+  for (const root of deferredRoots) {
+    root.traverse((object) => {
+      const drawable = object.isMesh || object.isPoints || object.isLine;
+      if (!drawable || hidden.has(object) || !object.visible) return;
+      object.visible = false;
+      hidden.add(object);
+      pend.push(object);
+    });
+    root.visible = true;
+    delete root.userData.bootDeferredRoot;
   }
   let size = 4;
   try {
@@ -719,6 +983,7 @@ async function warmSceneSpread() {
     // Что бы ни случилось посреди прогрева, мир не должен остаться дырявым.
     for (const o of hidden) o.visible = true;
   }
+  await reflectRendererProgramsAsync();
   view.render(renderer); // сцена рук — своим кадром, она рисуется отдельно
   mark(`прогрев кончен (${pend.length} объектов)`);
 }
@@ -781,7 +1046,11 @@ let warmed = false;
 function warmUp() {
   if (warmed) return;
   warmed = true;
-  requestAnimationFrame(() => {
+  requestAnimationFrame(async () => {
+    await Promise.all([coreSceneCompiled, postProgramsCompiled, coreTexturesPrimed]);
+    // Последний пакет uniform-ов и загрузка текстур приходят продолжениями
+    // promise. Отделяем от них настоящий кадр новой задачей браузера.
+    await nextFrame();
     // Один обычный кадр — чтобы за экраном входа было что показать. Прогрев
     // всего остального идёт ниже, ЗА уже открытым меню: раньше он стоял здесь
     // и задерживал экран на полсекунды, а следом ещё и подмораживал его.
@@ -791,7 +1060,9 @@ function warmUp() {
     digger.primeStart();
     composer.render();
     digger.primeEnd();
+    await nextTask();
     view.render(renderer);
+    for (const object of coreDrawables) object.userData.warmed = true;
     footprints.stampCircle(FIRE.x, FIRE.z, 1.9, 1);
     mark('мир собран');
     if (debug) {
@@ -817,6 +1088,9 @@ function warmUp() {
       // приедет последняя волна; вместе с ним проступят и кнопки.
       shell.ready();
     }
+    // Сигнал готовности не склеивается с запуском фоновой отделки в одну
+    // длинную задачу. Меню получает отдельную очередь для первого ввода.
+    await nextTask();
     startLoop();
     keepOffline(); // следующий приход в мир — без сети (offline.js)
     digger.bakeMaterialSets(); // наборы среза (камень, грунт, руда) уже при живом мире
@@ -846,7 +1120,7 @@ let dressed = null; // последняя волна: мебель внутри 
   // внутри самих сборщиков (`spread.js`).
   const breathe = createSpread();
   const [cabinRes, treesRes] = await Promise.allSettled([
-    createCabin(terrain, CABIN).then((v) => (mark('изба собрана'), v)),
+    createCabin(terrain, CABIN, coreSceneCompiled).then((v) => (mark('изба собрана'), v)),
     createTrees(terrain, 200, 45, [{ x: CABIN.x, z: CABIN.z, r: 7.5 }], caves)
       .then((v) => (mark('лес собран'), v)),
   ]);
@@ -856,6 +1130,7 @@ let dressed = null; // последняя волна: мебель внутри 
     colliders.push(...cabin.obstacles);
     snow.setCabinMask(cabin.snowMask); // под крышей снег не идёт
     await breathe();
+    for (const light of cabinLightSlots) scene.remove(light);
     scene.add(cabin.group);
     // мебель внутри дома приезжает своей волной; её коллайдеры — следом
     dressed = cabin.dressed.then((late) => {
