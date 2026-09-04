@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createCaves, compose, DEPTH_MIN, Y_FLOOR, SHAFT_R } from '../src/caves.js';
+import { createCaves, compose, DEPTH_MIN, Y_FLOOR, SHAFT_R, MATERIAL } from '../src/caves.js';
 import { WORLD_SEED } from '../src/seed.js';
 
 // Поле пещер не зависит от рельефа ничем, кроме глубины под поверхностью, -
@@ -33,6 +33,70 @@ test('одно семя даёт одно поле, другое - другое'
   }
   assert.equal(same, 2000);
   assert.ok(diff > 1500, `с другим семенем совпало слишком много точек: разных ${diff} из 2000`);
+});
+
+test('материал детерминирован от семени и слои держат границы', () => {
+  const a = createCaves({ seed: 12345, avoid: AVOID });
+  const b = createCaves({ seed: 12345, avoid: AVOID });
+  const other = createCaves({ seed: 999, avoid: AVOID });
+  let changed = 0;
+  for (let x = -80; x <= 80; x += 2) {
+    for (let z = -80; z <= 80; z += 2) {
+      const h = base(x, z);
+      for (let d = 7; d <= 30; d += 2) {
+        const ma = a.materialAt(x, h - d, z, h);
+        assert.equal(ma, b.materialAt(x, h - d, z, h));
+        if (ma !== other.materialAt(x, h - d, z, h)) changed++;
+      }
+    }
+  }
+  assert.ok(changed > 500, `другое семя изменило лишь ${changed} точек материала`);
+
+  const h = base(0, 0);
+  assert.equal(caves.materialAt(0, h - 1.2, 0, h), MATERIAL.SNOW);
+  assert.equal(caves.materialAt(0, h - 1.21, 0, h), MATERIAL.SOIL);
+  assert.equal(caves.materialAt(0, h - 4, 0, h), MATERIAL.SOIL);
+  assert.equal(caves.materialAt(0, h - 5, 0, h), MATERIAL.STONE);
+});
+
+test('стенка пещеры в метровой полосе всегда каменная', () => {
+  const field = createCaves({ seed: WORLD_SEED, avoid: [] });
+  let checked = 0;
+  for (let x = -70; x <= 70 && checked < 400; x += 3) {
+    for (let z = -70; z <= 70 && checked < 400; z += 3) {
+      const h = base(x, z);
+      for (let d = 6; d <= 28 && checked < 400; d += 0.5) {
+        const y = h - d;
+        const cave = field.sdf(x, y, z, d);
+        if (Math.abs(cave) > 0.2) continue;
+        assert.equal(field.materialAt(x, y, z, h), MATERIAL.STONE);
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked >= 200, `найдено лишь ${checked} точек стенки`);
+});
+
+test('руда занимает 1-3 процента камня глубже шести метров', () => {
+  const field = createCaves({ seed: WORLD_SEED, avoid: [] });
+  let ore = 0;
+  let stone = 0;
+  for (let x = -90; x <= 90; x += 1.5) {
+    for (let z = -90; z <= 90; z += 1.5) {
+      const h = base(x, z);
+      for (let d = 6.25; d <= 34; d += 1.25) {
+        const y = h - d;
+        const cave = field.sdf(x, y, z, d);
+        if (cave < 0) continue;
+        const material = field.materialAt(x, y, z, h, cave);
+        if (material === MATERIAL.ORE) ore++;
+        if (material === MATERIAL.STONE || material === MATERIAL.ORE) stone++;
+      }
+    }
+  }
+  const share = (100 * ore) / stone;
+  console.log(`      доля руды в камне: ${share.toFixed(2)} % (${ore} из ${stone})`);
+  assert.ok(share >= 1 && share <= 3, `доля руды ${share.toFixed(2)} %`);
 });
 
 test('под избой, костром и стартовой площадкой грунт цел', () => {

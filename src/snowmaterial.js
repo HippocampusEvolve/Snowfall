@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { cachedSet } from 'world-core/materials';
 import { asset } from './asset.js';
 
 // Общий материал снега для базового террейна и деформируемого патча.
@@ -316,10 +317,22 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
   });
 
   const SC = (REPEAT / WORLD).toFixed(8); // мировой масштаб текстуры (как у террейна)
+  const ROCK_SC = '0.50000000'; // один тайл бутового камня на два метра
   const uniforms = {
     uSnow: { value: textures.map },
     uSnowN: { value: textures.normalMap },
     uSnowR: { value: textures.roughnessMap },
+    // До порционной выпечки наборов все слои держат снег. Значения меняются
+    // по одному между кадрами, готовую программу шейдера собирать заново не надо.
+    uSoil: { value: textures.map },
+    uSoilN: { value: textures.normalMap },
+    uSoilR: { value: textures.roughnessMap },
+    uStone: { value: textures.map },
+    uStoneN: { value: textures.normalMap },
+    uStoneR: { value: textures.roughnessMap },
+    uOre: { value: textures.map },
+    uOreN: { value: textures.normalMap },
+    uOreR: { value: textures.roughnessMap },
     uHeight: { value: heightTex },
     uTrail: { value: footprints.texture },
     uTrailArea: { value: footprints.area },
@@ -331,24 +344,30 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
 
-    // ---------- vertex: мировые позиция и нормаль ----------
+    // ---------- vertex: мировые позиция, нормаль и код материала ----------
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n varying vec3 vWp;\n varying vec3 vWn;`)
+      .replace(
+        '#include <common>',
+        `#include <common>\n attribute float material;\n varying vec3 vWp;\n varying vec3 vWn;\n varying float vMaterial;`
+      )
       .replace(
         '#include <beginnormal_vertex>',
         `#include <beginnormal_vertex>\n vWn = normalize(mat3(modelMatrix) * objectNormal);`
       )
       .replace(
         '#include <begin_vertex>',
-        `#include <begin_vertex>\n vWp = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+        `#include <begin_vertex>\n vWp = (modelMatrix * vec4(transformed, 1.0)).xyz;\n vMaterial = material;`
       );
 
     // ---------- fragment ----------
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <common>',
       `#include <common>
-      varying vec3 vWp; varying vec3 vWn;
+      varying vec3 vWp; varying vec3 vWn; varying float vMaterial;
       uniform sampler2D uSnow; uniform sampler2D uSnowN; uniform sampler2D uSnowR;
+      uniform sampler2D uSoil; uniform sampler2D uSoilN; uniform sampler2D uSoilR;
+      uniform sampler2D uStone; uniform sampler2D uStoneN; uniform sampler2D uStoneR;
+      uniform sampler2D uOre; uniform sampler2D uOreN; uniform sampler2D uOreR;
       uniform sampler2D uHeight;
       uniform sampler2D uTrail;
       uniform float uTrailArea;
@@ -371,10 +390,26 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       float trailHiAt(vec2 uv) {
         if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
         return texture2D(uTrailHi, uv).r;
+      }
+      float materialWeight(float code) {
+        float d = clamp(abs(vMaterial - code), 0.0, 1.0);
+        return 1.0 - d * d * (3.0 - 2.0 * d);
+      }
+      vec3 diggerTriNormal(
+        sampler2D tex, vec3 wn, vec3 blend, vec2 tx, vec2 ty, vec2 tz
+      ) {
+        vec3 nx = texture2D(tex, tx).xyz * 2.0 - 1.0;
+        vec3 ny = texture2D(tex, ty).xyz * 2.0 - 1.0;
+        vec3 nz = texture2D(tex, tz).xyz * 2.0 - 1.0;
+        nx.xy *= 0.5; ny.xy *= 0.5; nz.xy *= 0.5;
+        nx = vec3(nx.xy + wn.zy, abs(nx.z) * wn.x);
+        ny = vec3(ny.xy + wn.xz, abs(ny.z) * wn.y);
+        nz = vec3(nz.xy + wn.xy, abs(nz.z) * wn.z);
+        return normalize(nx.zyx * blend.x + ny.xzy * blend.y + nz.xyz * blend.z);
       }`
     );
 
-    // диффуз: триplanar-снег + переход в фирн по глубине под поверхностью
+    // Цвет: четыре трипланарных слоя и плавные веса по атрибуту вершины.
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <map_fragment>',
       `#include <map_fragment>
@@ -384,9 +419,26 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       vec2 uvX = vWp.zy * ${SC};
       vec2 uvY = vWp.xz * ${SC};
       vec2 uvZ = vWp.xy * ${SC};
+      vec2 rockUvX = vWp.zy * ${ROCK_SC};
+      vec2 rockUvY = vWp.xz * ${ROCK_SC};
+      vec2 rockUvZ = vWp.xy * ${ROCK_SC};
       vec3 snowTex = texture2D(uSnow, uvX).rgb * bl.x
                    + texture2D(uSnow, uvY).rgb * bl.y
                    + texture2D(uSnow, uvZ).rgb * bl.z;
+      vec3 soilTex = texture2D(uSoil, rockUvX).rgb * bl.x
+                   + texture2D(uSoil, rockUvY).rgb * bl.y
+                   + texture2D(uSoil, rockUvZ).rgb * bl.z;
+      vec3 stoneTex = texture2D(uStone, rockUvX).rgb * bl.x
+                    + texture2D(uStone, rockUvY).rgb * bl.y
+                    + texture2D(uStone, rockUvZ).rgb * bl.z;
+      vec3 oreTex = texture2D(uOre, rockUvX).rgb * bl.x
+                  + texture2D(uOre, rockUvY).rgb * bl.y
+                  + texture2D(uOre, rockUvZ).rgb * bl.z;
+      vec4 materialWeights = vec4(
+        materialWeight(0.0), materialWeight(1.0),
+        materialWeight(2.0), materialWeight(3.0)
+      );
+      materialWeights /= max(dot(materialWeights, vec4(1.0)), 0.0001);
       // глубина под снежной поверхностью (из той же heightmap, что и террейн)
       vec2 huv = (vWp.xz / ${WORLD.toFixed(1)} + 0.5) * ${HUV_SCALE} + ${HUV_OFF};
       float groundY = texture2D(uHeight, huv).r;
@@ -395,14 +447,22 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       float firn = clamp(depth * 0.5 + wallness * 0.35, 0.0, 1.0);
       // как у поверхности: тот же тинт материала и приглушение тёмных вмятин,
       // иначе восстановленная поверхность заметно отличается от террейна
-      vec3 col = mix(snowTex * vec3(0.85, 0.88, 0.96), vec3(0.86, 0.885, 0.955), 0.55);
+      vec3 snowCol = mix(snowTex * vec3(0.85, 0.88, 0.96), vec3(0.86, 0.885, 0.955), 0.55);
       // уплотнённый снег вглубь — темнее, синее, стенки холоднее
-      col *= mix(1.0, 0.72, firn);
-      col.b *= 1.0 + firn * 0.06;
-      col = mix(col, col * vec3(0.90, 0.95, 1.08), wallness * 0.5);
+      snowCol *= mix(1.0, 0.72, firn);
+      snowCol.b *= 1.0 + firn * 0.06;
+      snowCol = mix(snowCol, snowCol * vec3(0.90, 0.95, 1.08), wallness * 0.5);
       // тонкая горизонтальная слоистость на стенках — срез сугроба
       float strata = sin(depth * 7.0) * 0.5 + 0.5;
-      col *= 1.0 + (strata - 0.5) * 0.08 * wallness;
+      snowCol *= 1.0 + (strata - 0.5) * 0.08 * wallness;
+      vec3 soilCol = soilTex * vec3(0.78, 0.63, 0.45);
+      vec3 stoneCol = stoneTex * vec3(0.82, 0.87, 0.94);
+      // Чугунная карта даёт рельеф жилы, а медный множитель - тёплый блик.
+      vec3 oreCol = oreTex * vec3(1.12, 0.72, 0.42);
+      vec3 col = snowCol * materialWeights.x
+               + soilCol * materialWeights.y
+               + stoneCol * materialWeights.z
+               + oreCol * materialWeights.w;
       diffuseColor.rgb *= col;
       // Следы (trail-карта) живут на всём, куда можно ступить: маска trS —
       // «смотрит вверх». Дно вырытой ямы и верх намытой кучи теперь принимают
@@ -410,7 +470,7 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       // срезом. Старые поверхностные следы над ямой стирает eraseCircle при
       // правке — призрак следов на свежем срезе не появляется.
       vec2 tuv = trailUv(vWp);
-      float trS = smoothstep(0.35, 0.75, wn0.y);
+      float trS = smoothstep(0.35, 0.75, wn0.y) * materialWeights.x;
       vec2 hiUvD = trailHiUv(vWp);
       float hiWD = trailHiFade(hiUvD);
       float tr = clamp(max(trailAt(tuv), trailHiAt(hiUvD) * hiWD), 0.0, 1.0) * trS;
@@ -421,35 +481,49 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       // несём альбедо (текстуру, слоистость) — рельеф среза виден и без прямого света.
       // Вес — по firn: на восстановленной поверхности (depth≈0, нормаль вверх) он 0,
       // и цвет совпадает с террейном, у которого такой эмиссии нет
-      vec3 snowFill = diffuseColor.rgb * vec3(0.13, 0.16, 0.24) * firn;`
+      vec3 materialFill = snowCol * vec3(0.13, 0.16, 0.24)
+                        * firn * materialWeights.x;
+      float oreGlint = pow(max(oreTex.r, max(oreTex.g, oreTex.b)), 2.0);
+      materialFill += vec3(0.12, 0.045, 0.012) * oreGlint * materialWeights.w;`
     );
 
     // мягкое свечение снега добавляем как эмиссию (после лунного/огня освещения)
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <emissivemap_fragment>',
-      `#include <emissivemap_fragment>\n totalEmissiveRadiance += snowFill;`
+      `#include <emissivemap_fragment>\n totalEmissiveRadiance += materialFill;`
     );
 
-    // шероховатость: тот же rough-map триplanar, глубина чуть глаже (плотнее лёд)
+    // Шероховатость смешивается теми же весами, руда остаётся чуть глаже.
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <roughnessmap_fragment>',
-      `float rough = texture2D(uSnowR, uvX).g * bl.x
-                  + texture2D(uSnowR, uvY).g * bl.y
-                  + texture2D(uSnowR, uvZ).g * bl.z;
-      float roughnessFactor = roughness * rough * mix(1.0, 0.82, firn);`
+      `float snowRough = (texture2D(uSnowR, uvX).g * bl.x
+                       + texture2D(uSnowR, uvY).g * bl.y
+                       + texture2D(uSnowR, uvZ).g * bl.z) * mix(1.0, 0.82, firn);
+      float soilRough = texture2D(uSoilR, rockUvX).g * bl.x
+                      + texture2D(uSoilR, rockUvY).g * bl.y
+                      + texture2D(uSoilR, rockUvZ).g * bl.z;
+      float stoneRough = texture2D(uStoneR, rockUvX).g * bl.x
+                       + texture2D(uStoneR, rockUvY).g * bl.y
+                       + texture2D(uStoneR, rockUvZ).g * bl.z;
+      float oreRough = (texture2D(uOreR, rockUvX).g * bl.x
+                      + texture2D(uOreR, rockUvY).g * bl.y
+                      + texture2D(uOreR, rockUvZ).g * bl.z) * 0.72;
+      float roughnessFactor = roughness * dot(
+        materialWeights, vec4(snowRough, soilRough, stoneRough, oreRough)
+      );`
     );
 
-    // нормали: триplanar normal-map (whiteout-смешение) для рельефа среза
+    // Нормали каждого слоя трипланарны, между слоями нет геометрической ступени.
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <normal_fragment_maps>',
-      `vec3 nX = texture2D(uSnowN, uvX).xyz * 2.0 - 1.0;
-      vec3 nY = texture2D(uSnowN, uvY).xyz * 2.0 - 1.0;
-      vec3 nZ = texture2D(uSnowN, uvZ).xyz * 2.0 - 1.0;
-      nX.xy *= 0.5; nY.xy *= 0.5; nZ.xy *= 0.5;
-      nX = vec3(nX.xy + wn0.zy, abs(nX.z) * wn0.x);
-      nY = vec3(nY.xy + wn0.xz, abs(nY.z) * wn0.y);
-      nZ = vec3(nZ.xy + wn0.xy, abs(nZ.z) * wn0.z);
-      vec3 wnorm = normalize(nX.zyx * bl.x + nY.xzy * bl.y + nZ.xyz * bl.z);
+      `vec3 snowNorm = diggerTriNormal(uSnowN, wn0, bl, uvX, uvY, uvZ);
+      vec3 soilNorm = diggerTriNormal(uSoilN, wn0, bl, rockUvX, rockUvY, rockUvZ);
+      vec3 stoneNorm = diggerTriNormal(uStoneN, wn0, bl, rockUvX, rockUvY, rockUvZ);
+      vec3 oreNorm = diggerTriNormal(uOreN, wn0, bl, rockUvX, rockUvY, rockUvZ);
+      vec3 wnorm = normalize(
+        snowNorm * materialWeights.x + soilNorm * materialWeights.y
+        + stoneNorm * materialWeights.z + oreNorm * materialWeights.w
+      );
       normal = normalize((viewMatrix * vec4(wnorm, 0.0)).xyz);
       {
         // вмятины следов шейдингом — как на базовом террейне (там тоже без
@@ -473,8 +547,33 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
     );
   };
 
-  mat.customProgramCacheKey = () => 'digger-snow';
+  mat.customProgramCacheKey = () => 'digger-material-v1';
+  mat.userData.diggerUniforms = uniforms;
   return mat;
+}
+
+const DIGGER_SETS = [
+  ['Stone', 'rubble'],
+  ['Soil', 'rubbleWarm'],
+  ['Ore', 'iron'],
+];
+
+const nextBakeFrame = () =>
+  typeof requestAnimationFrame === 'function'
+    ? new Promise((resolve) => requestAnimationFrame(resolve))
+    : Promise.resolve();
+
+/** Выпечь наборы среза по одному на кадр и подменить готовые униформы. */
+export async function loadDiggerMaterialSets(material) {
+  const uniforms = material.userData.diggerUniforms;
+  if (!uniforms) return;
+  for (const [slot, name] of DIGGER_SETS) {
+    await nextBakeFrame();
+    const set = cachedSet(name);
+    uniforms[`u${slot}`].value = set.map;
+    uniforms[`u${slot}N`].value = set.normalMap;
+    uniforms[`u${slot}R`].value = set.roughnessMap;
+  }
 }
 
 export const SNOW_CONST = { WORLD, HN, DEPTH, LIFT, CUTCOL, REPEAT };

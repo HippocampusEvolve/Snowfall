@@ -87,6 +87,8 @@ test('пещеры у спавна укладываются в бюджет ка
   let triangles = 0;
   for (const parts of columns.values()) {
     const merged = mergeChunkParts(parts);
+    assert.equal(merged.material.length, merged.position.length / 3);
+    assert.ok([...merged.material].every((v) => v >= 0 && v <= 3));
     if (!inSpawnFrustum(boundingSphere(merged.position))) continue;
     meshes++;
     triangles += merged.index.length / 3;

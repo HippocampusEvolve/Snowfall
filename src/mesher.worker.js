@@ -1,5 +1,5 @@
 import { edgeTable, triTable } from './mctables.js';
-import { createCaves, compose } from './caves.js';
+import { createCaves, compose, MATERIAL } from './caves.js';
 
 // Мешинг чанка: marching cubes по полю «рельеф - пещера - правка».
 //
@@ -40,6 +40,7 @@ const EDGE_NODE = EDGE.map(([a, b]) => {
 // на каждый чанк незачем (в воркере чанков тысячи за заход в мир).
 const FIELD = new Float32Array(SW * SW * SW);
 const GRAD = new Float32Array(SW * SW * SW * 3);
+const MAT = new Uint8Array(SW * SW * SW);
 const VERT = new Int32Array(S * S * S * 3); // ребро решётки -> номер вершины
 
 const fi = (i, j, k) => ((k + 1) * SW + (j + 1)) * SW + (i + 1); // узел -1..VN+1
@@ -56,7 +57,7 @@ const ei = (i, j, k, a) => ((k * S + j) * S + i) * 3 + a; // ребро решё
  *   порядок (k+1)*SW + (i+1)
  * @param {Array<[number, number]>|null} job.edits правки: [индекс в SW³, дельта]
  * @param {object} caves поле пещер (createCaves)
- * @returns {{position: Float32Array, normal: Float32Array, index: Uint32Array}|null}
+ * @returns {{position: Float32Array, normal: Float32Array, material: Uint8Array, index: Uint32Array}|null}
  */
 export function meshChunk(job, caves) {
   const { cx, cy, cz, colH } = job;
@@ -74,7 +75,15 @@ export function meshChunk(job, caves) {
       for (let j = -1; j <= VN + 1; j++) {
         const y = (oy + j) * VS;
         const p = fi(i, j, k);
-        FIELD[p] = compose(base, y, caves.sdf(x, y, z, base - y), FIELD[p]);
+        const cave = caves.sdf(x, y, z, base - y);
+        FIELD[p] = compose(base, y, cave, FIELD[p]);
+        MAT[p] = caves.materialAt
+          ? caves.materialAt(x, y, z, base, cave)
+          : base - y <= 1.2
+            ? MATERIAL.SNOW
+            : base - y <= 4
+              ? MATERIAL.SOIL
+              : MATERIAL.STONE;
       }
     }
   }
@@ -98,6 +107,7 @@ export function meshChunk(job, caves) {
   VERT.fill(-1);
   const pos = [];
   const nrm = [];
+  const mat = [];
   const idx = [];
   const ev = new Int32Array(12);
 
@@ -121,6 +131,15 @@ export function meshChunk(job, caves) {
     const n = pos.length / 3;
     pos.push(px, py, pz);
     nrm.push(gx, gy, gz);
+    // На границе слоёв ребро может видеть два кода. Больший код означает
+    // более твёрдую сторону, её и закрепляем за общей вершиной.
+    const ma = MAT[fi(ni, nj, nk)];
+    const mb = MAT[fi(
+      ni + (axis === 0 ? 1 : 0),
+      nj + (axis === 1 ? 1 : 0),
+      nk + (axis === 2 ? 1 : 0)
+    )];
+    mat.push(ma > mb ? ma : mb);
     VERT[e] = n;
     return n;
   };
@@ -160,6 +179,7 @@ export function meshChunk(job, caves) {
   return {
     position: new Float32Array(pos),
     normal: new Float32Array(nrm),
+    material: new Uint8Array(mat),
     index: new Uint32Array(idx),
   };
 }
@@ -186,7 +206,7 @@ if (inWorker) {
     }
     self.postMessage(
       { kind: 'chunk', cx: msg.cx, cy: msg.cy, cz: msg.cz, ver: msg.ver, ...out },
-      [out.position.buffer, out.normal.buffer, out.index.buffer]
+      [out.position.buffer, out.normal.buffer, out.material.buffer, out.index.buffer]
     );
   };
 }

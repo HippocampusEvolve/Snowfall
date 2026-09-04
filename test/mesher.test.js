@@ -24,6 +24,8 @@ test('плоское поле кладёт вершины ровно на сво
   const h = 2.13;
   const m = meshChunk({ cx: 0, cy: 0, cz: 0, colH: colFlat(h), edits: null }, flatCaves);
   assert.ok(m, 'меша нет');
+  assert.equal(m.material.length, m.position.length / 3);
+  assert.ok([...m.material].every((v) => v >= 0 && v <= 3));
   let worst = 0;
   for (let i = 1; i < m.position.length; i += 3) worst = Math.max(worst, Math.abs(m.position[i] - h));
   assert.ok(worst < 1e-4, `вершина ушла от высоты на ${worst}`);
