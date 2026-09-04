@@ -497,17 +497,157 @@ export class GameAudio {
     this.shovelDig();
   }
 
-  // Кирка переиспользует врез лопаты, но более высокий тон читает металл.
-  pickaxeHit() {
-    this.shovelDig(1.35);
+  // ---------- кирка ----------
+  // Удар в породу: мгновенный скол, короткий металлический звон и несколько
+  // тихих зёрен крошки после него. У руды основа выше, а верх открыт сильнее.
+  pickaxeHit(material = 2) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.005;
+    const ore = material === 3;
+
+    const out = ctx.createGain();
+    out.gain.value = (ore ? 0.34 : 0.38) * (0.92 + Math.random() * 0.16);
+    out.connect(this.sfx);
+
+    // Первый скол даёт атаку. Полоса слегка гуляет, чтобы серия ударов не
+    // превращалась в один и тот же сэмпл.
+    const crack = ctx.createBufferSource();
+    crack.buffer = this.noise;
+    crack.playbackRate.value = 0.9 + Math.random() * 0.3;
+    const cbp = ctx.createBiquadFilter();
+    cbp.type = 'bandpass';
+    cbp.frequency.value = (ore ? 1600 : 1450) * (0.9 + Math.random() * 0.2);
+    cbp.Q.value = 1.4;
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.0001, t);
+    cg.gain.linearRampToValueAtTime(0.55, t + 0.0015);
+    cg.gain.exponentialRampToValueAtTime(0.0001, t + 0.055);
+    crack.connect(cbp);
+    cbp.connect(cg);
+    cg.connect(out);
+    crack.start(t, Math.random() * 1.5, 0.07);
+
+    // Две негармонические моды читаются как короткое металлическое «дзынь»,
+    // а не как нота синусоида. Высота каждого удара немного отличается.
+    const base = (ore ? 1140 : 1060) * (0.94 + Math.random() * 0.12);
+    const modes = [
+      [1, 0.36, 0.2],
+      [2.37, ore ? 0.1 : 0.09, 0.115],
+    ];
+    for (const [ratio, gain, dur] of modes) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = base * ratio * (0.985 + Math.random() * 0.03);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(gain, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g);
+      g.connect(out);
+      o.start(t);
+      o.stop(t + dur + 0.03);
+    }
+
+    // Крошка приходит позже основного пика и остаётся тихим шумовым хвостом.
+    for (let i = 0; i < 4; i++) {
+      const st = t + 0.05 + i * (0.018 + Math.random() * 0.009) + Math.random() * 0.008;
+      const grain = ctx.createBufferSource();
+      grain.buffer = this.noise;
+      grain.playbackRate.value = 0.7 + Math.random() * 0.6;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = (ore ? 1250 : 1150) + Math.random() * (ore ? 1000 : 900);
+      bp.Q.value = 0.9 + Math.random() * 0.7;
+      const g = ctx.createGain();
+      const peak = (0.055 - i * 0.008) * (0.8 + Math.random() * 0.4);
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.linearRampToValueAtTime(peak, st + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.045);
+      grain.connect(bp);
+      bp.connect(g);
+      g.connect(out);
+      grain.start(st, Math.random() * 1.5, 0.055);
+    }
   }
 
+  // Взять кирку: два коротких металлических звона без лопатного перехвата.
   pickaxeTake() {
-    this.shovelTake();
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.005;
+    const out = ctx.createGain();
+    out.gain.value = 0.28 + Math.random() * 0.05;
+    out.connect(this.sfx);
+
+    const base = 2300 + Math.random() * 280;
+    for (const [ratio, gain, dur] of [[1, 0.3, 0.075], [1.47, 0.12, 0.055]]) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = base * ratio;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(gain, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g);
+      g.connect(out);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    }
+
+    const tick = ctx.createBufferSource();
+    tick.buffer = this.noise;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 4600 + Math.random() * 700;
+    bp.Q.value = 5;
+    const tg = ctx.createGain();
+    tg.gain.setValueAtTime(0.0001, t);
+    tg.gain.linearRampToValueAtTime(0.07, t + 0.0015);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+    tick.connect(bp);
+    bp.connect(tg);
+    tg.connect(out);
+    tick.start(t, Math.random(), 0.045);
   }
 
+  // Воткнуть кирку: глухой толчок рукояти в снег, без металлического звона.
   pickaxePlant() {
-    this.shovelDig(1.2);
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + 0.005;
+    const out = ctx.createGain();
+    out.gain.value = 0.43 + Math.random() * 0.06;
+    out.connect(this.sfx);
+
+    const thud = ctx.createBufferSource();
+    thud.buffer = this.noise;
+    thud.playbackRate.value = 0.55 + Math.random() * 0.2;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 650 + Math.random() * 140;
+    lp.Q.value = 0.7;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.linearRampToValueAtTime(0.5, t + 0.005);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+    thud.connect(lp);
+    lp.connect(ng);
+    ng.connect(out);
+    thud.start(t, Math.random() * 1.5, 0.13);
+
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(105 + Math.random() * 15, t);
+    o.frequency.exponentialRampToValueAtTime(68, t + 0.08);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t);
+    og.gain.linearRampToValueAtTime(0.28, t + 0.004);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+    o.connect(og);
+    og.connect(out);
+    o.start(t);
+    o.stop(t + 0.12);
   }
 
   // ---------- топор и рубка ----------
