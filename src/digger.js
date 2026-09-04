@@ -88,6 +88,7 @@ export class Digger {
     this.caves = caves;
 
     this.edits = new Map(); // key(ix,iy,iz) -> накопленная дельта плотности
+    this.editMaterials = new Map(); // key(ix,iy,iz) -> материал положенной массы
     // Один Mesh на колонку, а не на каждый вертикальный чанк. Части воркера
     // хранятся отдельно и при установке склеиваются чистой mergeChunkParts.
     // null означает, что чанк посчитан и оказался пустым: повторно его не мешим.
@@ -244,6 +245,12 @@ export class Digger {
 
   // Материал берётся из того же поля и с той же высотой колонки, что плотность.
   materialAt(x, y, z) {
+    const edited = this.editMaterials.get(key(
+      Math.round(x / VS),
+      Math.round(y / VS),
+      Math.round(z / VS)
+    ));
+    if (edited !== undefined) return edited;
     const base = this.baseHeight(x, z);
     return this.caves.materialAt
       ? this.caves.materialAt(x, y, z, base)
@@ -306,7 +313,7 @@ export class Digger {
   // ---------------- правки игрока ----------------
 
   // копание (sign=-1) или намыв (sign=+1) сферой в мировой точке center
-  edit(center, radius, sign, strength = 3.0) {
+  edit(center, radius, sign, strength = 3.0, material) {
     const imin = Math.floor((center.x - radius) / VS);
     const imax = Math.ceil((center.x + radius) / VS);
     const jmin = Math.floor((center.y - radius) / VS);
@@ -330,6 +337,8 @@ export class Digger {
           if (w <= 0) continue;
           const v = THREE.MathUtils.clamp((this.edits.get(k) || 0) + sign * w, -CLAMP, CLAMP);
           this.edits.set(k, v);
+          if (sign > 0 && material !== undefined && v > 0) this.editMaterials.set(k, material);
+          else if (sign < 0 && v <= 0) this.editMaterials.delete(k);
         }
       }
     }
@@ -340,7 +349,7 @@ export class Digger {
 
   // Копок лопатой: ориентированный по yaw бокс с РЕЗКИМ профилем спада —
   // плоское дно, ровные стенки (marching cubes воспроизводит плоскость точно).
-  editBox(center, yaw, half, sign, strength = 2.4, falloff = 0.1) {
+  editBox(center, yaw, half, sign, strength = 2.4, falloff = 0.1, material) {
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
     const ex = Math.abs(cos) * half.x + Math.abs(sin) * half.z + falloff;
@@ -373,6 +382,8 @@ export class Digger {
           if (w <= 0) continue;
           const v = THREE.MathUtils.clamp((this.edits.get(k) || 0) + sign * w, -CLAMP, CLAMP);
           this.edits.set(k, v);
+          if (sign > 0 && material !== undefined && v > 0) this.editMaterials.set(k, material);
+          else if (sign < 0 && v <= 0) this.editMaterials.delete(k);
         }
       }
     }
@@ -510,22 +521,29 @@ export class Digger {
     const cx = unX(k), cy = unY(k), cz = unZ(k);
     const { h } = this._columnHeights(cx, cz);
     let edits = null;
+    let editMaterials = null;
     if (this._editCols.has(colKey(cx, cz))) {
       const E = this.edits;
+      const M = this.editMaterials;
       const ox = cx * VN, oy = cy * VN, oz = cz * VN;
       const list = [];
+      const materials = [];
       for (let kk = -1; kk <= VN + 1; kk++) {
         for (let j = -1; j <= VN + 1; j++) {
           let vk = key(ox - 1, oy + j, oz + kk);
           for (let i = -1; i <= VN + 1; i++, vk++) {
             const v = E.get(vk);
-            if (v) list.push([((kk + 1) * SW + (j + 1)) * SW + (i + 1), v]);
+            const at = ((kk + 1) * SW + (j + 1)) * SW + (i + 1);
+            if (v) list.push([at, v]);
+            const material = M.get(vk);
+            if (material !== undefined) materials.push([at, material]);
           }
         }
       }
       if (list.length) edits = list;
+      if (materials.length) editMaterials = materials;
     }
-    return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits };
+    return { cx, cy, cz, ver: this._ver.get(k), colH: h, edits, editMaterials };
   }
 
   /** Выпечь наборы среза по одному на кадр; зовётся после готовности мира. */
@@ -873,6 +891,12 @@ export class Digger {
     return vHit || tHit || null;
   }
 
+  /** Точка поверхности под прицелом для действия пустой рукой. */
+  aimPoint(camera, reach = 2.5) {
+    const hit = this._aim(camera, reach);
+    return hit ? hit.point.clone().addScaledVector(this._dir, 0.04) : null;
+  }
+
   // Копок лопатой из камеры: штык входит по взгляду в точку прицела.
   shovelEdit(camera, sign, reach = 3.4) {
     const hit = this._aim(camera, reach);
@@ -903,7 +927,8 @@ export class Digger {
     // Лопата режет снег и грунт. По камню удар остаётся слышимым, но поле не
     // меняется и добыча не начисляется.
     const applied = shovelAppliedStrength(code, sign, strength);
-    if (applied > 0) this.editBox(center, yaw, SHOVEL_HALF, sign, applied, SHOVEL_FALLOFF);
+    if (applied > 0)
+      this.editBox(center, yaw, SHOVEL_HALF, sign, applied, SHOVEL_FALLOFF, code);
     if (this.onStroke && !this._quiet)
       this.onStroke(center, yaw, sign, applied, code, 'shovel');
     return { material: code, strength: applied };
@@ -937,6 +962,14 @@ export class Digger {
     return { material: code, strength };
   }
 
+  /** Положить материал рукой по рецепту. */
+  buildStroke(center, radius, strength, material) {
+    this.edit(center, radius, 1, strength, material);
+    if (this.onStroke && !this._quiet)
+      this.onStroke(center, 0, 1, strength, material, 'hand');
+    return { material, strength };
+  }
+
   /** Начать воспроизведение журнала: правки копятся, меши ждут. */
   replayBegin() {
     this._quiet = true;
@@ -956,6 +989,7 @@ export class Digger {
     if (!(k < 1)) return;
     const surf = new Map(); // baseHeight по колонке (ix,iz): у ямы их немного
     for (const [kk, v] of this.edits) {
+      if (v >= 0) continue; // насыпи и каменная кладка не зарастают как ямы
       const ix = unX(kk);
       const iz = unZ(kk);
       const ck = colKey(ix, iz);
@@ -966,7 +1000,10 @@ export class Digger {
       }
       if (unY(kk) * VS < h - depth) continue;
       const nv = v * k;
-      if (Math.abs(nv) < 0.01) this.edits.delete(kk);
+      if (Math.abs(nv) < 0.01) {
+        this.edits.delete(kk);
+        this.editMaterials.delete(kk);
+      }
       else this.edits.set(kk, nv);
     }
   }
@@ -977,7 +1014,7 @@ export class Digger {
 
   // Восстановление правок из кэша вокселей (см. save.js). fill < 1 - множитель
   // осадки ям за время отсутствия игрока (growth.js).
-  load(entries, { fill = 1 } = {}) {
+  load(entries, { fill = 1, materials = [] } = {}) {
     // сейвы старого формата хранили ключ строкой "ix|iy|iz" — конвертируем на
     // месте; узлы вне домена упаковки отбрасываем
     if (entries.length && typeof entries[0][0] === 'string') {
@@ -990,6 +1027,9 @@ export class Digger {
       entries = conv;
     }
     this.edits = new Map(entries);
+    this.editMaterials = new Map(
+      materials.filter(([k]) => (this.edits.get(k) || 0) > 0)
+    );
     if (fill < 1) this.settle(fill, PIT_DEPTH);
     this._remeshEdits();
   }

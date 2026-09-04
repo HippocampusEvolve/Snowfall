@@ -87,6 +87,20 @@ test('поленница читается обратно тем же', () => {
   assert.deepEqual([r.kind, r.count], [KIND.PILE, 17]);
 });
 
+test('изменение предмета читается обратно из шестнадцати байт', () => {
+  const g = j();
+  g.item(2, -7, 19);
+  const r = g.at(0);
+  assert.deepEqual([r.kind, r.id, r.delta, r.t, g.bytes], [KIND.ITEM, 2, -7, 19, REC]);
+});
+
+test('стройка рукой сохраняет материал и вид действия в DIG', () => {
+  const g = j();
+  g.dig(1, 2, 3, 0, 1, 3, 8, 2, 'hand');
+  const r = g.at(0);
+  assert.deepEqual([r.kind, r.sign, r.material, r.tool], [KIND.DIG, 1, 2, 'hand']);
+});
+
 test('номера записей идут подряд', () => {
   const g = j();
   g.fuel(1);

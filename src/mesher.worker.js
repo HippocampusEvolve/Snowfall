@@ -41,6 +41,7 @@ const EDGE_NODE = EDGE.map(([a, b]) => {
 const FIELD = new Float32Array(SW * SW * SW);
 const GRAD = new Float32Array(SW * SW * SW * 3);
 const MAT = new Uint8Array(SW * SW * SW);
+const EDIT_MAT = new Int8Array(SW * SW * SW);
 const VERT = new Int32Array(S * S * S * 3); // ребро решётки -> номер вершины
 
 const fi = (i, j, k) => ((k + 1) * SW + (j + 1)) * SW + (i + 1); // узел -1..VN+1
@@ -56,6 +57,7 @@ const ei = (i, j, k, a) => ((k * S + j) * S + i) * 3 + a; // ребро решё
  * @param {Float32Array} job.colH baseHeight в SW² узлах колонки (с кольцом),
  *   порядок (k+1)*SW + (i+1)
  * @param {Array<[number, number]>|null} job.edits правки: [индекс в SW³, дельта]
+ * @param {Array<[number, number]>|null} job.editMaterials материалы положенной массы
  * @param {object} caves поле пещер (createCaves)
  * @returns {{position: Float32Array, normal: Float32Array, material: Uint8Array, index: Uint32Array}|null}
  */
@@ -67,6 +69,9 @@ export function meshChunk(job, caves) {
   FIELD.fill(0);
   const ed = job.edits;
   if (ed) for (let n = 0; n < ed.length; n++) FIELD[ed[n][0]] = ed[n][1];
+  EDIT_MAT.fill(-1);
+  const editMat = job.editMaterials;
+  if (editMat) for (let n = 0; n < editMat.length; n++) EDIT_MAT[editMat[n][0]] = editMat[n][1];
   for (let k = -1; k <= VN + 1; k++) {
     const z = (oz + k) * VS;
     for (let i = -1; i <= VN + 1; i++) {
@@ -77,13 +82,15 @@ export function meshChunk(job, caves) {
         const p = fi(i, j, k);
         const cave = caves.sdf(x, y, z, base - y);
         FIELD[p] = compose(base, y, cave, FIELD[p]);
-        MAT[p] = caves.materialAt
-          ? caves.materialAt(x, y, z, base, cave)
-          : base - y <= 1.2
-            ? MATERIAL.SNOW
-            : base - y <= 4
-              ? MATERIAL.SOIL
-              : MATERIAL.STONE;
+        MAT[p] = EDIT_MAT[p] >= 0
+          ? EDIT_MAT[p]
+          : caves.materialAt
+            ? caves.materialAt(x, y, z, base, cave)
+            : base - y <= 1.2
+              ? MATERIAL.SNOW
+              : base - y <= 4
+                ? MATERIAL.SOIL
+                : MATERIAL.STONE;
       }
     }
   }
@@ -133,13 +140,17 @@ export function meshChunk(job, caves) {
     nrm.push(gx, gy, gz);
     // На границе слоёв ребро может видеть два кода. Больший код означает
     // более твёрдую сторону, её и закрепляем за общей вершиной.
-    const ma = MAT[fi(ni, nj, nk)];
-    const mb = MAT[fi(
+    const pa = fi(ni, nj, nk);
+    const pb = fi(
       ni + (axis === 0 ? 1 : 0),
       nj + (axis === 1 ? 1 : 0),
       nk + (axis === 2 ? 1 : 0)
-    )];
-    mat.push(ma > mb ? ma : mb);
+    );
+    const ma = MAT[pa], mb = MAT[pb];
+    const ea = EDIT_MAT[pa], eb = EDIT_MAT[pb];
+    // Материал положенной массы важнее природного слоя по другую сторону
+    // ребра. Это особенно заметно у снега, чей код меньше камня и грунта.
+    mat.push(ea >= 0 ? ea : eb >= 0 ? eb : ma > mb ? ma : mb);
     VERT[e] = n;
     return n;
   };

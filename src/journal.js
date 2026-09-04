@@ -9,14 +9,15 @@
 //
 //   0..3   seq   u32  номер записи, сквозной с первой ночи (1, 2, 3, ...)
 //   4..7   t     u32  секунд от эпохи мира (epoch, Unix-секунды в заголовке)
-//   8      tag   u8   биты 0..3 - вид записи (KIND), бит 4 - резерв;
-//                     для DIG бит 5 - кирка,
+//   8      tag   u8   биты 0..3 - вид записи (KIND);
+//                     для DIG бит 4 - стройка рукой, бит 5 - кирка,
 //                     биты 6..7 - материал 0..3; у других видов старшие биты 0
 //   9..15       7 байт полезной нагрузки, своей у каждого вида
 //
 // Нагрузка по видам:
 //
-//   DIG    байт 8: бит 5 - кирка, биты 6..7 - материал удара;
+//   DIG    байт 8: бит 4 - стройка рукой, бит 5 - кирка,
+//          биты 6..7 - материал удара;
 //          9..10 i16 x, 11..12 i16 y, 13..14 i16 z - центр копка, шаг 2 см
 //                (мир 400 м, i16 при 2 см держит +-655 м - с запасом);
 //          15    u8  бит 7 - знак (0 копок, 1 намыв), биты 4..6 - сила
@@ -31,6 +32,8 @@
 //   SPLIT  9..10 u16 id сосны, 11 u8 поленьев осталось (ноль - ствол вышел)
 //   FUEL   нагрузки нет: полено в костре - само событие
 //   PILE   9     u8  сколько поленьев стало в поленнице
+//   ITEM   9     u8  id предмета (индекс в data/items.js),
+//          10..11 i16 изменение количества
 //
 // Почему фиксированная длина: журнал дописывается порциями по CHUNK записей
 // (ключ порции - её номер), и автосейв кладёт в IndexedDB только последнюю
@@ -41,12 +44,13 @@
 
 export const REC = 16; // байт на запись
 export const CHUNK = 4096; // записей в порции хранилища
-export const KIND = { DIG: 1, CHOP: 2, FELL: 3, SPLIT: 4, FUEL: 5, PILE: 6 };
+export const KIND = { DIG: 1, CHOP: 2, FELL: 3, SPLIT: 4, FUEL: 5, PILE: 6, ITEM: 7 };
 
 const Q = 0.02; // шаг квантования центра копка, м
 const YAW_STEPS = 16; // делений азимута в 4 битах
 const STRENGTH_STEP = 0.4; // шаг силы в 3 битах (0 .. 2.8)
 const KIND_MASK = 0x0f;
+const BUILD_BIT = 0x10;
 const PICKAXE_BIT = 0x20;
 
 const clampI16 = (v) => Math.max(-32768, Math.min(32767, v));
@@ -108,7 +112,10 @@ export class Journal {
   /** Правка инструментом: центр, азимут, знак, сила, материал и вид инструмента. */
   dig(x, y, z, yaw, sign, strength, t, material = 0, tool = 'shovel') {
     const m = Math.max(0, Math.min(3, material | 0));
-    const tag = KIND.DIG | (tool === 'pickaxe' ? PICKAXE_BIT : 0) | (m << 6);
+    const tag = KIND.DIG
+      | (tool === 'hand' ? BUILD_BIT : 0)
+      | (tool === 'pickaxe' ? PICKAXE_BIT : 0)
+      | (m << 6);
     const o = this._head(tag, t);
     this._view.setInt16(o + 9, clampI16(Math.round(x / Q)), true);
     this._view.setInt16(o + 11, clampI16(Math.round(y / Q)), true);
@@ -156,6 +163,14 @@ export class Journal {
     return this.seqHead;
   }
 
+  /** Изменение одной стопки инвентаря. */
+  item(id, delta, t) {
+    const o = this._head(KIND.ITEM, t);
+    this._buf[o + 9] = Math.max(0, Math.min(255, id | 0));
+    this._view.setInt16(o + 10, clampI16(Math.round(delta)), true);
+    return this.seqHead;
+  }
+
   /** Запись по номеру (0-based) в виде объекта. */
   at(i) {
     const o = i * REC;
@@ -171,7 +186,7 @@ export class Journal {
       r.strength = ((b >> 4) & 7) * STRENGTH_STEP;
       r.yaw = (b & 15) * ((Math.PI * 2) / YAW_STEPS);
       r.material = tag >> 6;
-      r.tool = tag & PICKAXE_BIT ? 'pickaxe' : 'shovel';
+      r.tool = tag & PICKAXE_BIT ? 'pickaxe' : tag & BUILD_BIT ? 'hand' : 'shovel';
     } else if (r.kind === KIND.CHOP) {
       r.id = v.getUint16(o + 9, true);
       r.hits = this._buf[o + 11];
@@ -183,6 +198,9 @@ export class Journal {
       r.left = this._buf[o + 11];
     } else if (r.kind === KIND.PILE) {
       r.count = this._buf[o + 9];
+    } else if (r.kind === KIND.ITEM) {
+      r.id = this._buf[o + 9];
+      r.delta = v.getInt16(o + 10, true);
     }
     return r;
   }
@@ -209,6 +227,11 @@ export class Journal {
       out.push([c, this._buf.slice(start, end)]);
     }
     return out;
+  }
+
+  /** Все занятые байты для фолбэка без IndexedDB. */
+  snapshot() {
+    return this._buf.slice(0, this.bytes);
   }
 
   /** Принять порцию из хранилища (порядок вызовов - по возрастанию номера). */
