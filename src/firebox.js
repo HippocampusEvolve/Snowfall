@@ -316,7 +316,7 @@ export function buildFirebox(parent, { x, y, z }) {
     texH: 120,
     fps: 30,
     shape: FLAME_HEARTH,
-    color: new THREE.Color(1.12, 1.05, 0.98),
+    color: new THREE.Color(0.92, 0.78, 0.58),
   });
   const flameGroup = new THREE.Group();
   flameGroup.position.set(0, FLAME_BASE, ASH.z);
@@ -386,27 +386,32 @@ export function buildFirebox(parent, { x, y, z }) {
 
   const flameSheets = flame.sheets;
 
-  function update(dt, t) {
+  function update(dt, t, heatK = 1) {
+    const burn = Math.max(0, Math.min(1, Number.isFinite(heatK) ? heatK : 0));
     // Мерцание: медленное дыхание плюс быстрая дрожь, как у костра. Синусы
     // дают слышимый период, поэтому у медленной части шумовая основа.
     const fk = 0.72 + 0.18 * Math.sin(t * 9.7) + 0.1 * Math.sin(t * 23.3 + 1.7);
     const b = Math.min(1, 0.82 + fk * 0.2);
 
-    mouthLight.intensity = 2.6 * fk;
+    mouthLight.intensity = 2.1 * fk * burn;
     mouthLight.position.x = Math.sin(t * 6.9) * 0.03;
-    innerLight.intensity = 1.5 * (0.75 + 0.35 * fk);
-    emberMat.emissiveIntensity = (1.4 + fk * 1.1);
+    innerLight.intensity = 1.15 * (0.75 + 0.35 * fk) * (0.015 + 0.985 * burn);
+    emberMat.emissiveIntensity = 0.12 + (1.1 + fk * 0.65) * burn;
 
-    glow.material.opacity = (0.34 + 0.22 * fk);
+    glow.material.opacity = (0.2 + 0.14 * fk) * burn;
     glow.scale.set(0.8 + fk * 0.12, 0.66 + fk * 0.12, 1);
 
+    flameGroup.visible = burn > 0;
+    flame.material.opacity = 0.72 * Math.min(1, burn * 3);
+    const heightK = Math.sqrt(burn);
     for (let i = 0; i < flameSheets.length; i++) {
       const f = flameSheets[i];
       const k = 0.86 + fk * 0.2 + i * 0.03;
-      f.scale.set(k, 0.82 + fk * 0.26, 1);
+      f.scale.set(k * (0.45 + 0.55 * heightK), (0.82 + fk * 0.26) * heightK, 1);
       f.position.y = (FLAME_H / 2) * f.scale.y;
     }
-    flame.frame(dt, t, b);
+    if (burn > 0) flame.frame(dt, t, b * burn);
+    sparkMesh.visible = burn > 0.08;
 
     for (let i = 0; i < sparks.length; i++) {
       const e = sparks[i];
@@ -425,7 +430,7 @@ export function buildFirebox(parent, { x, y, z }) {
       e.y += e.vy * dt;
       e.z += e.vz * dt;
       sparkPos.setXYZ(i, e.x, e.y, e.z);
-      const a = e.life * Math.min(1, (1 - e.life) * 7);
+      const a = e.life * Math.min(1, (1 - e.life) * 7) * burn;
       sparkCol.setXYZ(i, a, a * (0.5 + 0.5 * e.life), a * (0.2 + 0.4 * e.life));
     }
     sparkPos.needsUpdate = true;

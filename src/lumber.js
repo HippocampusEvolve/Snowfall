@@ -88,7 +88,7 @@ export class Lumber {
   // Удар топора из камеры. Возвращает null (промах — только свист) или
   // { kind: 'trunk' | 'log', point, out } — точка зарубки и направление
   // выброса щепы; звук и брызги играет вызывающий (main.js).
-  chop(camera, playerPos) {
+  chop(camera, playerPos, timber = false) {
     camera.getWorldDirection(_dir);
     let best = null;
     let bestDot = AIM;
@@ -158,7 +158,8 @@ export class Lumber {
     p.chops++;
     let split = false;
     if (p.chops % CHOPS_PER_LOG === 0) {
-      p.wood--;
+      const beam = timber && p.wood >= 3 && this.deps.onTimber;
+      p.wood -= beam ? 3 : 1;
       split = true;
       // полено откатывается вбок от ствола
       const side = Math.random() < 0.5 ? 1 : -1;
@@ -166,7 +167,8 @@ export class Lumber {
       const pz = -Math.sin(p.fallYaw) * side;
       const lx = best.tx + px * (0.55 + Math.random() * 0.25);
       const lz = best.tz + pz * (0.55 + Math.random() * 0.25);
-      this.groundLogs.drop(lx, this.deps.groundAt(lx, lz), lz, p.fallYaw + Math.PI / 2 + (Math.random() - 0.5) * 0.5);
+      if (beam) this.deps.onTimber(lx, this.deps.groundAt(lx,lz), lz, p.fallYaw);
+      else this.groundLogs.drop(lx, this.deps.groundAt(lx, lz), lz, p.fallYaw + Math.PI / 2 + (Math.random() - 0.5) * 0.5);
       // с последним поленом голый ствол рассыпается — лес не захламляется
       if (p.wood <= 0) this._vanish(p);
       if (this.onEvent) this.onEvent('split', p);

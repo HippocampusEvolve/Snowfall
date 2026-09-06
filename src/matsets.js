@@ -1,9 +1,12 @@
-import { makeSet, toTextures } from 'world-core/materials';
+import { toTextures } from 'world-core/materials';
+import { bakeWorldMaterial } from './bake-world-material.js';
+const makeSet = name => toTextures(bakeWorldMaterial(name), name);
 
 // Сначала нужны материалы дров первого кадра, затем среза и избы. Воркер
 // считает чистые байтовые карты по очереди, а главный поток только оборачивает
 // готовые массивы в канвы и текстуры.
 const NAMES = [
+  'surfaceSnow',
   'log', 'bark', 'logend', 'split',
   'rubble', 'rubbleWarm', 'iron',
   'brick', 'hearth', 'beam', 'ashlar', 'floor',
@@ -21,18 +24,26 @@ for (const name of NAMES) {
   waits.set(name, { promise, resolve });
 }
 
-const workers = Array.from({ length: 4 }, () =>
-  new Worker(new URL('./materials.worker.js', import.meta.url), { type: 'module' })
-);
+const workers = [];
+function failWorkers(event) {
+  event?.preventDefault();
+  failed = true;
+  for (const worker of workers) worker.terminate();
+  for (const { resolve } of waits.values()) resolve();
+}
+try {
+  for (let i = 0; i < 4; i++) {
+    workers.push(new Worker(new URL('./materials.worker.js', import.meta.url), { type: 'module' }));
+  }
+} catch {
+  failWorkers();
+}
 for (const worker of workers) {
   worker.onmessage = ({ data: { name, baked } }) => {
     cache.set(name, toTextures(baked, name));
     waits.get(name)?.resolve();
   };
-  worker.onerror = () => {
-    failed = true;
-    for (const { resolve } of waits.values()) resolve();
-  };
+  worker.onerror = failWorkers;
 }
 
 let firstOrder = true; // первый заказ - это карты первого кадра

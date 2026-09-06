@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { SNOW_CONST, createDiggerMaterial, loadDiggerMaterialSets } from './snowmaterial.js';
 import { PIT_DEPTH } from './growth.js';
 import { compose, Y_FLOOR, MATERIAL } from './caves.js';
-import { meshChunk, VN, VS, SW } from './mesher.worker.js';
+import { meshChunk, sampleChunk, VN, VS, SW } from './mesher.worker.js';
 import {
   DIG_RULES, shovelAppliedStrength, pickaxeAppliedStrength, hammerAppliedStrength,
 } from './dig-rules.js';
@@ -27,14 +27,16 @@ import {
 //
 // Что здесь главное:
 //
-// 1. Мешинг уехал в воркер (mesher.worker.js). Главный поток только собирает
-//    задание (высоты колонки и правки чанка), а обратно получает готовые
-//    буферы. За кадр он ставит не больше двух чанков.
+// 1. Воркеры грузят пещеры и заранее считают неизменную геологию рядом с
+//    игроком. Копок собирает только затронутую поверхность в текущем кадре,
+//    используя эти сэмплы; лимит фоновой загрузки к удару не применяется.
 // 2. Чанки живут в радиусе R от игрока и выгружаются за R + гистерезис.
 //    Правки при выгрузке никуда не деваются: они в edits, а не в мешах.
 // 3. Вырез террейна (coverage) режет колонку НЕ по «есть непустой чанк», как
 //    раньше, а по «в приповерхностной полосе колонки есть пещера или правка».
 //    Иначе любой глубокий зал вырезал бы дырку в небо на поверхности.
+//    План становится видимым только с готовой геометрией; колонки одного
+//    копка публикуются вместе, без промежуточных дыр и перекрытий.
 //
 // Ключ к бесшовности прежний: правки хранятся в sparse-карте по АБСОЛЮТНЫМ
 // индексам вокселей. Общая граница двух чанков - это одни и те же воксели,
@@ -54,6 +56,8 @@ const SKIRT = 0.35; // юбка по периметру выреза: лента
 const R_LOAD = SURFACE_LOAD_RADIUS;
 const INSTALL_PER_FRAME = 2; // готовых чанков в кадр (см. рамку 4 мс на чанк)
 const PLAN_PER_FRAME = 4; // колонок, разбираемых на чанки за кадр
+const SAMPLE_RADIUS = 8; // геология для мгновенного копка, дальше досягаемости руки
+const SAMPLE_LIMIT = 96; // не больше 5.7 МиБ, независимо от длины прогулки
 
 // Копок лопатой: половина бокса штыка, сила и кромка осыпания. Вынесены из
 // shovelEdit, потому что теми же числами копок воспроизводит журнал (save.js),
@@ -98,6 +102,12 @@ export class Digger {
     // хранятся отдельно и при установке склеиваются чистой mergeChunkParts.
     // null означает, что чанк посчитан и оказался пустым: повторно его не мешим.
     this._parts = new Map(); // key(cx,cy,cz): буферы воркера | null
+    this._pending = new Set(); // новая версия ещё не получена от воркера
+    this._dirtyColumns = new Set(); // готовые буферы ещё не опубликованы в сцене
+    this._samples = new Map();
+    this._sampleQueue = [];
+    this._sampleWanted = new Set();
+    this._sampleAt = null;
     this.chunks = new Map(); // colKey(cx,cz): THREE.Mesh
     // colKey(cx,cz) -> {h, hMin, hMax} — кэш baseHeight по узлам колонки чанков
     // (сетка SW² с кольцом в один сэмпл: кольцо уезжает в воркер под градиент).
@@ -408,8 +418,8 @@ export class Digger {
   // Запомнить, что в этих колонках появились правки и на каких высотах: по
   // этому потом решается, режет ли колонка террейн и какие чанки ей положены.
   _noteEdits(imin, imax, jmin, jmax, kmin, kmax) {
-    for (let cz = Digger._cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
-      for (let cx = Digger._cmin(imin); cx <= Math.floor(imax / VN); cx++) {
+    for (let cz = Digger._cmin(kmin - 1); cz <= Math.floor((kmax + 1) / VN); cz++) {
+      for (let cx = Digger._cmin(imin - 1); cx <= Math.floor((imax + 1) / VN); cx++) {
         const ck = colKey(cx, cz);
         const c = this._editCols.get(ck);
         if (!c) this._editCols.set(ck, { jmin, jmax });
@@ -503,20 +513,15 @@ export class Digger {
     // Раскладка могла смениться (правка открыла или закрыла чанк) - меши,
     // которым в ней больше нет места, надо снять со сцены: иначе колонка,
     // перестав резать террейн, оставила бы вторую поверхность поверх первой.
-    let dropped = false;
     for (let cy = cyBottom - 1; cy <= cyTop + 1; cy++) {
       if (set.has(cy)) continue;
       const k = key(cx, cy, cz);
-      if (this._parts.has(k)) dropped = true;
       this._retire(k);
     }
 
     const plan = { cut, set, wide, cap: cut ? 0 : SURFACE_CAP };
     this._plan.set(ck, plan);
-    if (dropped) this._rebuildColumn(ck);
-    if (cut) {
-      if (!this._cutCols.has(ck)) { this._cutCols.add(ck); this._covDirty = true; }
-    } else if (this._cutCols.delete(ck)) this._covDirty = true;
+    this._dirtyColumns.add(ck);
     return plan;
   }
 
@@ -524,6 +529,8 @@ export class Digger {
 
   _enqueue(k, front = false) {
     this._ver.set(k, (this._ver.get(k) || 0) + 1);
+    this._pending.add(k);
+    this._dirtyColumns.add(k & COLM);
     if (this._queued.has(k)) {
       if (!front) return;
       const i = this._queue.indexOf(k);
@@ -545,8 +552,11 @@ export class Digger {
       const ox = cx * VN, oy = cy * VN, oz = cz * VN;
       const list = [];
       const materials = [];
+      const range = this._editCols.get(colKey(cx, cz));
+      const jlo = Math.max(-1, range.jmin - oy);
+      const jhi = Math.min(VN + 1, range.jmax - oy);
       for (let kk = -1; kk <= VN + 1; kk++) {
-        for (let j = -1; j <= VN + 1; j++) {
+        for (let j = jlo; j <= jhi; j++) {
           let vk = key(ox - 1, oy + j, oz + kk);
           for (let i = -1; i <= VN + 1; i++, vk++) {
             const v = E.get(vk);
@@ -578,12 +588,48 @@ export class Digger {
   // идущего задания протухает по версии и будет отброшен при возвращении.
   _retire(k) {
     const changed = this._parts.delete(k);
+    this._pending.delete(k);
+    if (changed) this._dirtyColumns.add(k & COLM);
     this._ver.set(k, (this._ver.get(k) || 0) + 1);
     if (this._queued.delete(k)) {
       const i = this._queue.indexOf(k);
       if (i >= 0) this._queue.splice(i, 1);
     }
     return changed;
+  }
+
+  // Дождаться всего выреза, включая пустые части. До этого старая геометрия
+  // и её coverage остаются в сцене: ни дырки, ни второго слоя снега.
+  _columnReady(ck) {
+    const plan = this._plan.get(ck);
+    if (!plan) return true;
+    const cx = unX(ck), cz = unZ(ck);
+    for (const cy of plan.set) {
+      const k = key(cx, cy, cz);
+      if (this._pending.has(k)) return false;
+      if (plan.cut && plan.wide.has(cy) && !this._parts.has(k)) return false;
+    }
+    return true;
+  }
+
+  _flushColumns() {
+    let published = 0;
+    for (const ck of this._dirtyColumns) {
+      if (!this._columnReady(ck)) continue;
+      this._publishColumn(ck);
+      published++;
+    }
+    return published;
+  }
+
+  _publishColumn(ck) {
+    this._rebuildColumn(ck);
+    const cut = this._plan.get(ck)?.cut || false;
+    if (cut && !this._cutCols.has(ck)) {
+      this._cutCols.add(ck);
+      this._covDirty = true;
+    } else if (!cut && this._cutCols.delete(ck)) this._covDirty = true;
+    this._dirtyColumns.delete(ck);
   }
 
   // Собрать все готовые вертикальные части в одну геометрию колонки. Индексы
@@ -630,7 +676,39 @@ export class Digger {
   _onWorkerMessage(i, msg) {
     if (msg.kind === 'ready') return;
     this._busy[i] = null;
+    if (msg.kind === 'samples') {
+      const k = key(msg.cx, msg.cy, msg.cz);
+      if (this._sampleWanted.has(k)) this._rememberSamples(k, msg.samples);
+      return;
+    }
     this._ready.push(msg);
+  }
+
+  _rememberSamples(k, samples) {
+    this._samples.delete(k);
+    this._samples.set(k, samples);
+    while (this._samples.size > SAMPLE_LIMIT) this._samples.delete(this._samples.keys().next().value);
+    return samples;
+  }
+
+  _warmSamples(pos) {
+    if (!pos || !this._workers.length) return;
+    if (this._sampleAt && Math.hypot(pos.x - this._sampleAt.x,
+      pos.y - this._sampleAt.y, pos.z - this._sampleAt.z) < 2) return;
+    this._sampleAt = { x: pos.x, y: pos.y, z: pos.z };
+    const jobs = [];
+    const cy0 = Math.floor((pos.y - 4) / CHUNK), cy1 = Math.floor((pos.y + 4) / CHUNK);
+    for (let cz = Math.floor((pos.z - SAMPLE_RADIUS) / CHUNK); cz <= Math.floor((pos.z + SAMPLE_RADIUS) / CHUNK); cz++) {
+      for (let cx = Math.floor((pos.x - SAMPLE_RADIUS) / CHUNK); cx <= Math.floor((pos.x + SAMPLE_RADIUS) / CHUNK); cx++) {
+        const d = Math.hypot((cx + 0.5) * CHUNK - pos.x, (cz + 0.5) * CHUNK - pos.z);
+        if (d > SAMPLE_RADIUS) continue;
+        for (let cy = cy0; cy <= cy1; cy++) jobs.push({ k: key(cx, cy, cz), d });
+      }
+    }
+    jobs.sort((a, b) => a.d - b.d);
+    this._sampleWanted = new Set(jobs.map(({ k }) => k));
+    for (const k of this._samples.keys()) if (!this._sampleWanted.has(k)) this._samples.delete(k);
+    this._sampleQueue = jobs.map(({ k }) => k).filter(k => !this._samples.has(k) && !this._busy.includes(`s${k}`));
   }
 
   _pump() {
@@ -646,6 +724,14 @@ export class Digger {
       return;
     }
     for (let i = 0; i < this._workers.length; i++) {
+      while (this._busy[i] === null && this._sampleQueue.length) {
+        const k = this._sampleQueue.shift();
+        if (this._samples.has(k)) continue;
+        const cx = unX(k), cy = unY(k), cz = unZ(k);
+        this._busy[i] = `s${k}`;
+        this._workers[i].postMessage({ kind: 'samples', cx, cy, cz,
+          colH: this._columnHeights(cx, cz).h });
+      }
       while (this._busy[i] === null && this._queue.length) {
         const k = this._queue.shift();
         this._queued.delete(k);
@@ -671,7 +757,8 @@ export class Digger {
       material: msg.material,
       index: msg.index,
     });
-    this._rebuildColumn(colKey(msg.cx, msg.cz));
+    this._pending.delete(k);
+    this._dirtyColumns.add(colKey(msg.cx, msg.cz));
   }
 
   /**
@@ -684,6 +771,7 @@ export class Digger {
    */
   update(pos) {
     if (this._quiet) return;
+    this._warmSamples(pos);
     const streamed = this._stream(pos);
 
     // разобрать несколько колонок из очереди
@@ -702,12 +790,12 @@ export class Digger {
       this._install(this._ready.shift());
       installed++;
     }
+    const published = this._flushColumns();
     if (this._covDirty) {
       this._covDirty = false;
       this._updateCoverage();
-      installed++;
     }
-    if ((installed || streamed) && this.onChanged) this.onChanged();
+    if ((published || streamed) && this.onChanged) this.onChanged();
   }
 
   // Синхронизировать части колонки с двумя радиусами. В полосе гистерезиса
@@ -722,12 +810,12 @@ export class Digger {
       const k = key(cx, cy, cz);
       const wide = plan.wide.has(cy);
       if (d <= chunkLoadRadius(wide)) {
-        if (!this._parts.has(k) && !this._queued.has(k) && !this._busy.includes(k)) this._enqueue(k);
+        if (!this._parts.has(k) && !this._pending.has(k)) this._enqueue(k);
       } else if (d > chunkKeepRadius(wide)) {
         if (this._retire(k)) changed = true;
       }
     }
-    if (changed) this._rebuildColumn(ck);
+    if (changed) this._dirtyColumns.add(ck);
     return changed;
   }
 
@@ -790,28 +878,52 @@ export class Digger {
       changed = true;
     }
     this._plan.delete(ck);
+    this._dirtyColumns.delete(ck);
     this._heightCache.delete(ck);
     if (this._cutCols.delete(ck)) this._covDirty = true;
     return changed;
   }
 
-  // перестроить чанки, затронутые правкой в диапазоне воксельных индексов:
-  // теперь это только постановка в очередь, в голову — копок игрока обязан
-  // появиться в кадре через два-три кадра, а не через полный обход очереди
+  // Копок - локальная синхронная правка, а не потоковая загрузка пещер.
+  // Меняются только задетые чанки (с кольцом для нормалей). При первом
+  // вырезе дополнительно готовим всю поверхность, которую заменяет coverage.
+  // Незатронутые глубокие части не пересчитываются и не задерживают удар.
   _remeshRange(imin, imax, jmin, jmax, kmin, kmax) {
     if (this._quiet) return; // воспроизведение журнала поставит всё разом в конце
-    for (let cz = Digger._cmin(kmin); cz <= Math.floor(kmax / VN); cz++) {
-      for (let cx = Digger._cmin(imin); cx <= Math.floor(imax / VN); cx++) {
-        const { set, wide } = this._columnPlan(cx, cz);
-        // правка могла и открыть новые чанки, и попасть в уже размеченные
-        const jlo = Digger._cmin(jmin), jhi = Math.floor(jmax / VN);
+    const columns = [];
+    const jlo = Digger._cmin(jmin - 1), jhi = Math.floor((jmax + 1) / VN);
+    for (let cz = Digger._cmin(kmin - 1); cz <= Math.floor((kmax + 1) / VN); cz++) {
+      for (let cx = Digger._cmin(imin - 1); cx <= Math.floor((imax + 1) / VN); cx++) {
+        const ck = colKey(cx, cz);
+        const { set, wide, cut } = this._columnPlan(cx, cz);
+        const { hMin } = this._columnHeights(cx, cz);
         for (let cy = jlo; cy <= jhi; cy++) {
           set.add(cy);
           wide.add(cy);
         }
-        for (const cy of set) this._enqueue(key(cx, cy, cz), true);
+        const opening = cut && !this._cutCols.has(ck);
+        for (const cy of set) {
+          const k = key(cx, cy, cz);
+          const touched = cy >= jlo && cy <= jhi;
+          const uncapping = opening && (cy + 1) * CHUNK >= hMin - SURFACE_CAP - VS;
+          if (!touched && !uncapping) continue;
+          // Отменить старое задание: его поздний ответ не затрёт свежий копок.
+          this._retire(k);
+          const job = this._job(k);
+          job.samples = this._samples.get(k) || this._rememberSamples(k, sampleChunk(job, this.caves));
+          const out = meshChunk(job, this.caves);
+          this._install(out ? { ...job, ...out } : { ...job, empty: true });
+        }
+        columns.push(ck);
       }
     }
+    // Никакого кадра между частями: сначала расчёт, затем один общий показ.
+    for (const ck of columns) this._publishColumn(ck);
+    if (this._covDirty) {
+      this._covDirty = false;
+      this._updateCoverage();
+    }
+    if (this.onChanged) this.onChanged();
   }
 
   /** Вырезан ли террейн в колонке под точкой (там его рисовать нечем). */
@@ -1113,8 +1225,8 @@ export class Digger {
   _remeshEdits() {
     if (this.edits.size === 0) return;
     const span = (i) => {
-      const c = Math.floor(i / VN);
-      return ((i % VN) + VN) % VN === 0 ? [c - 1, c] : [c];
+      const lo = Digger._cmin(i - 1), hi = Math.floor((i + 1) / VN);
+      return lo === hi ? [lo] : [lo, hi];
     };
     for (const k of this.edits.keys()) {
       const ix = unX(k), iy = unY(k), iz = unZ(k);

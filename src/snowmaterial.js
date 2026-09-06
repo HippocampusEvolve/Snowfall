@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { asset } from './asset.js';
 import { matset, prepareMatsets } from './matsets.js';
 
 // Общий материал снега для базового террейна и деформируемого патча.
@@ -30,19 +29,16 @@ function defaultCutTex() {
 }
 
 export function loadSnowTextures(maxAnisotropy) {
-  const tl = new THREE.TextureLoader();
-  const setup = (t, srgb) => {
+  const set = matset('surfaceSnow');
+  const setup = source => {
+    const t = source.clone();
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.repeat.set(REPEAT, REPEAT);
     t.anisotropy = maxAnisotropy;
-    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    t.needsUpdate = true;
     return t;
   };
-  return {
-    map: setup(tl.load(asset('tex/snow_02_diff_1k.webp')), true),
-    normalMap: setup(tl.load(asset('tex/snow_02_nor_gl_512.webp'))),
-    roughnessMap: setup(tl.load(asset('tex/snow_02_rough_512.webp'))),
-  };
+  return { map: setup(set.map), normalMap: setup(set.normalMap), roughnessMap: setup(set.roughnessMap) };
 }
 
 export function createSnowMaterial({ footprints, textures, mode, heightTex = null }) {
@@ -114,14 +110,14 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
           vec2 trailUv = vec2(vWp.x, -vWp.z) / uTrailArea + 0.5;
           float trail = 0.0;
           if (!any(greaterThan(abs(trailUv - 0.5), vec2(0.499)))) {
-            vec2 packedTrail = texture2D(uTrail, trailUv).rg;
-            trail = max(packedTrail.r, packedTrail.g);
+            vec3 packedTrail = texture2D(uTrail, trailUv).rgb;
+            trail = max(max(packedTrail.r, packedTrail.g), packedTrail.b);
           }
           diffuseColor.rgb *= 1.0 - trail * 0.38;
           diffuseColor.b *= 1.0 + trail * 0.06;`
         );
     };
-    mat.customProgramCacheKey = () => 'snow-base-light';
+    mat.customProgramCacheKey = () => 'snow-base-light-circles-v2';
     return { material: mat, uniforms };
   }
 
@@ -147,8 +143,8 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         vec2 uv = vec2(wxz.x, -wxz.y) / uTrailArea + 0.5;
         if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
         // R — свежий след, G — утоптанная тропа (заметается медленнее)
-        vec2 t = texture2D(uTrail, uv).rg;
-        return clamp(max(t.r, t.g), 0.0, 1.0);
+        vec3 t = texture2D(uTrail, uv).rgb;
+        return clamp(max(max(t.r, t.g), t.b), 0.0, 1.0);
       }
       float cutCol(vec2 cell) {
         vec2 c = cell * ${CUTCOL.toFixed(1)} + ${(CUTCOL / 2).toFixed(1)};
@@ -259,6 +255,16 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         vec2 t = texture2D(uTrail, uv).rg; // R — след, G — тропа
         return max(t.r, t.g);
       }
+      // B circles carry broad height only. Fine boot normals remain in R/G.
+      float trailDepthAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
+        vec3 t = texture2D(uTrail, uv).rgb;
+        return max(max(t.r, t.g), t.b);
+      }
+      float meltAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
+        return texture2D(uTrail, uv).b;
+      }
       // детальная карта следов: окно вокруг игрока, к краю гаснет — шов
       // с общей картой не виден (общая продолжает тот же след, только мягче)
       uniform sampler2D uTrailHi;
@@ -274,6 +280,11 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
       float trailHiAt(vec2 uv) {
         if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
         return texture2D(uTrailHi, uv).r;
+      }
+      float trailHiDepthAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
+        vec3 t = texture2D(uTrailHi, uv).rgb;
+        return max(t.r, t.b);
       }
       uniform sampler2D uCut;
       uniform float uCutArea;
@@ -305,11 +316,11 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         // приглушаем тёмные вмятины, запечённые в текстуре — снег свежий
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.885, 0.955), 0.55);
         vec2 tuv = trailUv(vWp);
-        float tr = clamp(trailAt(tuv), 0.0, 1.0);
+        float tr = clamp(trailDepthAt(tuv), 0.0, 1.0);
         // вблизи след уточняется детальной картой (чёткий протектор/лапки)
         vec2 hiUv = trailHiUv(vWp);
         float hiW = trailHiFade(hiUv);
-        tr = max(tr, trailHiAt(hiUv) * hiW);
+        tr = max(tr, trailHiDepthAt(hiUv) * hiW);
         // утоптанный снег темнее и синее
         diffuseColor.rgb *= 1.0 - tr * 0.38;
         diffuseColor.b *= 1.0 + tr * 0.06;
@@ -328,10 +339,11 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
         `#include <normal_fragment_maps>
         {
           float e = 1.5 / 2048.0;
+          float oldCircleFade = 1.0 - smoothstep(0.004, 0.06, meltAt(tuv));
           float tC = trailAt(tuv);
           float tX = trailAt(tuv + vec2(e, 0.0));
           float tY = trailAt(tuv + vec2(0.0, e));
-          vec3 nOff = vec3(tX - tC, 0.0, -(tY - tC)) * ${mode === 'patch' ? '2.0' : '4.0'};
+          vec3 nOff = vec3(tX - tC, 0.0, -(tY - tC)) * ${mode === 'patch' ? '2.0' : '4.0'} * oldCircleFade;
           normal = normalize(normal + (viewMatrix * vec4(nOff, 0.0)).xyz);
         }
         // рельеф протектора из детальной карты — грунтозацепы читаются светотенью
@@ -346,7 +358,7 @@ export function createSnowMaterial({ footprints, textures, mode, heightTex = nul
       );
   };
 
-  mat.customProgramCacheKey = () => `snow-${mode}`;
+  mat.customProgramCacheKey = () => `snow-${mode}-circles-v2`;
   return { material: mat, uniforms };
 }
 
@@ -425,6 +437,16 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
         vec2 t = texture2D(uTrail, uv).rg; // R — след, G — тропа
         return max(t.r, t.g);
       }
+      // B circles carry broad height only. Fine boot normals remain in R/G.
+      float trailDepthAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
+        vec3 t = texture2D(uTrail, uv).rgb;
+        return max(max(t.r, t.g), t.b);
+      }
+      float meltAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.499)))) return 0.0;
+        return texture2D(uTrail, uv).b;
+      }
       uniform sampler2D uTrailHi;
       uniform vec2 uTrailHiC;
       uniform float uTrailHiArea;
@@ -438,6 +460,11 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       float trailHiAt(vec2 uv) {
         if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
         return texture2D(uTrailHi, uv).r;
+      }
+      float trailHiDepthAt(vec2 uv) {
+        if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return 0.0;
+        vec3 t = texture2D(uTrailHi, uv).rgb;
+        return max(t.r, t.b);
       }
       float materialWeight(float code) {
         float d = clamp(abs(vMaterial - code), 0.0, 1.0);
@@ -521,7 +548,7 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
       float trS = smoothstep(0.35, 0.75, wn0.y) * materialWeights.x;
       vec2 hiUvD = trailHiUv(vWp);
       float hiWD = trailHiFade(hiUvD);
-      float tr = clamp(max(trailAt(tuv), trailHiAt(hiUvD) * hiWD), 0.0, 1.0) * trS;
+      float tr = clamp(max(trailDepthAt(tuv), trailHiDepthAt(hiUvD) * hiWD), 0.0, 1.0) * trS;
       // тот же тон, что у террейна: утоптанный снег темнее и синее
       diffuseColor.rgb *= 1.0 - tr * 0.38;
       diffuseColor.b *= 1.0 + tr * 0.06;
@@ -577,11 +604,21 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
         // вмятины следов шейдингом — как на базовом террейне (там тоже без
         // геометрии); маска trS не пускает их на стены и потолки пещер
         float e = 1.5 / 2048.0;
-        float tC = trailAt(tuv);
+        float oldCircleFade = 1.0 - smoothstep(0.004, 0.06, meltAt(tuv));
+          float tC = trailAt(tuv);
         float tX = trailAt(tuv + vec2(e, 0.0));
         float tY = trailAt(tuv + vec2(0.0, e));
-        vec3 nOff = vec3(tX - tC, 0.0, -(tY - tC)) * 4.0 * trS;
+        vec3 nOff = vec3(tX - tC, 0.0, -(tY - tC)) * 4.0 * trS * oldCircleFade;
         normal = normalize(normal + (viewMatrix * vec4(nOff, 0.0)).xyz);
+      }
+      {
+        // A melt slope is centimetres deep across metres, never tread detail.
+        // Symmetric samples over 20 cm suppress RGBA8 quantization steps.
+        float em = 0.1 / uTrailArea;
+        float mX = meltAt(tuv + vec2(em, 0.0)) - meltAt(tuv - vec2(em, 0.0));
+        float mY = meltAt(tuv + vec2(0.0, em)) - meltAt(tuv - vec2(0.0, em));
+        vec3 mOff = vec3(mX, 0.0, -mY) * 0.7 * trS;
+        normal = normalize(normal + (viewMatrix * vec4(mOff, 0.0)).xyz);
       }
       if (hiWD > 0.001) {
         // протектор из детальной карты — и на вырытом полу тоже
@@ -595,7 +632,7 @@ export function createDiggerMaterial({ textures, heightTex, footprints }) {
     );
   };
 
-  mat.customProgramCacheKey = () => 'digger-material-v1';
+  mat.customProgramCacheKey = () => 'digger-material-circles-v2';
   mat.userData.diggerUniforms = uniforms;
   return mat;
 }

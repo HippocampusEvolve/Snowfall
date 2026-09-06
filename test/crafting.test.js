@@ -10,7 +10,6 @@ test('рецепт крафта доступен только у своей ст
   const journal = new Journal();
   const inventory = new Inventory(journal);
   inventory.add('log', 1);
-  inventory.add('soil', 1);
   const recipe = recipeAt(inventory, 'craft', 'workbench');
   const before = journal.count;
 
@@ -31,13 +30,12 @@ test('верстак списывает ровно take и добавляет р
   assert.equal(applyRecipeAt(recipe, inventory, 'workbench'), true);
   assert.deepEqual(
     [inventory.count('log'), inventory.count('soil'), inventory.count('torch')],
-    [0, 0, 2]
+    [0, 1, 2]
   );
   assert.deepEqual(
     [...journal.records()].slice(before).map((r) => [r.kind, r.id, r.delta]),
     [
       [KIND.ITEM, ITEM_INDEX.log, -1],
-      [KIND.ITEM, ITEM_INDEX.soil, -1],
       [KIND.ITEM, ITEM_INDEX.torch, 2],
     ]
   );
@@ -51,4 +49,21 @@ test('после факела первым доступным идёт каме�
   assert.equal(recipe.id, 'make-block');
   assert.equal(applyRecipeAt(recipe, inventory, 'workbench'), true);
   assert.deepEqual([inventory.count('stone'), inventory.count('block')], [0, 1]);
+});
+
+test('железистый камень обтёсывается в блок без скрытой переплавки', () => {
+  const journal = new Journal();
+  const inventory = new Inventory(journal);
+  inventory.add('ore', 2);
+  const recipe = recipeAt(inventory, 'craft', 'workbench');
+  assert.equal(recipe.id, 'dress-ore');
+  const before = journal.count;
+  assert.equal(applyRecipeAt(recipe, inventory, 'workbench'), true);
+  assert.deepEqual([inventory.count('ore'), inventory.count('block')], [0, 1]);
+  assert.deepEqual(
+    [...journal.records()].slice(before).map((r) => [r.kind, r.id, r.delta]),
+    [[KIND.ITEM, ITEM_INDEX.ore, -2], [KIND.ITEM, ITEM_INDEX.block, 1]]
+  );
+  assert.equal(applyRecipeAt(recipe, inventory, 'workbench'), false);
+  assert.equal(inventory.count('block'), 1);
 });

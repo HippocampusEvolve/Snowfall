@@ -1,5 +1,7 @@
 // Геометрия избы считается без three, DOM и загрузчиков. На выходе лежат
 // готовые индексированные буферы в метрах и план, нужный сцене и тестам.
+import { boundsOf as propBoundsOf } from './props/parts.js';
+import { fireplaceParts } from './props/fireplace-geometry.js';
 
 const OLD_SCALE = 1.0545349463020333;
 const OLD_CENTER_X = 0.20205235481262207;
@@ -49,9 +51,6 @@ export const DEFAULT_CABIN_SPEC = {
   door: {
     centerX: -0.9513,
     width: 1.519,
-    leafWidth: 1.09,
-    hingeX: -0.6,
-    hingeZ: 2.07787,
     height: 2.14,
   },
   windows: [
@@ -224,16 +223,17 @@ function finish(out) {
   };
 }
 
-function addWindowGeometry(glass, beam, room, w) {
+function addWindowGeometry(glass, beam, room, w, wallRadius) {
   const halfW = w.width / 2, halfH = w.height / 2;
   const y0 = w.centerY - halfH, y1 = w.centerY + halfH;
-  const frame = 0.14, depth = 0.24;
+  const frame = 0.14, depth = wallRadius * 2 + 0.06;
+  const lap = 0.008; // glazing sits inside the rebate, not edge-to-edge with it
   if (w.wall === 'front' || w.wall === 'back') {
     const z = w.fixed ?? (w.wall === 'front' ? room.z1 : room.z0);
     const out = w.wall === 'front' ? 1 : -1;
     addFace(
       glass,
-      [[w.center - halfW, y0, z], [w.center + halfW, y0, z], [w.center + halfW, y1, z], [w.center - halfW, y1, z]],
+      [[w.center - halfW - lap, y0 - lap, z], [w.center + halfW + lap, y0 - lap, z], [w.center + halfW + lap, y1 + lap, z], [w.center - halfW - lap, y1 + lap, z]],
       [0, 0, out],
       uvRect(w.width, w.height, false)
     );
@@ -248,7 +248,7 @@ function addWindowGeometry(glass, beam, room, w) {
     const out = w.wall === 'right' ? 1 : -1;
     addFace(
       glass,
-      [[x, y0, w.center + halfW], [x, y0, w.center - halfW], [x, y1, w.center - halfW], [x, y1, w.center + halfW]],
+      [[x, y0 - lap, w.center + halfW + lap], [x, y0 - lap, w.center - halfW - lap], [x, y1 + lap, w.center - halfW - lap], [x, y1 + lap, w.center + halfW + lap]],
       [out, 0, 0],
       uvRect(w.width, w.height, false)
     );
@@ -279,6 +279,85 @@ function boundsOf(meshes, door) {
   return { min, max, size: max.map((v, i) => v - min[i]) };
 }
 
+/** Furniture anchors measured from the generated log envelope, in cabin metres. */
+export function cabinInteriorPlan(layout, logPositions, radius = 0.19) {
+  const { room, roof } = layout;
+  const inner = { x0: room.x0, x1: room.x1, z0: room.z0, z1: room.z1 };
+  for (let i = 0; i < logPositions.length; i += 3) {
+    const x = logPositions[i], z = logPositions[i + 2];
+    if (Math.abs(x - room.x0) < radius * 1.1) inner.x0 = Math.max(inner.x0, x);
+    if (Math.abs(x - room.x1) < radius * 1.1) inner.x1 = Math.min(inner.x1, x);
+    if (Math.abs(z - room.z0) < radius * 1.1) inner.z0 = Math.max(inner.z0, z);
+    if (Math.abs(z - room.z1) < radius * 1.1) inner.z1 = Math.min(inner.z1, z);
+  }
+  const fireplace = propBoundsOf(fireplaceParts());
+  const stove = { x: inner.x0 - fireplace.min[0] + 0.18, z: inner.z0 - fireplace.min[2] };
+  const table = { x: inner.x1 - 0.575 - 0.2, z: inner.z1 - 0.375 - 0.3, topY: room.floorY + 0.755 };
+  const shelf = { x: stove.x + fireplace.max[0] + 0.16 + 0.6, y: room.floorY + 1.55, z: inner.z0 + 0.12, width: 1.2, depth: 0.24 };
+  const lamp = { x: 0, z: 0, y: room.floorY + 2.05, topY: roof.undersideRidgeY };
+  return {
+    inner, stove, table, shelf, lamp,
+    bed: { x: inner.x1 - 0.531 - 0.08, z: inner.z0 + 1.1 + 0.05 },
+    seats: [{ x: table.x - 0.98, z: table.z }, { x: table.x + 0.08, z: table.z - 0.92 }],
+    logs: { x: shelf.x - 0.16, z: inner.z0 + 0.3 },
+    pot: { x: stove.x + fireplace.max[0] + 0.3, z: stove.z + 0.88 },
+    books: { x: table.x - 0.22, z: table.z + 0.02 },
+  };
+}
+
+/** Full leaf segment, also used by the moving gameplay collider. */
+export function cabinDoorSegment(door, angle = 0) {
+  return {
+    x1: door.hingeX, z1: door.hingeZ,
+    x2: door.hingeX - door.leafWidth * Math.cos(angle),
+    z2: door.hingeZ + door.leafWidth * Math.sin(angle),
+    r: 0.06,
+  };
+}
+
+// A thin timber core sits deep inside the round logs. It seals the joints and
+// the partly cut crowns above/below windows without flattening either face.
+function addWallSeals(out, room, windows, door, roofAt) {
+  const thickness = 0.08;
+  for (const wall of ['front', 'back', 'left', 'right']) {
+    const horizontal = wall === 'front' || wall === 'back';
+    const a0 = horizontal ? room.x0 : room.z0;
+    const a1 = horizontal ? room.x1 : room.z1;
+    const fixed = horizontal ? (wall === 'front' ? room.z1 : room.z0) : (wall === 'left' ? room.x0 : room.x1);
+    const top = horizontal ? Math.min(roofAt(room.x0), roofAt(room.x1)) : roofAt(fixed);
+    const openings = windows.filter(w => w.wall === wall).map(w => ({
+      a0: w.center - w.width / 2, a1: w.center + w.width / 2, y0: w.y0, y1: w.y1,
+    }));
+    if (wall === 'front') openings.push({ a0: door.x0, a1: door.x1, y0: door.y0, y1: door.y1 });
+    const bottom = room.floorY - 0.1;
+    const levels = [...new Set([bottom, top, ...openings.flatMap(o => [o.y0, o.y1])])]
+      .filter(y => y >= bottom && y <= top).sort((a, b) => a - b);
+    for (let i = 1; i < levels.length; i++) {
+      const y0 = levels[i - 1], y1 = levels[i], cy = (y0 + y1) / 2;
+      const cuts = openings.filter(o => cy > o.y0 && cy < o.y1).map(o => [o.a0, o.a1]);
+      for (const [left, right] of subtractIntervals(a0, a1, cuts)) {
+        addBox(out, horizontal
+          ? { x: (left + right) / 2, y: cy, z: fixed, w: right - left, h: y1 - y0, d: thickness, along: 'x' }
+          : { x: fixed, y: cy, z: (left + right) / 2, w: thickness, h: y1 - y0, d: right - left, along: 'z' });
+      }
+    }
+    if (!horizontal) continue;
+    // Fill the gable right up to the sloping roof; the room is narrower than
+    // the eaves, so the old decorative gable logs could not close this joint.
+    const polygon = [[room.x0, top], [room.x1, top], [room.x1, roofAt(room.x1)], [0, roofAt(0)], [room.x0, roofAt(room.x0)]];
+    for (const sign of [-1, 1]) {
+      const z = fixed + sign * thickness / 2;
+      for (let i = 1; i < polygon.length - 1; i++) {
+        const points = [polygon[0], polygon[i], polygon[i + 1]];
+        const area = (points[1][0] - points[0][0]) * (points[2][1] - points[0][1])
+          - (points[1][1] - points[0][1]) * (points[2][0] - points[0][0]);
+        if (Math.abs(area) < 1e-8) continue;
+        addTriangle(out, points.map(([x, y]) => [x, y, z]), [0, 0, sign], points);
+      }
+    }
+  }
+}
+
 /** Собрать метрическую геометрию и план избы. */
 export function buildCabin(spec = {}) {
   const s = mergeSpec(spec);
@@ -298,10 +377,18 @@ export function buildCabin(spec = {}) {
     y1: room.floorY - 0.01 + s.door.height,
     wallZ: room.z1,
   };
+  // The leaf overlaps both jambs; hinge and collider use the very same edge.
+  door.leafWidth = door.width + 0.04;
+  door.hingeX = door.x1 + 0.02;
+  door.hingeZ = room.z1 + 0.12;
   const windowPlan = s.windows.map((w) => ({
     ...w,
-    y0: w.centerY - w.height / 2,
-    y1: w.centerY + w.height / 2,
+    center: w.wall === 'back' ? room.x1 - 1.15 : w.center,
+    fixed: w.wall === 'front' ? room.z1 : w.wall === 'back' ? room.z0 : w.wall === 'left' ? room.x0 : room.x1,
+    lightCenter: undefined,
+    centerY: room.floorY + 1.32,
+    y0: room.floorY + 1.32 - w.height / 2,
+    y1: room.floorY + 1.32 + w.height / 2,
   }));
 
   const crownStep = (s.wall.topCenterY - s.wall.bottomY) / (s.wall.crowns - 1);
@@ -336,7 +423,7 @@ export function buildCabin(spec = {}) {
     for (const z of [room.z0, room.z1]) addLog(logs, [center - half, y, z], [center + half, y, z], s.wall.logRadius * 0.96, rand);
   }
 
-  for (const w of windowPlan) addWindowGeometry(glass, beam, room, w);
+  for (const w of windowPlan) addWindowGeometry(glass, beam, room, w, s.wall.logRadius);
 
   const frame = 0.17;
   for (const x of [door.x0 - frame / 2, door.x1 + frame / 2]) {
@@ -349,7 +436,7 @@ export function buildCabin(spec = {}) {
   const floorCount = Math.ceil(insideW / 0.235);
   for (let i = 0; i < floorCount; i++) {
     const w = insideW / floorCount;
-    addBox(boards, { x: room.x0 + 0.08 + (i + 0.5) * w, y: room.floorY - 0.05, z: (room.z0 + room.z1) / 2, w: w - 0.012, h: 0.1, d: insideD, along: 'z' });
+    addBox(boards, { x: room.x0 + 0.08 + (i + 0.5) * w, y: room.floorY - 0.05, z: (room.z0 + room.z1) / 2, w: w + 0.002, h: 0.1, d: insideD, along: 'z' });
   }
   const porchDepth = s.porch.z1 - room.z1;
   const porchCount = Math.ceil(porchDepth / 0.235);
@@ -385,8 +472,8 @@ export function buildCabin(spec = {}) {
   const plankDepth = roofDepth / s.roof.plankCount;
   for (let i = 0; i < s.roof.plankCount; i++) {
     const z = s.bounds.minZ + (i + 0.5) * plankDepth;
-    addBox(roof, { x: run / 2, y: (ridgeLineY + eaveLineY) / 2, z, w: slopeLength, h: s.roof.thickness, d: plankDepth - 0.008, rz: -angle, along: 'x' });
-    addBox(roof, { x: -run / 2, y: (ridgeLineY + eaveLineY) / 2, z, w: slopeLength, h: s.roof.thickness, d: plankDepth - 0.008, rz: angle, along: 'x' });
+    addBox(roof, { x: run / 2, y: (ridgeLineY + eaveLineY) / 2, z, w: slopeLength, h: s.roof.thickness, d: plankDepth + 0.002, rz: -angle, along: 'x' });
+    addBox(roof, { x: -run / 2, y: (ridgeLineY + eaveLineY) / 2, z, w: slopeLength, h: s.roof.thickness, d: plankDepth + 0.002, rz: angle, along: 'x' });
   }
 
   const rafterCount = 11;
@@ -396,6 +483,8 @@ export function buildCabin(spec = {}) {
     addBox(beam, { x: -run / 2, y: (ridgeLineY + eaveLineY) / 2 - 0.1, z, w: slopeLength, h: 0.13, d: 0.13, rz: angle, along: 'x' });
   }
   addBox(beam, { x: 0, y: ridgeLineY - 0.14, z: 0, w: 0.18, h: 0.22, d: roofDepth - 0.34, along: 'z' });
+  addWallSeals(logs, room, windowPlan, door,
+    x => ridgeLineY - s.roof.thickness / (2 * Math.cos(angle)) + 0.01 - Math.abs(x) * roofRise / run);
 
   const doorPlanks = 5;
   const plankW = door.leafWidth / doorPlanks;
@@ -404,8 +493,8 @@ export function buildCabin(spec = {}) {
       x: -door.leafWidth + (i + 0.5) * plankW,
       y: door.y0 + door.height / 2,
       z: 0,
-      w: plankW - 0.012,
-      h: door.height - 0.04,
+      w: plankW + 0.001,
+      h: door.height + 0.02,
       d: 0.085,
       along: 'y',
     });
@@ -422,8 +511,6 @@ export function buildCabin(spec = {}) {
     roof: finish(roof),
     glass: finish(glass),
   };
-  door.hingeX = s.door.hingeX;
-  door.hingeZ = s.door.hingeZ;
 
   const wallColliders = [
     { side: 'left', x1: room.x0, z1: room.z0, x2: room.x0, z2: room.z1, r: s.wall.logRadius },
@@ -448,10 +535,12 @@ export function buildCabin(spec = {}) {
     door,
     windows: windowPlan,
     porch: { ...s.porch, stepTop },
-    roof: { hx: s.bounds.maxX, hz: roofDepth / 2, topY: s.roof.ridgeTopY, centerX: 0, centerZ: 0 },
+    roof: { hx: s.bounds.maxX, hz: roofDepth / 2, topY: s.roof.ridgeTopY, centerX: 0, centerZ: 0,
+      undersideRidgeY: ridgeLineY - 0.25, slope: roofRise / run },
     wallColliders,
     porchColliders,
   };
+  layout.interior = cabinInteriorPlan(layout, meshes.logs.position, s.wall.logRadius);
   return {
     meshes,
     layout,

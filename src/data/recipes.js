@@ -22,6 +22,7 @@ export const RECIPES = Object.freeze([
   build('place-stone', 'положить камень', 'stone', MATERIAL.STONE),
   build('pour-soil', 'насыпать грунт', 'soil', MATERIAL.SOIL),
   build('shape-snow', 'слепить снег', 'snow', MATERIAL.SNOW),
-  craft('make-torch', 'сделать факел', { log: 1, soil: 1 }, { torch: 2 }),
+  craft('make-torch', 'расщепить смолистое полено на факелы', { log: 1 }, { torch: 2 }),
   craft('make-block', 'сделать каменный блок', { stone: 4 }, { block: 1 }),
+  craft('dress-ore', 'обтесать железистый камень', { ore: 2 }, { block: 1 }),
 ]);

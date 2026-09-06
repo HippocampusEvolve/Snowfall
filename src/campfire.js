@@ -146,7 +146,7 @@ export class Campfire {
     this.emberMat = new THREE.MeshStandardMaterial({
       color: 0x140a05,
       emissive: 0xff4a12,
-      emissiveIntensity: 2.2,
+      emissiveIntensity: 1.1,
       roughness: 1,
     });
     const emberGeos = [];
@@ -160,17 +160,17 @@ export class Campfire {
 
     // ---- пламя: три скрещенных полотна с покадровой текстурой ----
     // Устройство и форма — в flame.js: тот же огонь горит в камине, только
-    // вытянутый. Цвет чуть выше единицы: ядро перешагивает порог bloom (0.82)
-    // и обрастает ореолом. Выше 1.2 язычки сливаются в белое пятно —
-    // проверено на снегу у избы.
+    // вытянутый. Три аддитивных полотна складывают яркость: тёплая подкраска
+    // и прозрачность сохраняют язычки даже вблизи на фоне белого снега.
     this.flame = new FlameSheets({
       w: FLAME_PW,
       h: FLAME_PH,
       texW: FLAME_W,
       texH: FLAME_H,
       fps: FLAME_FPS,
-      color: new THREE.Color(1.15, 1.08, 1),
+      color: new THREE.Color(0.94, 0.77, 0.5),
     }).addTo(this.group);
+    this.flame.material.opacity = 0.56;
     this.flames = this.flame.sheets;
     for (const f of this.flames) f.position.y = 0.095 + FLAME_PH / 2;
 
@@ -238,7 +238,7 @@ export class Campfire {
     }
 
     // ---- свет ----
-    this.light = new THREE.PointLight(0xff9040, 50, 26, 2);
+    this.light = new THREE.PointLight(0xffa15c, 10.5, 16, 2);
     this.light.position.set(0, 0.9, 0);
     this.group.add(this.light);
 
@@ -247,10 +247,9 @@ export class Campfire {
     glowCanvas.width = glowCanvas.height = 128;
     const gctx = glowCanvas.getContext('2d');
     const gg = gctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    // ядро слабее эталонного (0.95): у нас вокруг белый снег и bloom, на такой
-    // подложке яркое сияние съедает сами язычки
-    gg.addColorStop(0, 'rgba(255,168,74,0.5)');
-    gg.addColorStop(0.35, 'rgba(255,110,30,0.2)');
+    // Only a faint halo: the flame itself provides the readable bright core.
+    gg.addColorStop(0, 'rgba(255,168,74,0.2)');
+    gg.addColorStop(0.35, 'rgba(255,110,30,0.06)');
     gg.addColorStop(1, 'rgba(255,80,10,0)');
     gctx.fillStyle = gg;
     gctx.fillRect(0, 0, 128, 128);
@@ -264,10 +263,11 @@ export class Campfire {
         transparent: true,
         toneMapped: false,
         fog: false,
+        opacity: 0.22,
       })
     );
-    this.glow.scale.set(2.6, 2.2, 1);
-    this.glow.position.y = 0.06 + 1.1; // остальное задаёт update
+    this.glow.scale.set(1.35, 1.4, 1);
+    this.glow.position.y = 0.12 + 0.7; // остальное задаёт update
     this.glow.renderOrder = 2;
     this.group.add(this.glow);
   }
@@ -301,22 +301,20 @@ export class Campfire {
     // Мерцание: медленное дыхание от fbm плюс быстрая дрожь. Синусы дают
     // слышимый период, шум — нет, поэтому огонь не «тикает».
     const fl = 0.72 + fbm(t * 1.6, 0.5, 64, 64, 3, 99) * 0.5 + Math.sin(t * 17.3) * 0.045;
-    // 23 вместо прежних 50: на белом снегу да с ACES и bloom прежняя яркость
-    // выжигала всё вокруг костра в чистый белый, и на полу проступали круги —
-    // ступеньки проталины. С 23 остаётся тёплая лужа света, а огонь видно.
-    this.light.intensity = 23 * fl * (0.08 + 0.92 * b);
+    // Snow reflects enough of this light to reveal the logs without clipping.
+    this.light.intensity = 10.5 * fl * (0.08 + 0.92 * b);
     this.light.position.x = Math.sin(t * 7.7) * 0.04;
     this.light.position.z = Math.cos(t * 6.3) * 0.04;
     // угли дышат вместе с пламенем; гаснут последними (медленнее, чем свет)
-    this.emberMat.emissiveIntensity = (1.35 + fl * 1.25) * (0.3 + 0.7 * b);
+    this.emberMat.emissiveIntensity = (0.55 + fl * 0.65) * (0.3 + 0.7 * b);
 
     // Сияние: спрайт стоит НА углях. Раньше он был вдвое шире и утоплен в
     // землю — террейн срезал его нижнюю половину, и на снегу проступал
     // светлый круг. Теперь нижняя кромка держится над снегом.
     const gs = 0.45 + 0.55 * b;
-    this.glow.material.opacity = (0.4 + 0.3 * fl) * (0.12 + 0.88 * b);
-    this.glow.scale.set((2.5 + fl * 0.4) * gs, (2.1 + fl * 0.35) * gs, 1);
-    this.glow.position.y = 0.06 + this.glow.scale.y * 0.5;
+    this.glow.material.opacity = (0.16 + 0.06 * fl) * (0.12 + 0.88 * b);
+    this.glow.scale.set((1.2 + fl * 0.15) * gs, (1.25 + fl * 0.15) * gs, 1);
+    this.glow.position.y = 0.12 + this.glow.scale.y * 0.5;
 
     // пламя оседает: язычки ниже, база остаётся на углях; мерцание качает
     // ширину и высоту полотен, каждое следующее чуть шире соседа

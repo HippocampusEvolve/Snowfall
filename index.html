@@ -360,6 +360,16 @@
        из мира не выйти ничем, кроме кнопки «назад» браузера. */
     body.touch-mode #exit { opacity: 0.35; pointer-events: auto; }
 
+    #saveNotice { max-width: 32rem; margin: 1rem 1rem 0; text-align: center; }
+    #saveNotice[hidden] { display: none; }
+    body.save-issue #gate { padding: 1.5rem 0; overflow-y: auto; justify-content: safe center; }
+    body.save-issue #gate > * { flex-shrink: 0; }
+    body.save-issue #enter, body.save-issue #resetWorld,
+    body.save-issue #boot { display: none; }
+    #saveMessage { color: var(--ink); font-size: 0.9rem; line-height: 1.5; letter-spacing: 0.02em; }
+    #saveRetry { min-height: 44px; margin-top: 0.5rem; padding: 0.6rem 1rem; color: var(--ink); opacity: 1; }
+    #gate button:disabled { opacity: 0.4; cursor: default; }
+
     /* --- тач-управление (создаётся из touch.js только на тач-устройствах) ---
        без видимых джойстиков; кнопки — голые белые штрихи, никаких подложек */
     #touchUI { position: fixed; inset: 0; z-index: 8; pointer-events: none; display: none; }
@@ -382,6 +392,7 @@
     #tbAct { right: max(20px, env(safe-area-inset-right)); bottom: 116px; }
     #tbTool1 { right: max(102px, calc(env(safe-area-inset-right) + 82px)); bottom: 32px; }
     #tbTool2 { right: max(102px, calc(env(safe-area-inset-right) + 82px)); bottom: 116px; }
+    #tbTorch { right: max(102px, calc(env(safe-area-inset-right) + 82px)); bottom: 116px; }
     body.touch-mode, body.touch-mode canvas {
       touch-action: none; user-select: none; -webkit-user-select: none;
       -webkit-touch-callout: none;
@@ -416,6 +427,10 @@
       <div id="loadBar" role="progressbar" aria-label="Мир собирается"><div id="loadFill"></div></div>
       <p id="loadNote" aria-hidden="true"></p>
       <p id="bootMsg" hidden></p>
+    </div>
+    <div id="saveNotice" hidden>
+      <p id="saveMessage" role="alert"></p>
+      <button id="saveRetry" class="quiet" type="button">повторить сохранение</button>
     </div>
     <a class="quiet" href="https://find-the-end.fun/">выйти из мира</a>
     <button id="resetWorld" class="quiet" type="button">начать ночь заново</button>

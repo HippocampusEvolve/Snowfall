@@ -47,6 +47,28 @@ const VERT = new Int32Array(S * S * S * 3); // ребро решётки -> но
 const fi = (i, j, k) => ((k + 1) * SW + (j + 1)) * SW + (i + 1); // узел -1..VN+1
 const ei = (i, j, k, a) => ((k * S + j) * S + i) * 3 + a; // ребро решётки 0..VN
 
+// Неизменная геология чанка. Подготавливается рядом с игроком в воркере;
+// правки и шапка сюда не входят, поэтому копание не инвалидирует эти данные.
+export function sampleChunk({ cx, cy, cz, colH }, caves) {
+  const cave = new Float64Array(SW * SW * SW);
+  const material = new Uint8Array(cave.length);
+  for (let k = -1; k <= VN + 1; k++) {
+    const z = (cz * VN + k) * VS;
+    for (let j = -1; j <= VN + 1; j++) {
+      const y = (cy * VN + j) * VS;
+      for (let i = -1; i <= VN + 1; i++) {
+        const x = (cx * VN + i) * VS;
+        const base = colH[(k + 1) * SW + i + 1];
+        const p = fi(i, j, k);
+        cave[p] = caves.sdf(x, y, z, base - y);
+        material[p] = caves.materialAt ? caves.materialAt(x, y, z, base, cave[p])
+          : base - y <= 1.2 ? MATERIAL.SNOW : base - y <= 4 ? MATERIAL.SOIL : MATERIAL.STONE;
+      }
+    }
+  }
+  return { cave, material };
+}
+
 /**
  * Меш одного чанка.
  *
@@ -89,13 +111,13 @@ export function meshChunk(job, caves) {
         const y = (oy + j) * VS;
         const p = fi(i, j, k);
         const g = base - y;
-        const cave = caves.sdf(x, y, z, g);
+        const cave = job.samples ? job.samples.cave[p] : caves.sdf(x, y, z, g);
         // база с шапкой: слагаемое рельефа не опускается ниже cap, поэтому
         // изоповерхность снега в шапку не попадает, а свод (cave) - как был
         FIELD[p] = compose(cap && g < cap ? y + cap : base, y, cave, FIELD[p]);
         MAT[p] = EDIT_MAT[p] >= 0
           ? EDIT_MAT[p]
-          : caves.materialAt
+          : job.samples ? job.samples.material[p] : caves.materialAt
             ? caves.materialAt(x, y, z, base, cave)
             : base - y <= 1.2
               ? MATERIAL.SNOW
@@ -219,6 +241,12 @@ if (inWorker) {
     if (msg.kind === 'init') {
       caves = createCaves({ seed: msg.seed, avoid: msg.avoid });
       self.postMessage({ kind: 'ready', exits: caves.exits });
+      return;
+    }
+    if (msg.kind === 'samples') {
+      const samples = sampleChunk(msg, caves);
+      self.postMessage({ kind: 'samples', cx: msg.cx, cy: msg.cy, cz: msg.cz, samples },
+        [samples.cave.buffer, samples.material.buffer]);
       return;
     }
     const out = meshChunk(msg, caves);

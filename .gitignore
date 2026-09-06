@@ -1,4 +1,5 @@
 node_modules/
+textures-unused/
 dist/
 # сборка веб-ассетов под APK (Capacitor копирует её в android/)
 dist-apk/

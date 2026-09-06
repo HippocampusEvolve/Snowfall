@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { material } from 'world-core/materials';
 import { matset } from './matsets.js';
 import { WORKBENCH_PARTS } from './workbench-geometry.js';
+import { RECIPES } from './data/recipes.js';
 
 export { countWorkbenchTriangles } from './workbench-geometry.js';
 
@@ -39,5 +40,18 @@ export class Workbench {
     this.group.rotation.y = at.yaw;
     this.position = new THREE.Vector3(at.x, y + 0.86, at.z);
     this.obstacle = { x: at.x, z: at.z, r: 1.05 };
+    this.zones = RECIPES.filter(r => r.verb === 'craft').map((recipe, i) => {
+      const x = -0.64 + i * 0.64;
+      const wood = i === 0;
+      const sample = new THREE.Mesh(wood ? new THREE.CylinderGeometry(.032, .044, .34, 7)
+        : new THREE.IcosahedronGeometry(.085, 0),
+      new THREE.MeshStandardMaterial({color:wood ? 0x856745 : i === 1 ? 0x81888a : 0x776048, roughness:.95}));
+      sample.position.set(x, wood ? .951 : .995, .22);
+      if (wood) sample.rotation.z = Math.PI / 2;
+      sample.castShadow = sample.receiveShadow = true;
+      this.group.add(sample);
+      this.group.updateMatrixWorld(true);
+      return {recipe, position:sample.getWorldPosition(new THREE.Vector3())};
+    });
   }
 }

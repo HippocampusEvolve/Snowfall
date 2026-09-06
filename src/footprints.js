@@ -18,7 +18,9 @@ import * as THREE from 'three';
 //   R — свежий след: глубокий, заметается за минуты;
 //   G — УТОПТАННОСТЬ: каждый шаг добавляет немного (PACK за штамп), выцветает
 //       в десятки раз медленнее. Шейдеры снега берут max(R, G).
-// Детальная карта — только R (тропы крупнее её масштаба).
+//   B — гладкие круглые вмятины/проталины. Они участвуют в высоте и цвете,
+//       но не в резкой нормали протектора: квантование иначе рисует кольца.
+// Детальная карта — R (протектор/лапки) и B (плавные круглые вмятины).
 // Затухание — поканальное: fade-квад умножает буфер на свой ЦВЕТ
 // (blendDst = SrcColorFactor), а не на общий альфа-коэффициент.
 const RES = 2048;
@@ -181,21 +183,26 @@ function makeFoxTexture() {
   return canvasTex(blurred(c, 0.8));
 }
 
-// мягкий круг (проталина, вмятина приземления)
-function makeCircleTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 128;
-  const ctx = c.getContext('2d');
-  const cg = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-  cg.addColorStop(0, 'rgba(255,255,255,1)');
-  cg.addColorStop(0.35, 'rgba(255,255,255,0.9)');
-  cg.addColorStop(0.55, 'rgba(255,255,255,0.62)');
-  cg.addColorStop(0.75, 'rgba(255,255,255,0.3)');
-  cg.addColorStop(0.9, 'rgba(255,255,255,0.1)');
-  cg.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = cg;
-  ctx.fillRect(0, 0, 128, 128);
-  return canvasTex(c);
+// Analytic C2 falloff: no 8-bit canvas alpha bands or gradient-stop creases.
+// The existing render targets and snapshot layout stay RGBA8.
+export function createCircleStampMaterial() {
+  const material = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0, 0, 1), transparent: true,
+    blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false,
+  });
+  material.onBeforeCompile = shader => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vCircleUv;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCircleUv = uv;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vCircleUv;')
+      .replace('#include <map_fragment>', `#include <map_fragment>
+        float circleR = clamp(pow(length(vCircleUv * 2.0 - 1.0), 1.3), 0.0, 1.0);
+        float circleFade = circleR * circleR * circleR * (circleR * (circleR * 6.0 - 15.0) + 10.0);
+        diffuseColor.a *= 1.0 - circleFade;`);
+  };
+  material.customProgramCacheKey = () => 'smooth-circle-stamp-v1';
+  return material;
 }
 
 // стирающий круг: ЧЁРНЫЙ центр → белый край. Рисуется блендингом dst *= src,
@@ -272,7 +279,7 @@ export class Footprints {
       hareFront: new THREE.Mesh(new THREE.PlaneGeometry(0.055, 0.055), stampMat(makeHareFrontTexture())),
       fox: new THREE.Mesh(new THREE.PlaneGeometry(0.06, 0.08), stampMat(makeFoxTexture())),
     };
-    this.circleQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), stampMat(makeCircleTexture()));
+    this.circleQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), createCircleStampMaterial());
 
     // стирание: dst *= цвет текстуры (чёрный центр обнуляет карту)
     this.eraseQuad = new THREE.Mesh(
@@ -293,7 +300,7 @@ export class Footprints {
     this.fadeQuad = new THREE.Mesh(
       new THREE.PlaneGeometry(area, area),
       new THREE.MeshBasicMaterial({
-        color: new THREE.Color(FADE_R, FADE_G, 1),
+        color: new THREE.Color(FADE_R, FADE_G, FADE_R),
         transparent: true,
         opacity: 1,
         blending: THREE.CustomBlending,
@@ -363,22 +370,23 @@ export class Footprints {
     return Math.max(Math.abs(x - c.x), Math.abs(z - c.y)) < HI_HALF + pad;
   }
 
-  // общий путь штампа: в общую карту цветом (1, PACK, 0), в детальную — (1,0,0)
-  // (тропы в детальной не копятся — их масштаб крупнее окна). k — ослабление
+  // Следы: общая карта (1, PACK, 0), детальная (1,0,0); круги: (0,0,1) в обе.
+  // Тропы в детальной не копятся — их масштаб крупнее окна. k — ослабление
   // по возрасту при перештамповке; hiOnly — только в детальную (перештамповка).
   _stampMesh(mesh, wx, wz, k = 1, hiOnly = false) {
     const mat = mesh.material;
+    const circle = mesh === this.circleQuad;
     mat.opacity = k;
     this._showOnly(mesh);
     if (!hiOnly) {
-      mat.color.setRGB(1, PACK, 0);
+      mat.color.setRGB(circle ? 0 : 1, circle ? 0 : PACK, circle ? 1 : 0);
       this._renderTo(this._coarse, this.cam);
     }
     if (this._inWindow(wx, wz)) {
-      mat.color.setRGB(1, 0, 0);
+      mat.color.setRGB(circle ? 0 : 1, 0, circle ? 1 : 0);
       this._renderTo(this._hi, this.hiCam);
     }
-    mat.color.setRGB(1, PACK, 0);
+    mat.color.setRGB(circle ? 0 : 1, circle ? 0 : PACK, circle ? 1 : 0);
     mat.opacity = 1;
     mesh.visible = false;
   }

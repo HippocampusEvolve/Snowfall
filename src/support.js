@@ -38,7 +38,7 @@ const FOOT_SAMPLES = [
  * @param {Array} o.colliders реестр столбов и стен-отрезков (collide.js)
  * @param {(x: number, z: number) => number|null} o.getFloor деревянный пол избы
  */
-export function createSupport({ terrain, digger, colliders, getFloor }) {
+export function createSupport({ terrain, digger, colliders, getFloor, structure = null }) {
   const normal = new THREE.Vector3();
   const out = { dist: 0, normal };
 
@@ -129,6 +129,7 @@ export function createSupport({ terrain, digger, colliders, getFloor }) {
       // коллизии со структурами: итеративный решатель — в углах и узких
       // проходах не осциллирует
       resolveColliders(pos, height, radius, colliders);
+      structure?.resolve(pos, radius, height);
     },
 
     // Знаковое расстояние от глаза до ближайшей поверхности и нормаль наружу.

@@ -7,7 +7,8 @@ import { bed, table, stool, rug, shelfWithBooks, logStack } from 'world-core/pro
 import { matset, matsets, prepareMatsets } from './matsets.js';
 import { buildFireplace, buildPot, buildBooks } from './props/index.js';
 import { createSpread } from './spread.js';
-import { buildCabin } from './cabin-geometry.js';
+import { buildCabin, cabinDoorSegment } from './cabin-geometry.js';
+import { createHearthState } from './hearth-state.js';
 
 // Изба собирается из метрических буферов: сруб, крыша, дверь, окна и крыльцо.
 // В домик можно войти: дверь открывается по F, стены имеют свободный проём,
@@ -19,14 +20,42 @@ import { buildCabin } from './cabin-geometry.js';
 
 const DOOR_OPEN = 2.2; // рад - дверь распахивается наружу, на крыльцо
 const DOOR_SPEED = 3.0; // скорость хода двери, 1/с
-const FLOOR_Y = 0.81;
-const INTERIOR_SCALE = 1.0545349463020333;
-const INTERIOR_X = -0.20205235481262207 * INTERIOR_SCALE;
-const INTERIOR_Z = -0.8637917041778564 * INTERIOR_SCALE;
 const CABIN_SETS = [
   'log', 'bark', 'logend', 'split', 'brick', 'hearth', 'beam', 'ashlar',
   'floor', 'cloth', 'wool', 'braid', 'leather', 'paper', 'iron',
 ];
+
+function cabinWood(set, options = {}) {
+  const wood = material(set, { ...options, roughness: 0.94, metalness: 0, envMapIntensity: 0.35 });
+  // These boards are dry and unfinished. A dark procedural roughness map
+  // multiplied their roughness down and made every grain stripe look wet.
+  wood.roughnessMap.dispose();
+  wood.roughnessMap = null;
+  return wood;
+}
+
+// Snow belongs on the outside half of the logs. Applying snowTint to the
+// whole merged wall painted blue-white stripes through the warm interior.
+function cabinSnow(material, tint, amount, threshold, room) {
+  const mat = snowTint(material, tint, amount, threshold);
+  const applySnow = mat.onBeforeCompile;
+  const snowKey = mat.customProgramCacheKey();
+  mat.onBeforeCompile = shader => {
+    applySnow(shader);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vCabinSnowPosition;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCabinSnowPosition = position;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vCabinSnowPosition;')
+      .replace('float snowAmt =', `float outsideCabin = 1.0 -
+        step(${(room.x0 + 0.002).toFixed(6)}, vCabinSnowPosition.x) * step(vCabinSnowPosition.x, ${(room.x1 - 0.002).toFixed(6)}) *
+        step(${(room.z0 + 0.002).toFixed(6)}, vCabinSnowPosition.z) * step(vCabinSnowPosition.z, ${(room.z1 - 0.002).toFixed(6)});
+        float snowAmt =`)
+      .replaceAll('snowAmt * ', 'snowAmt * outsideCabin * ');
+  };
+  mat.customProgramCacheKey = () => `${snowKey}-exterior-${room.x0}-${room.x1}-${room.z0}-${room.z1}`;
+  return mat;
+}
 
 export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = Promise.resolve()) {
   const breathe = createSpread();
@@ -52,21 +81,23 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
     return m;
   };
 
-  const logMat = snowTint(
-    material(matset('log'), { normalScale: 1.35, color: 0x8b6242 }),
+  const logMat = cabinSnow(
+    cabinWood(matset('log'), { normalScale: 0.42, color: 0x947555 }),
     '0.78, 0.83, 0.94',
     0.5,
-    0.5
+    0.5,
+    built.layout.room
   );
-  const beamMat = snowTint(
-    material(matset('beam'), { normalScale: 0.8, color: 0x7b573d }),
+  const beamMat = cabinSnow(
+    cabinWood(matset('beam'), { normalScale: 0.38, color: 0x80664e }),
     '0.78, 0.83, 0.94',
     0.45,
-    0.55
+    0.55,
+    built.layout.room
   );
-  const boardMat = material(matset('floor'), { normalScale: 0.85, color: 0xb0875e });
+  const boardMat = cabinWood(matset('floor'), { normalScale: 0.35, color: 0xac9477 });
   const roofMat = snowTint(
-    material(matset('floor'), { normalScale: 1.0, color: 0x5a4030 }),
+    cabinWood(matset('floor'), { normalScale: 0.45, color: 0x62503d }),
     '0.85, 0.89, 0.98',
     1.0,
     0.1,
@@ -168,21 +199,10 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
 
   const _v = new THREE.Vector3();
   const l2w = (lx, ly, lz) => group.localToWorld(_v.set(lx, ly, lz));
-  const interiorPoint = (ix, iz) => ({
-    x: INTERIOR_X + ix * INTERIOR_SCALE,
-    z: INTERIOR_Z + iz * INTERIOR_SCALE,
-  });
-
-  const interior = await buildInterior(FLOOR_Y, breathe);
-  const interiorHolder = new THREE.Group();
-  interiorHolder.position.set(
-    INTERIOR_X,
-    layout.room.floorY - FLOOR_Y * INTERIOR_SCALE,
-    INTERIOR_Z
-  );
-  interiorHolder.scale.setScalar(INTERIOR_SCALE);
-  interiorHolder.add(interior.group);
-  group.add(interiorHolder);
+  const interiorPoint = (ix, iz) => ({ x: ix, z: iz });
+  const interior = await buildInterior(layout.room.floorY, breathe, layout.interior);
+  group.add(interior.group);
+  const hearthState = createHearthState();
   const ownColliders = interior.colliders.length;
   group.updateMatrixWorld(true);
 
@@ -209,22 +229,22 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
     const a = interiorPoint(c.x1 ?? c.x, c.z1 ?? c.z);
     if (c.x2 !== undefined) {
       const b = interiorPoint(c.x2, c.z2);
-      wall(a.x, a.z, b.x, b.z, c.r * INTERIOR_SCALE);
+      wall(a.x, a.z, b.x, b.z, c.r);
     } else {
       const p = l2w(a.x, layout.room.floorY, a.z);
-      obstacles.push({ x: p.x, z: p.z, r: c.r * INTERIOR_SCALE });
+      obstacles.push({ x: p.x, z: p.z, r: c.r });
     }
   }
-  const doorSeg = { x1: 0, z1: 0, x2: 0, z2: 0, r: 0.1 };
+  const doorSeg = { x1: 0, z1: 0, x2: 0, z2: 0, r: 0.06 };
   obstacles.push(doorSeg);
 
-  const dressed = loadInteriorProps(interior.group, FLOOR_Y, interior.colliders)
+  const dressed = loadInteriorProps(interior.group, layout.room.floorY, interior.colliders, layout.interior)
     .then(() => {
       group.updateMatrixWorld(true);
       return interior.colliders.slice(ownColliders).map((c) => {
         const local = interiorPoint(c.x, c.z);
         const p = l2w(local.x, layout.room.floorY, local.z);
-        return { x: p.x, z: p.z, r: c.r * INTERIOR_SCALE };
+        return { x: p.x, z: p.z, r: c.r };
       });
     })
     .catch(() => []);
@@ -257,8 +277,8 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
       wx = w.fixed ?? (w.wall === 'left' ? layout.room.x0 : layout.room.x1);
       wz = w.lightCenter ?? w.center;
     }
-    const outLength = Math.hypot(wx, wz) || 1;
-    const ox = wx / outLength, oz = wz / outLength;
+    const ox = w.wall === 'left' ? -1 : w.wall === 'right' ? 1 : 0;
+    const oz = w.wall === 'back' ? -1 : w.wall === 'front' ? 1 : 0;
     const l = new THREE.PointLight(0xffa550, 4.5, 7.5, 2);
     l.position.set(wx + ox * 0.85, w.centerY - 0.4, wz + oz * 0.85);
     lights.push(l);
@@ -283,10 +303,9 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
     doorNode.updateMatrix();
     setDoorGeometry(doorNode.rotation.y);
     doorNode.updateWorldMatrix(true, false);
-    hingeW.set(-layout.door.leafWidth * 0.45, layout.room.floorY + 1, 0);
-    doorNode.localToWorld(hingeW);
-    edgeW.set(-layout.door.leafWidth, layout.room.floorY + 1, 0);
-    doorNode.localToWorld(edgeW);
+    const segment = cabinDoorSegment(layout.door, doorNode.rotation.y);
+    hingeW.copy(l2w(segment.x1, layout.room.floorY + 1, segment.z1));
+    edgeW.copy(l2w(segment.x2, layout.room.floorY + 1, segment.z2));
     doorSeg.x1 = hingeW.x;
     doorSeg.z1 = hingeW.z;
     doorSeg.x2 = edgeW.x;
@@ -302,10 +321,12 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
   const stoveLocal = interiorPoint(interior.hearth.x, interior.hearth.z);
   const stovePos = l2w(stoveLocal.x, layout.room.floorY + 0.5, stoveLocal.z).clone();
 
-  function update(t, dt = 0) {
+  function update(t, dt = 0, spend = true) {
+    hearthState.update(dt, spend);
     const k = 0.9 + 0.06 * Math.sin(t * 1.7) + 0.04 * Math.sin(t * 3.9 + 1.2);
-    glassMat.emissiveIntensity = 0.75 * k;
-    for (const l of lights) l.intensity = 4.5 * k;
+    const lightK = 0.08 + 0.92 * hearthState.heatK;
+    glassMat.emissiveIntensity = 0.48 * k * lightK;
+    for (const l of lights) l.intensity = 3.2 * k * lightK;
     const target = doorOpen ? 1 : 0;
     if (Math.abs(target - doorT) > 1e-4) {
       doorT += (target - doorT) * Math.min(1, DOOR_SPEED * dt);
@@ -314,12 +335,19 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
       doorNode.rotation.y = DOOR_OPEN * e;
       syncDoor();
     }
-    interior.update(t, dt);
+    interior.update(t, dt, hearthState.heatK);
   }
 
   return {
     group, obstacles, update, toggleDoor, dressed,
     get doorOpen() { return doorOpen; },
+    get fuel() { return hearthState.fuel; },
+    set fuel(value) { hearthState.fuel = value; },
+    get heatK() { return hearthState.heatK; },
+    addFuel: hearthState.addFuel,
+    snapshot: hearthState.snapshot,
+    restore: hearthState.restore,
+    age: hearthState.age,
     doorCenter, doorNode, floorHeightAt, isInside, snowMask, stovePos,
     footprint: { x, z, rotY, hx: layout.roof.hx, hz: layout.roof.hz },
   };
@@ -336,13 +364,15 @@ export async function createCabin(terrain, { x, z, rotY = 0 } = {}, workGate = P
 // ткани и ковра; глаз цеплялся за неё как за заглушки. Предмет ядра знает свои
 // материалы сам (кровать: брус, ткань, шерстяной плед), здесь остаются только
 // место, коллайдер и свет.
-async function buildInterior(F, breathe) {
+async function buildInterior(F, breathe, plan) {
   const g = new THREE.Group();
 
   const iron = new THREE.MeshStandardMaterial({ color: 0x23252b, roughness: 0.55, metalness: 0.7 });
 
   const colliders = []; // {x,z,r} или {x1,z1,x2,z2,r} — в локали модели
-  const make = (name, options) => material(matset(name), options);
+  const make = (name, options = {}) => ['bark', 'logend', 'split', 'floor', 'beam'].includes(name)
+    ? cabinWood(matset(name), { ...options, normalScale: Math.min(options.normalScale ?? 0.4, 0.45) })
+    : material(matset(name), options);
   const logMats = () => ({
     bark: make('bark', { normalScale: 1.6 }),
     end: make('logend', { normalScale: 1.2 }),
@@ -410,14 +440,9 @@ async function buildInterior(F, breathe) {
   // Камин встаёт СВОИМ началом координат: середина по ширине, на полу, у
   // плоскости стены. Тело растёт от стены в комнату.
   //     габарит: x ±1.18, z −0.05..1.18 (вперёд), высота 4.25
-  // ROOM — коллизионный прямоугольник, а НЕ плоскость стены. Брёвна сруба
-  // круглые и выпирают внутрь комнаты: у задней стены самая дальняя точка
-  // геометрии лежит на z = -2.35, то есть на 55 см ближе к центру, чем
-  // ROOM.z0 = -2.9. Камин, поставленный по ROOM, наполовину утонул в брёвнах,
-  // и в топке вместо кирпича была видна рама окна.
-  // Замерено перебором вершин сруба внутри объёма топки, а не на глаз.
-  const BACK_WALL = -2.30;
-  const stove = { x: -1.0, z: BACK_WALL };
+  // The plan measures the generated log envelope, including irregular radii.
+  // The fireplace rear projects 5 cm behind its origin and touches that plane.
+  const stove = plan.stove;
   const stoveGroup = new THREE.Group();
   stoveGroup.name = 'fireplaceModel';
   stoveGroup.position.set(stove.x, F, stove.z);
@@ -446,14 +471,14 @@ async function buildInterior(F, breathe) {
   // а сложенная вдоль стены стопка показывала комнате одну тёмную кору и
   // сливалась с брёвнами. Прежние шесть цилиндров «по x» вдобавок лежали друг
   // в друге по оси.
-  adopt(logStack({ r: 0.055, len: 0.52, rows: [3, 2, 1], mats: logMats() }), 0.62, -2.06, Math.PI / 2);
+  adopt(logStack({ r: 0.055, len: 0.52, rows: [3, 2, 1], mats: logMats() }), plan.logs.x, plan.logs.z, Math.PI / 2);
 
   await breathe();
 
-  // ---- стол у правого окна + свеча ----
+  // ---- стол у переднего окна + свеча ----
   // Каркас стола — в группе 'table' (её прячет модельный стол WoodenTable_02).
-  const tableAt = { x: 1.75, z: 1.35 };
-  const TABLE_TOP = F + 0.755; // верх столешницы (свеча стоит на нём)
+  const tableAt = plan.table;
+  const TABLE_TOP = tableAt.topY;
   groupNamed('table');
   adopt(table({ w: 1.15, d: 0.75, h: 0.755, mats: tableMats() }), tableAt.x, tableAt.z);
   dest = g;
@@ -481,7 +506,7 @@ async function buildInterior(F, breathe) {
   await breathe();
 
   // ---- табуретки (каждая в группе 'seatN' — её заменит модель стула) ----
-  [[1.15, 0.7], [2.3, 0.9]].forEach(([sx, sz], i) => {
+  plan.seats.forEach(({ x: sx, z: sz }, i) => {
     groupNamed('seat' + i);
     adopt(stool({ r: 0.19, h: 0.45, mats: tableMats() }), sx, sz, i * 1.3);
     dest = g;
@@ -491,10 +516,8 @@ async function buildInterior(F, breathe) {
   await breathe();
 
   // ---- кровать вдоль правой стены, ближе к дальнему углу ----
-  // Изголовье стоит у самой стены: её брёвна выпирают внутрь до z ≈ −2.35
-  // (см. BACK_WALL), и кровать, поставленная по ROOM, изголовьем сидела в
-  // брёвнах. То же с правой стеной — кровать сдвинута к середине.
-  const bedAt = { x: 2.0, z: -1.25 };
+  // Headboard and blanket clear the actual back and right log surfaces.
+  const bedAt = plan.bed;
   adopt(bed({
     w: 1.02,
     l: 2.1,
@@ -515,9 +538,7 @@ async function buildInterior(F, breathe) {
   await breathe();
 
   // ---- полка на задней стене: книги и кружка ----
-  // Задняя кромка полки — на линии выпуклости брёвен (BACK_WALL); прежняя
-  // полка стояла на z −2.72, то есть целиком в толще стены, и книг в комнате
-  // видно не было.
+  // Shelf rear and brackets touch mounting rails embedded in the log surface.
   const coverColors = [0x6b3434, 0x35502f, 0x2f3f5c, 0x77582a, 0x4c3355];
   const shelfMats = {
     wood: make('beam', { normalScale: 0.7, color: 0xa88a66 }),
@@ -527,13 +548,20 @@ async function buildInterior(F, breathe) {
     shelfMats[`cover${i}`] = make('leather', { color, normalScale: 0.8 });
   });
   const shelf = shelfWithBooks({ width: 1.2, depth: 0.24, n: 5, mats: shelfMats });
-  shelf.group.position.set(0.9, F + 1.5, BACK_WALL + 0.12);
+  shelf.group.position.set(plan.shelf.x, plan.shelf.y, plan.shelf.z);
   shelf.group.traverse((o) => {
     if (!o.isMesh) return;
     o.castShadow = false;
     o.receiveShadow = true;
   });
   g.add(shelf.group);
+  // Vertical rails bridge the valleys between round logs; both brackets
+  // touch their front face and the rails enter the measured log envelope.
+  for (const side of [-1, 1]) {
+    const rail = mesh(new THREE.BoxGeometry(0.075, 0.62, 0.06), shelfMats.wood,
+      plan.shelf.x + side * 0.5, plan.shelf.y - 0.14, plan.inner.z0 - 0.03);
+    rail.name = 'shelf-mount';
+  }
 
   await breathe();
 
@@ -541,8 +569,9 @@ async function buildInterior(F, breathe) {
   // Мягкий тёплый свет наполняет комнату и — главное — читается сквозь
   // прозрачные окна снаружи (это и есть «маяк» дома в ночном лесу). Мотивирует
   // заполняющий hearth-свет: у свечения есть видимый источник под потолком.
-  const lampX = 0.35, lampZ = -0.2, lampY = F + 2.05, lampTop = F + 2.62;
-  mesh(new THREE.CylinderGeometry(0.005, 0.005, lampTop - lampY - 0.05, 4), iron, lampX, (lampTop + lampY) / 2, lampZ); // подвес к потолку
+  const { x: lampX, z: lampZ, y: lampY, topY: lampTop } = plan.lamp;
+  const chainBase = lampY + 0.22;
+  mesh(new THREE.CylinderGeometry(0.005, 0.005, lampTop - chainBase, 4), iron, lampX, (lampTop + chainBase) / 2, lampZ);
   mesh(new THREE.ConeGeometry(0.075, 0.08, 8), iron, lampX, lampY + 0.18, lampZ); // колпак-крышка
   mesh(new THREE.CylinderGeometry(0.1, 0.115, 0.03, 8), iron, lampX, lampY + 0.12, lampZ); // верхний обод
   mesh(new THREE.CylinderGeometry(0.1, 0.09, 0.03, 8), iron, lampX, lampY - 0.12, lampZ); // дно
@@ -560,16 +589,17 @@ async function buildInterior(F, breathe) {
   g.add(hearth);
 
   // мерцание огня в топке, свечи и тёплого фонаря
-  function update(t, dt = 0) {
-    firebox.update(dt, t);
+  function update(t, dt = 0, heatK = 1) {
+    firebox.update(dt, t, heatK);
     const ck = 0.8 + 0.13 * Math.sin(t * 12.7 + 2.1) + 0.07 * Math.sin(t * 31.7);
     candle.intensity = 1.15 * ck;
     flameMat.emissiveIntensity = 3.2 * ck;
     flame.scale.y = 0.9 + 0.2 * ck;
     // фонарь дышит медленно — ровный заполняющий свет комнаты
     const lk = 0.9 + 0.06 * Math.sin(t * 3.1 + 0.5) + 0.04 * Math.sin(t * 6.7);
-    hearth.intensity = 2.2 * lk;
-    lampGlass.emissiveIntensity = 2.4 * lk;
+    const lightK = 0.14 + 0.86 * heatK;
+    hearth.intensity = 1.8 * lk * lightK;
+    lampGlass.emissiveIntensity = 1.8 * lk * lightK;
   }
 
   // hearth — устье, а не середина печи: тепло считают от него. У буржуйки
@@ -587,18 +617,18 @@ async function buildInterior(F, breathe) {
 // стоят в тёмном углу тёмной комнаты. Прочая мебель Poly Haven и тогда не
 // подошла по стилю (стул — резной трон 2.4 м, «стол» — кубик 0.44 м), её
 // роль держит процедурная мебель ядра (buildInterior).
-async function loadInteriorProps(g, F, colliders) {
+async function loadInteriorProps(g, F, colliders, plan) {
   const sets = matsets('iron', 'leather', 'paper');
   // x,z — якорь в локали; yaw — доворот; on — 'floor' (по умолчанию) или
   // 'table'; col — радиус коллайдера
   const PROPS = [
     // чугунок стоял у прежней печи; камин занял это место, и котелок
     // переехал к краю подиума, откуда его удобно снять с огня
-    { build: () => buildPot(sets), x: 0.32, z: -1.32, yaw: 1.0, col: 0.22 },
-    { build: () => buildBooks(sets), x: 1.6, z: 1.45, yaw: 0.6, on: 'table' },
+    { build: () => buildPot(sets), ...plan.pot, yaw: 1.0, col: 0.22 },
+    { build: () => buildBooks(sets), ...plan.books, yaw: 0.12, on: 'table' },
   ];
   const box = new THREE.Box3();
-  const TOP0 = F + 0.755; // верх процедурной столешницы (свеча стоит здесь)
+  const TOP0 = plan.table.topY;
   for (const p of PROPS) {
     const model = p.build();
     model.updateMatrixWorld(true);

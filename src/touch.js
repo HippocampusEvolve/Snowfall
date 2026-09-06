@@ -23,6 +23,7 @@ const ICONS = {
   pickaxe: '<line x1="9" y1="21" x2="13" y2="7"/><path d="M4 8.5c4-3 11-3.5 16 .5M4 8.5l2.5-3M20 9l-2.5-3"/>',
   // молот: рукоять и боёк
   hammer: '<line x1="9" y1="21" x2="12" y2="9"/><path d="M5 6.5h13v5H5z"/>',
+  torch: '<path d="M10 14h4l-1 7h-2zM12 3c1 4 5 5 4 8a4 4 0 0 1-8 0c-1-3 3-4 4-8z"/>',
 };
 
 /**
@@ -30,7 +31,7 @@ const ICONS = {
  * — когда он в руках. Что именно делают «рука» и инструмент, решает не тач:
  * обе кнопки уходят в тот же ввод, что клавиша F и кнопки мыши.
  */
-export function createTouch(input, look) {
+export function createTouch(input, look, onTorch = () => {}) {
   const touch = new TouchControls({
     input,
     look,
@@ -47,6 +48,7 @@ export function createTouch(input, look) {
         press: (down) => (input.touch.jump = down),
       },
       { id: 'tbAct', label: 'Взаимодействовать', icon: ICONS.act, press: (down) => down && input.pressAction() },
+      { id: 'tbTorch', label: 'Достать факел', icon: ICONS.torch, press: (down) => down && onTorch() },
       // держать кнопку инструмента = держать ЛКМ/ПКМ: замахи цепочкой
       { id: 'tbTool1', label: 'Использовать инструмент', icon: ICONS.shovel, press: (down) => input.pressTool(1, down) },
       { id: 'tbTool2', label: 'Насыпать снег', icon: ICONS.build, press: (down) => input.pressTool(2, down) },
@@ -55,12 +57,20 @@ export function createTouch(input, look) {
 
   // видимость контекстных кнопок — из тика main.js
   let shown = null;
-  touch.setButtons = ({ action = false, tool = null } = {}) => {
+  let heldTorch = null;
+  touch.setButtons = ({ action = false, tool = null, torch = false, torchHeld = false } = {}) => {
     touch.show('tbAct', action);
+    touch.show('tbTorch', torch);
+    if (heldTorch !== torchHeld) {
+      heldTorch = torchHeld;
+      touch.get('tbTorch').setAttribute('aria-label', torchHeld ? 'Поставить факел' : 'Взять факел');
+    }
     if (tool === shown) return;
     shown = tool;
     touch.show('tbTool1', !!tool);
-    touch.show('tbTool2', tool === 'shovel');
+    touch.show('tbTool2', tool === 'shovel' || tool === 'axe');
+    touch.setIcon('tbTool2', tool === 'axe' ? ICONS.axe : ICONS.build,
+      tool === 'axe' ? 'Отделить строительное бревно' : 'Насыпать снег');
     const label = tool === 'axe'
       ? 'Рубить топором'
       : tool === 'pickaxe'

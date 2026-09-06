@@ -230,7 +230,10 @@ export class GroundLogs {
     // Половинка ложится расколом вниз, корой вверх — так она и падает; ось
     // полена лежит в плоскости раскола, то есть на самом снегу.
     // Лёгкий разнобой наклона: брошено, а не выложено
-    m.rotation.set((Math.random() - 0.5) * 0.14, yaw, Math.PI / 2 + (Math.random() - 0.5) * 0.12);
+    for (const entry of this.list) {
+      if (Math.hypot(entry.x-x,entry.z-z)<0.48) y=Math.max(y,entry.y+0.065);
+    }
+    m.rotation.set(0, yaw, Math.PI / 2);
     m.position.set(x, y, z);
     m.castShadow = true;
     m.receiveShadow = true;

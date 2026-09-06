@@ -32,6 +32,7 @@ import { RECIPES } from './data/recipes.js';
 import { placedItemsFrom } from './placements.js';
 import { MATERIAL } from './caves.js';
 import { HAMMER_BLOCK } from './hammer-block.js';
+import { createHearthState } from './hearth-state.js';
 import {
   regrowStage, healedHits, fuelAfter, trailFade, pitFill, PIT_DEPTH,
 } from './growth.js';
@@ -119,6 +120,9 @@ const idbReq = (rq) =>
   });
 
 const nowSec = () => Math.round(Date.now() / 1000);
+// Старые сохранения ещё не имеют revision: сравниваем их заголовок целиком.
+const revisionOf = (head) => head?.revision ?? JSON.stringify(head ?? null);
+const newRevision = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 
 /**
  * Свернуть записи рубки в состояние леса на «сейчас».
@@ -170,7 +174,7 @@ export class SaveGame {
   constructor({
     digger, footprints, campfire, player,
     shovel = null, logs = null, axe = null, pickaxe = null, hammer = null,
-    torch = null, woodpile = null, lumber = null,
+    torch = null, woodpile = null, lumber = null, yard = null, homestead = null,
   }) {
     this.digger = digger;
     this.footprints = footprints;
@@ -184,6 +188,10 @@ export class SaveGame {
     this.torch = torch;
     this.woodpile = woodpile;
     this.lumber = lumber;
+    this.yard = yard;
+    this.homestead = homestead;
+    this.hearth = null;
+    this._pendingHearth = null;
     this.disabled = false; // взводит reset(): не дать автосейву записать мир обратно
     this.fpSize = 384 * 384 * 4; // размер снапшота следов (footprints.SNAP)
     // Журнал заводится сразу, до чтения хранилища: события мира могут начаться
@@ -193,10 +201,14 @@ export class SaveGame {
     this.inventory = new Inventory(this.journal);
     this._db = null; // кэш соединения; null после неудачи → фолбэк на localStorage
     this._dbPromise = null; // один общий open: параллельный вызов не получает ложный null
-    this._fpCache = null; // последний RLE-снапшот следов — для sync-сейва (pagehide)
+    this._fpCache = null; // последний RLE-снапшот следов — для sync-сейва действий/выхода
     this._saving = false;
     this._savingPromise = Promise.resolve();
-    this._saveGeneration = 0; // более новый pagehide-сейв отменяет старый async snapshot
+    this._saveGeneration = 0; // более новый sync-сейв отменяет старый async snapshot
+    this._revision = revisionOf(null);
+    this.blocked = false; // конфликт или ошибка чтения: старый мир нельзя записывать поверх нового
+    this.status = 'ok';
+    this.onStatus = null;
     // Сдвиг времени сохранения назад: им живёт отладочный timeTravel, и только он.
     this._shift = 0;
     // Прочитанная, но ещё не применённая рубка: лес приезжает по сети позже,
@@ -206,15 +218,39 @@ export class SaveGame {
     this._wire();
   }
 
+  _status(status) {
+    if (this.status === status) return;
+    this.status = status;
+    this.onStatus?.(status);
+  }
+
+  _conflict() {
+    this.blocked = true;
+    this._status('conflict');
+  }
+
+  _readError() {
+    this.blocked = true;
+    this._status('read-error');
+  }
+
+  _saveError() {
+    if (!this.blocked && !this.disabled) this._status('error');
+    return false;
+  }
+
   // Мир сам рассказывает журналу, что с ним делают: копок, удар инструментом,
   // полено в костре. Через колбэки, а не проверкой состояния по таймеру, -
   // иначе два копка между автосейвами слились бы в один.
   _wire() {
     this.digger.onStroke = (c, yaw, sign, strength, material = 0, tool = 'shovel') => {
       this.journal.dig(c.x, c.y, c.z, yaw, sign, strength, undefined, material, tool);
-      if (tool === 'pickaxe' && sign < 0 && strength > 0) {
+      if ((tool === 'pickaxe' || tool === 'hammer') && sign < 0 && strength > 0) {
         const item = itemByMaterial(material);
-        if (item) this.inventory.add(item.id, 1);
+        if (item) {
+          if (this.onMined) this.onMined(item.id, c);
+          else this.inventory.add(item.id, 1);
+        }
       }
     };
     if (this.lumber) {
@@ -230,6 +266,22 @@ export class SaveGame {
   /** Поленница изменилась (зовёт main.js: своего события у штабеля нет). */
   notePile(count) {
     this.journal.pile(count);
+  }
+
+  attachHearth(cabin) {
+    this.hearth = cabin;
+    if (this._pendingHearth) cabin.restore(this._pendingHearth.state, {elapsedSeconds:this._pendingHearth.away});
+    this._pendingHearth = null;
+  }
+
+  _hearthSnapshot() {
+    if (this.hearth) return this.hearth.snapshot();
+    if (!this._pendingHearth) return null;
+    // A pagehide can happen before the cabin finishes loading. Store its
+    // already-aged fuel, not the pre-offline state with a fresh savedAt.
+    const state = createHearthState();
+    state.restore(this._pendingHearth.state, { elapsedSeconds: this._pendingHearth.away });
+    return state.snapshot();
   }
 
   /** Предмет поставлен в мир или снят с прежней позиции. */
@@ -311,6 +363,7 @@ export class SaveGame {
       }
     } catch (e) {
       console.warn('сейв не прочитан, мир оставлен как есть:', e);
+      this._readError();
       return false;
     }
     if (!head) {
@@ -321,6 +374,8 @@ export class SaveGame {
       cache = migrated.cache;
     }
 
+    this._revision = revisionOf(head);
+
     const t0 = typeof performance === 'undefined' ? Date.now() : performance.now();
     try {
       this.journal.epoch = head.epoch;
@@ -330,6 +385,7 @@ export class SaveGame {
     } catch (e) {
       // мир восстановлен наполовину: это плохо, но не повод забыть его
       console.warn('сейв применён не целиком:', e);
+      this._readError();
     }
     this.journal.loadMs = Math.round(
       ((typeof performance === 'undefined' ? Date.now() : performance.now()) - t0) * 10
@@ -350,6 +406,12 @@ export class SaveGame {
     const worldNow = this.journal.now();
     const oldSeq = head.seqHead;
     const cacheWasCurrent = !!cache && cache.seq === oldSeq;
+    if (this.yard && head.resources !== undefined && (!Array.isArray(head.resources) ||
+        head.resources.some((record) => !record || record.kind === 'log' ||
+          !Object.hasOwn(ITEM_INDEX, record.kind) || !sanePos(record.x, record.y, record.z) ||
+          !Number.isFinite(record.yaw)))) {
+      throw new Error('Не удалось восстановить предметы на земле');
+    }
     this.inventory.restore(this.journal.records());
     const mined = head.mined || {};
     let moved = 0;
@@ -358,7 +420,11 @@ export class SaveGame {
     }
     const p = head.player || {};
     // Старые заголовки знали полено в руках, но ещё не писали его как ITEM.
-    if (p.carry && this.inventory.count('log') === 0) moved += this.inventory.add('log', 1);
+    const carryKind = p.carry ? (p.carryKind || 'log') : null;
+    if (p.carry && carryKind === 'log' && this.inventory.count('log') === 0) moved += this.inventory.add('log', 1);
+    this.player.carryKind = carryKind && carryKind !== 'torch' && this.inventory.count(carryKind) > 0 ? carryKind : null;
+    this._pendingHearth = { state: head.hearth || createHearthState().snapshot(), away: head.hearth ? away : 0 };
+    if (this.hearth) this.attachHearth(this.hearth);
     this.mined = { soil: 0, stone: 0, ore: 0 };
     head.mined = { ...this.mined };
     if (moved) {
@@ -379,6 +445,13 @@ export class SaveGame {
       this._replayDigs(fill);
       this.journal.mode = 'replay';
     }
+    // Foundations must see the restored excavation, not the untouched terrain.
+    // A malformed or unsupported structure must not be silently replaced by
+    // an empty one and then overwritten by autosave.
+    if (this.homestead && this.homestead.restore(head.homestead || { version: 1, pieces: [] }) === false) {
+      throw new Error('Не удалось восстановить постройку');
+    }
+    this.yard?.restore(head.resources || []);
     // Кэш переписывается ближайшим автосейвом: seq заголовка уже наш, а правки
     // после осадки ям отличаются от лежащих в хранилище.
     this._fpCache = null;
@@ -403,23 +476,33 @@ export class SaveGame {
     // лопата стоит там, где её оставили (или снова в руках)
     if (this.shovel && tools.shovel) {
       this.shovel.place(tools.shovel.x, tools.shovel.y, tools.shovel.z, tools.shovel.yaw || 0);
-      if (tools.shovel.held) this.shovel.take();
+      if (tools.shovel.held && !this.player.carryKind) this.shovel.take();
     }
     // топор стоит там, где его оставили (или снова в руках)
     if (this.axe && tools.axe) {
       this.axe.place(tools.axe.x, tools.axe.y, tools.axe.z, tools.axe.yaw || 0);
-      if (tools.axe.held) this.axe.take();
+      if (tools.axe.held && !this.player.carryKind && !this.shovel?.held) this.axe.take();
     }
     // кирка сохраняет и место в мире, и состояние в руке
     if (this.pickaxe && tools.pickaxe) {
       this.pickaxe.place(tools.pickaxe.x, tools.pickaxe.y, tools.pickaxe.z, tools.pickaxe.yaw || 0);
-      if (tools.pickaxe.held) this.pickaxe.take();
+      if (tools.pickaxe.held && !this.player.carryKind && ![this.shovel, this.axe].some(tool => tool?.held)) this.pickaxe.take();
     }
     if (this.hammer && tools.hammer) {
       this.hammer.place(tools.hammer.x, tools.hammer.y, tools.hammer.z, tools.hammer.yaw || 0);
-      if (tools.hammer.held) this.hammer.take();
+      if (tools.hammer.held && !this.player.carryKind && ![this.shovel, this.axe, this.pickaxe].some(tool => tool?.held)) this.hammer.take();
     }
-    if (this.torch) this.torch.restore(placedItemsFrom(this.journal.records(), 'torch'));
+    if (this.torch) {
+      this.torch.restore(placedItemsFrom(this.journal.records(), 'torch'));
+      const restored = this.torch.restoreState?.(head.torchState, {
+        elapsedSeconds: away, legacyHeld: !!tools.torch?.held,
+      });
+      if (head.torchState && restored === false) throw new Error('Не удалось восстановить состояние факелов');
+      if (tools.torch?.held && this.inventory.count('torch') > 0 && !this.player.carryKind &&
+        ![this.shovel, this.axe, this.pickaxe, this.hammer].some((tool) => tool?.held)) {
+        if (!this.torch.held) this.torch.take();
+      }
+    }
     // штабель поленницы — сколько было, столько и лежит
     if (this.woodpile && typeof head.pile === 'number') {
       this.woodpile.count = Math.min(head.pile, this.woodpile.capacity);
@@ -430,26 +513,18 @@ export class SaveGame {
     if (head.forestV === FOREST_V) this._forest = forestFrom(this.journal.records(), worldNow);
     // брошенные поленья лежат, где их бросили; недонесённое — снова в руках
     if (this.logs && Array.isArray(head.logs)) this.logs.restore(head.logs);
-    if (p.carry) this.player.carrying = true;
+    this.player.carrying = !!this.player.carryKind;
     return moved;
   }
 
   // Перенос счётчиков и их обнуление ложатся одной транзакцией, поэтому
   // повторная загрузка не сможет начислить старую добычу второй раз.
   async _persistMinedMigration(db, head, cache) {
-    const pending = this.journal.pending();
     try {
-      const tx = db.transaction([HEAD_STORE, JOURNAL_STORE, CACHE_STORE], 'readwrite');
-      tx.objectStore(HEAD_STORE).put(head, HEAD_KEY);
-      for (const [index, bytes] of pending) tx.objectStore(JOURNAL_STORE).put(bytes, index);
-      if (cache) tx.objectStore(CACHE_STORE).put(cache, CACHE_KEY);
-      await new Promise((resolve, reject) => {
-        tx.oncomplete = resolve;
-        tx.onerror = tx.onabort = () => reject(tx.error);
-      });
-      this.journal.flushed = this.journal.count;
+      await this._write({ head, cache, chunks: this.journal.pending(), count: this.journal.count }, this._saveGeneration);
     } catch (e) {
       console.warn('старая добыча перенесена только в памяти:', e);
+      this._saveError();
     }
   }
 
@@ -501,6 +576,7 @@ export class SaveGame {
     try {
       d = await idbReq(db.transaction(OLD_STORE).objectStore(OLD_STORE).get(OLD_KEY));
     } catch (e) {
+      this._readError();
       return null;
     }
     if (!d) return null;
@@ -532,26 +608,19 @@ export class SaveGame {
       };
       cache = { seq: head.seqHead, editsK: d.editsK, editsV: d.editsV, fp: d.fp || null };
     } catch (e) {
-      // запись прочиталась, но она не та — вот это и есть битый сейв
-      console.warn('старый сейв разобран не был, начинаем чистую ночь:', e);
-      try { await this._wipe(); } catch (e2) { /* ignore */ }
+      console.warn('старый сейв разобран не был:', e);
+      this._readError();
       return null;
     }
 
-    const pending = this.journal.pending();
     try {
-      const tx = db.transaction([HEAD_STORE, JOURNAL_STORE, CACHE_STORE, OLD_STORE], 'readwrite');
-      tx.objectStore(HEAD_STORE).put(head, HEAD_KEY);
-      for (const [index, bytes] of pending) tx.objectStore(JOURNAL_STORE).put(bytes, index);
-      tx.objectStore(CACHE_STORE).put(cache, CACHE_KEY);
-      tx.objectStore(OLD_STORE).delete(OLD_KEY); // перенос удался — старой записи больше нет
-      await new Promise((resolve, reject) => {
-        tx.oncomplete = resolve;
-        tx.onerror = tx.onabort = () => reject(tx.error);
-      });
-      this.journal.flushed = this.journal.count;
+      const saved = await this._write({
+        head, cache, chunks: this.journal.pending(), count: this.journal.count, migrate: true,
+      }, this._saveGeneration);
+      if (!saved) return null;
     } catch (e) {
       console.warn('перенос старой записи не удался:', e);
+      this._readError();
       return null;
     }
     // Записи уже лежат в журнале в памяти - перечитывать их из хранилища
@@ -562,10 +631,12 @@ export class SaveGame {
   // Фолбэк-среда без IndexedDB: заголовок, кэш и журнал в localStorage.
   _loadLS() {
     let raw;
-    try { raw = localStorage.getItem(LS_KEY3) || localStorage.getItem(LS_KEY); } catch (e) { return false; }
+    try { raw = localStorage.getItem(LS_KEY3) || localStorage.getItem(LS_KEY); }
+    catch (e) { this._readError(); return false; }
     if (!raw) return false;
     try {
       const d = JSON.parse(raw);
+      this._revision = revisionOf(d.v === 3 ? d.head : null);
       const head = d.v === 3 ? d.head : {
         v: 3,
         epoch: this.journal.epoch,
@@ -592,22 +663,18 @@ export class SaveGame {
       }
       if (d.journal) this.journal.adopt(0, unb64(d.journal));
       this.journal.epoch = head.epoch;
-      const moved = this._apply(head, {
+      this._apply(head, {
         seq: head.seqHead, editsK, editsV, editMatK, editMatV,
         fp: d.fp ? unb64(d.fp) : null,
       });
-      if (moved && d.v === 3) {
-        d.head = head;
-        d.journal = b64(this.journal.snapshot());
-        localStorage.setItem(LS_KEY3, JSON.stringify(d));
-      }
+      // Миграцию запишет ближайший сейв с проверкой версии, как и обычные изменения.
       // рубка старого формата: у неё нет журнала, применяем как лежала
       if (d.v !== 3 && Array.isArray(d.fells) && d.forestV === FOREST_V) {
         this._forest = { fells: d.fells, regrow: [] };
       }
       return true;
     } catch (e) {
-      try { localStorage.removeItem(LS_KEY); } catch (e2) { /* ignore */ }
+      this._readError();
       return false;
     }
   }
@@ -641,11 +708,16 @@ export class SaveGame {
       seqHead: this.journal.seqHead,
       forestV: FOREST_V,
       fuel: this.campfire.fuel,
-      player: { x: p.x, y: p.y, z: p.z, carry: this.player.carrying ? 1 : 0 },
-      tools: { shovel: null, axe: null, pickaxe: null, hammer: null },
+      player: { x: p.x, y: p.y, z: p.z, carry: this.player.carrying ? 1 : 0,
+        carryKind: this.player.carrying ? (this.player.carryKind || 'log') : null },
+      tools: { shovel: null, axe: null, pickaxe: null, hammer: null, torch: { held: this.torch?.held ? 1 : 0 } },
       logs: this.logs ? this.logs.serialize() : [],
       pile: this.woodpile ? this.woodpile.count : 0,
       mined: { ...this.mined },
+      resources: this.yard?.serialize() || [],
+      homestead: this.homestead?.serialize() || {version:1,pieces:[]},
+      hearth: this._hearthSnapshot(),
+      torchState: this.torch?.snapshot?.() || null,
     };
     if (this.axe) {
       const a = this.axe.pos;
@@ -666,54 +738,96 @@ export class SaveGame {
     // Кэш вокселей: он ровно того возраста, что и голова журнала, — по этому
     // совпадению загрузка и решает, верить ему или воспроизводить копки.
     const cache = { seq: head.seqHead, editsK, editsV, editMatK, editMatV, fp: this._fpCache };
-    return { head, cache, chunks: this.journal.pending(), count: this.journal.count };
+    return { head, cache, chunks: this.journal.pending(), count: this.journal.count,
+      journalBytes: this._db ? null : this.journal.snapshot() };
   }
 
   _write(data, generation) {
-    if (generation !== this._saveGeneration || this.disabled) return Promise.resolve(false);
+    const current = () => generation === this._saveGeneration && !this.disabled && !this.blocked;
+    if (!current()) return Promise.resolve(false);
+    // The fallback may wait for another tab's lock. Freeze ITEM/PLACE at the
+    // same moment as physical resources, never read the live journal later.
+    if (!this._db && !data.journalBytes) data.journalBytes = this.journal.snapshot();
+    data.head.revision = newRevision();
 
     const write = (db) => {
-      if (generation !== this._saveGeneration || this.disabled) return Promise.resolve(false);
+      if (!current()) return Promise.resolve(false);
       if (!db) {
-        this._saveLS(data);
-        return Promise.resolve(true);
+        // localStorage не имеет транзакций: проверка и запись выполняются
+        // под общим замком всех вкладок. Без замка безопаснее сообщить об ошибке.
+        const locks = globalThis.navigator?.locks;
+        if (!locks) return Promise.reject(new Error('Хранилище не поддерживает безопасную запись'));
+        return locks.request('snowfall-save', () => {
+          if (!current()) return false;
+          const raw = localStorage.getItem(LS_KEY3);
+          const head = raw ? JSON.parse(raw).head : null;
+          if (revisionOf(head) !== this._revision) { this._conflict(); return false; }
+          this._saveLS(data); // ошибка записи должна дойти до save(), а не стать успехом
+          this._revision = revisionOf(data.head);
+          this._status('ok');
+          return true;
+        });
       }
-      // Когда соединение уже открыто, транзакция создаётся синхронно. Это
-      // важно для pagehide: до первого await браузер успевает принять запись.
-      const tx = db.transaction([HEAD_STORE, JOURNAL_STORE, CACHE_STORE], 'readwrite');
-      tx.objectStore(HEAD_STORE).put(data.head, HEAD_KEY);
-      tx.objectStore(CACHE_STORE).put(data.cache, CACHE_KEY);
-      const j = tx.objectStore(JOURNAL_STORE);
-      for (const [index, bytes] of data.chunks) j.put(bytes, index);
+      // При открытом соединении транзакция создаётся синхронно, но puts
+      // зависят от read.onsuccess. Поэтому pagehide — лишь best effort:
+      // закрытие страницы может оборвать выполнение до постановки записи.
+      const stores = [HEAD_STORE, JOURNAL_STORE, CACHE_STORE];
+      if (data.migrate) stores.push(OLD_STORE);
+      const tx = db.transaction(stores, 'readwrite');
+      const header = tx.objectStore(HEAD_STORE);
+      const read = header.get(HEAD_KEY);
       return new Promise((resolve, reject) => {
+        let cancelled = false;
+        read.onsuccess = () => {
+          if (!current()) { cancelled = true; tx.abort(); return; }
+          if (revisionOf(read.result) !== this._revision) {
+            cancelled = true;
+            tx.abort();
+            this._conflict();
+            return;
+          }
+          try {
+            header.put(data.head, HEAD_KEY);
+            if (data.cache) tx.objectStore(CACHE_STORE).put(data.cache, CACHE_KEY);
+            const j = tx.objectStore(JOURNAL_STORE);
+            for (const [index, bytes] of data.chunks) j.put(bytes, index);
+            if (data.migrate) tx.objectStore(OLD_STORE).delete(OLD_KEY);
+          } catch (e) { tx.abort(); reject(e); }
+        };
         tx.oncomplete = () => {
           // хвост журнала лёг в хранилище — следующий автосейв начнёт с него
           if (data.count > this.journal.flushed) this.journal.flushed = data.count;
+          this._revision = revisionOf(data.head);
+          if (!this.blocked) this._status('ok');
           resolve(true);
         };
         tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error);
+        tx.onabort = () => cancelled ? resolve(false) : reject(tx.error);
       });
     };
 
     return this._db ? write(this._db) : this._open().then(write);
   }
 
-  // sync: путь pagehide/скрытой вкладки. Состояние снимается и транзакция
-  // начинается без предварительного await. Номер поколения не даёт старому
+  // sync: завершённые действия и попытка сохранения при скрытии/выходе.
+  // Состояние снимается с кэшем следов без предварительного await, однако
+  // долговечность записи подтверждает только завершение её Promise.
+  // Номер поколения не даёт старому
   // async snapshot перезаписать более свежую запись после возвращения GPU.
   save({ sync = false } = {}) {
-    if (this.disabled) return Promise.resolve(false);
+    if (this.disabled || this.blocked) return Promise.resolve(false);
     // Обычный таймер не должен инвалидировать уже запущенную запись: он
-    // просто дожидается её. Синхронный pagehide-снимок, напротив, получает
+    // просто дожидается её. Синхронный снимок действия/выхода получает
     // новое поколение и не даёт старому async-снапшоту записаться поверх.
     if (!sync && this._saving) return this._savingPromise;
 
     const generation = ++this._saveGeneration;
 
     if (sync) {
-      if (!this._fpCache) this._fpCache = rle(this.footprints.snapshot());
-      return this._write(this._collect(), generation).catch(() => false);
+      try {
+        if (!this._fpCache) this._fpCache = rle(this.footprints.snapshot());
+        return this._write(this._collect(), generation).catch(() => this._saveError());
+      } catch (e) { return Promise.resolve(this._saveError()); }
     }
     this._saving = true;
     this._savingPromise = this._saveAsync(generation);
@@ -731,8 +845,7 @@ export class SaveGame {
       const data = this._collect();
       return await this._write(data, generation);
     } catch (e) {
-      // квота/приватный режим: игра живёт дальше без памяти
-      return false;
+      return this._saveError();
     } finally {
       this._saving = false;
     }
@@ -748,16 +861,14 @@ export class SaveGame {
     for (let i = 0; i < d.cache.editMatK.length; i++) {
       editMaterials[i] = [d.cache.editMatK[i], d.cache.editMatV[i]];
     }
-    try {
-      localStorage.setItem(LS_KEY3, JSON.stringify({
+    localStorage.setItem(LS_KEY3, JSON.stringify({
         v: 3,
         head: d.head,
         edits,
         editMaterials,
-        journal: b64(this.journal.snapshot()),
+        journal: b64(d.journalBytes),
         fp: d.cache.fp ? b64(d.cache.fp) : undefined,
-      }));
-    } catch (e) { /* квота — живём без памяти */ }
+    }));
   }
 
   /**
@@ -801,6 +912,7 @@ export class SaveGame {
   // стереть память мира и начать ночь заново (кнопка в меню). Автосейв
   // глушится: иначе pagehide перед перезагрузкой записал бы мир обратно.
   async reset() {
+    if (this.blocked) return false;
     this.disabled = true;
     this._saveGeneration++;
     try { await this._savingPromise; } catch (e) { /* старый сейв уже не важен */ }
